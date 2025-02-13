@@ -1,17 +1,16 @@
-
 CXX=$(shell sst-config --CXX)
 CXXFLAGS=$(shell sst-config --ELEMENT_CXXFLAGS)
 LDFLAGS=$(shell sst-config --ELEMENT_LDFLAGS)
 
-all: libsimpleExternalElement.so install
+all: libsatsolver.so install
 
-libsimpleExternalElement.so: simpleExternalElement.cc
+libsatsolver.so: satsolver.cc
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $<
 
 install:
-	sst-register simpleExternalElement simpleExternalElement_LIBDIR=$(CURDIR)
-	sst-register SST_ELEMENT_SOURCE simpleExternalElement=$(CURDIR)
-	sst-register SST_ELEMENT_TESTS  simpleExternalElement=$(CURDIR)/../tests
+	sst-register satsolver satsolver_LIBDIR=$(CURDIR)
+	sst-register SST_ELEMENT_SOURCE satsolver=$(CURDIR)
+	sst-register SST_ELEMENT_TESTS satsolver=$(CURDIR)/../tests
 
 clean:
-	rm -f *.o libsimpleExternalElement.so
+	rm -f *.o libsatsolver.so
