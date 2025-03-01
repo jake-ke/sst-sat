@@ -10,15 +10,48 @@
 
 enum State { INIT, PARSING, SOLVING, DONE };
 
+// Define types for variables and literals
+typedef int Var;
+const Var var_Undef = -1;
+
+struct Lit {
+    int x;
+    
+    bool operator == (const Lit& other) const { return x == other.x; }
+    bool operator != (const Lit& other) const { return x != other.x; }
+    bool operator <  (const Lit& other) const { return x < other.x; }
+};
+
+// Helper functions for literals
+inline Lit mkLit(Var var, bool sign = false) { Lit p; p.x = var + var + (int)sign; return p; }
+inline Lit operator ~(Lit p) { Lit q; q.x = p.x ^ 1; return q; }
+inline bool sign(Lit p) { return p.x & 1; }
+inline int var(Lit p) { return p.x >> 1; }
+inline Lit toLit(int dimacs_lit) { 
+    int var = abs(dimacs_lit);
+    return dimacs_lit > 0 ? mkLit(var, false) : mkLit(var, true);
+}
+inline int toInt(Lit p) { return sign(p) ? -var(p) : var(p); }
+
+const Lit lit_Undef = { -2 }; // Special undefined literal
+
 struct Clause {
-    std::vector<int> literals;
-    bool satisfied;
+    std::vector<Lit> literals;
 };
 
 struct Variable {
     bool assigned;
     bool value;
     size_t level;  // Add level tracking to know when variable was assigned
+};
+
+// Watcher structure for 2WL scheme
+struct Watcher {
+    size_t clause_idx;  // Index of the clause in the clauses vector
+    Lit blocker;        // Blocker literal (optimization to avoid accessing clause memory)
+    
+    Watcher() : clause_idx(0), blocker(lit_Undef) {} // Default constructor
+    Watcher(size_t ci, Lit b) : clause_idx(ci), blocker(b) {}
 };
 
 class SATSolver : public SST::Component {
@@ -78,10 +111,13 @@ private:
     
     // SAT solver state
     std::vector<Clause> clauses;
-    std::map<int, Variable> variables;
-    std::vector<int> decision_stack;
-    std::vector<int> propagationQueue;  // Queue of literals to propagate
+    std::vector<Variable> variables;  // Indexed by variable number
+    std::vector<Lit> decision_stack;
+    std::vector<Lit> propagationQueue;  // Queue of literals to propagate
 
+    // Two Watched Literals implementation
+    std::vector<std::vector<Watcher>> watches;  // Indexed by literal encoding
+    
     Statistic<uint64_t>* stat_decisions;
     Statistic<uint64_t>* stat_propagations;
     Statistic<uint64_t>* stat_backtracks;
@@ -93,13 +129,20 @@ private:
     bool backtrack();
     
     // Utility functions for DPLL
-    void addToPropagationQueue(int literal);
+    void addToPropagationQueue(Lit literal);
     bool isSatisfied();
-    void assignVariable(int literal);
-    void unassignVariable(int var);
-    int chooseBranchVariable();
+    void assignVariable(Lit literal);
+    void unassignVariable(Var var);
+    Var chooseBranchVariable();
     bool checkClauseSatisfied(const Clause& clause);
     void updateAllClauseStatus();
+    
+    // Two Watched Literals helper functions
+    void attachClause(size_t clause_idx);
+    void detachClause(size_t clause_idx);
+    inline int toWatchIndex(Lit p) { return p.x; }
+    void ensureWatchSizeForLiteral(Lit p);
+    void ensureVarCapacity(Var v);
 };
 
 #endif // SATSOLVER_H
