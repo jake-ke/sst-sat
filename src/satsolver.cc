@@ -38,8 +38,6 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_backtracks = registerStatistic<uint64_t>("backtracks");
     stat_assigned_vars = registerStatistic<uint64_t>("assigned_vars");
     
-    // Initialize counters
-
     // Component should not end simulation until solution is found
     registerAsPrimaryComponent();
     primaryComponentDoNotEndSim();
@@ -124,20 +122,6 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
     return false;
 }
 
-// Helper functions for vector-based watches
-void SATSolver::ensureWatchSizeForLiteral(Lit p) {
-    int idx = toWatchIndex(p);
-    if (idx >= (int)watches.size()) {
-        watches.resize(idx + 1);
-    }
-}
-
-void SATSolver::ensureVarCapacity(Var v) {
-    if (v >= (int)variables.size()) {
-        variables.resize(v + 1, {false, false, 0});
-    }
-}
-
 void SATSolver::parseDIMACS(const std::string& content) {
     output.output("Starting DIMACS parsing\n");
     std::istringstream iss(content);
@@ -147,7 +131,7 @@ void SATSolver::parseDIMACS(const std::string& content) {
     num_clauses = 0;
     clauses.clear();
     variables.clear();
-    watches.clear(); // Clear watches when parsing a new problem
+    watches.clear();
     
     while (std::getline(iss, line)) {
         // Skip empty lines
@@ -246,12 +230,8 @@ void SATSolver::attachClause(size_t clause_idx) {
         // Watch the first two literals in the clause
         Lit not_lit0 = ~c.literals[0];
         Lit not_lit1 = ~c.literals[1];
-        
-        ensureWatchSizeForLiteral(not_lit0);
-        ensureWatchSizeForLiteral(not_lit1);
-        
-        watches[toWatchIndex(not_lit0)].push_back(Watcher(clause_idx, c.literals[1]));
-        watches[toWatchIndex(not_lit1)].push_back(Watcher(clause_idx, c.literals[0]));
+        insert_watch(not_lit0, Watcher(clause_idx, c.literals[1]));
+        insert_watch(not_lit1, Watcher(clause_idx, c.literals[0]));
     } else if (c.literals.size() == 1) {
         // Unit clause - immediately add to propagation queue
         addToPropagationQueue(c.literals[0]);
@@ -375,8 +355,7 @@ bool SATSolver::unitPropagate() {
                 if (!variables[lit_var].assigned || variables[lit_var].value == !sign(lit)) {
                     // Swap to position 1 and update watcher
                     std::swap(c.literals[1], c.literals[k]);
-                    ensureWatchSizeForLiteral(~c.literals[1]);
-                    watches[toWatchIndex(~c.literals[1])].push_back(w);
+                    insert_watch(~c.literals[1], w);
                     output.verbose(CALL_INFO, 4, 0, "    Found new watch: literal %d at position %zu\n", 
                         toInt(c.literals[1]), k);
                     goto NextClause;
@@ -527,4 +506,18 @@ int SATSolver::chooseBranchVariable() {
         }
     }
     return 0; // No unassigned variables
+}
+
+void SATSolver::insert_watch(Lit p, Watcher w) {
+    int idx = toWatchIndex(p);
+    if (idx >= (int)watches.size()) {
+        watches.resize(idx + 1);
+    }
+    watches[idx].push_back(w);
+}
+
+void SATSolver::ensureVarCapacity(Var v) {
+    if (v >= (int)variables.size()) {
+        variables.resize(v + 1, {false, false, 0});
+    }
 }

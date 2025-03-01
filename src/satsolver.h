@@ -141,7 +141,7 @@ private:
     void attachClause(size_t clause_idx);
     void detachClause(size_t clause_idx);
     inline int toWatchIndex(Lit p) { return p.x; }
-    void ensureWatchSizeForLiteral(Lit p);
+    void insert_watch(Lit p, Watcher w);
     void ensureVarCapacity(Var v);
 };
 
