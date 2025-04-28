@@ -166,6 +166,7 @@ public:
     // Utility Functions
     double drand(uint64_t& seed);                  // Random number generator
     int irand(uint64_t& seed, int size);           // Integer random in range [0,size-1]
+    uint64_t getStatCount(Statistic<uint64_t>* stat);
 
 private:
     // State Variables

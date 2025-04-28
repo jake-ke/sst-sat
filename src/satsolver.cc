@@ -1,6 +1,7 @@
 #include <sst/core/sst_config.h> // This include is REQUIRED for all implementation files
 #include "satsolver.h"
 #include <sst/core/interfaces/stdMem.h>
+#include "sst/core/statapi/stataccumulator.h"
 
 //-----------------------------------------------------------------------------------
 // Component Lifecycle Methods
@@ -88,18 +89,17 @@ void SATSolver::complete(unsigned int phase) {
 void SATSolver::finish() {
     memory->finish();
     
-    performGlobalStatisticOutput();
-    // // Print solver statistics
-    // output.output("============================[ Solver Statistics ]============================\n");
-    // output.output("Decisions    : %lu\n", stat_decisions->getData());
-    // output.output("Propagations : %lu\n", stat_propagations);
-    // output.output("Conflicts    : %lu\n", stat_conflicts);
-    // output.output("Backtracks   : %lu\n", stat_backtracks);
-    // output.output("Variables    : %zu (Total), %lu (Assigned)\n", 
-    //     variables.size() - 1, stat_assigned_vars);
-    // output.output("Clauses      : %zu (Total), %zu (Learned)\n", 
-    //     clauses.size(), 0); // TODO: Count learned clauses separately
-    // output.output("===========================================================================\n");
+    // Print solver statistics
+    output.output("============================[ Solver Statistics ]============================\n");
+    output.output("Decisions    : %lu\n", getStatCount(stat_decisions));
+    output.output("Propagations : %lu\n", getStatCount(stat_propagations));
+    output.output("Conflicts    : %lu\n", getStatCount(stat_conflicts));
+    output.output("Backtracks   : %lu\n", getStatCount(stat_backtracks));
+    output.output("Variables    : %zu (Total), %lu (Assigned)\n", 
+        variables.size() - 1, getStatCount(stat_assigned_vars));
+    output.output("Clauses      : %zu (Total), %u (Learned)\n", 
+        clauses.size(), 0); // TODO: Count learned clauses separately
+    output.output("===========================================================================\n");
 }
 
 //-----------------------------------------------------------------------------------
@@ -721,4 +721,12 @@ double SATSolver::drand(uint64_t& seed) {
 
 int SATSolver::irand(uint64_t& seed, int size) {
     return (int)(drand(seed) * size);
+}
+
+uint64_t SATSolver::getStatCount(Statistic<uint64_t>* stat) {
+    AccumulatorStatistic<uint64_t>* accum = dynamic_cast<AccumulatorStatistic<uint64_t>*>(stat);
+    if (accum) {
+        return accum->getCount();
+    }
+    return 0; // Return 0 if the cast fails
 }
