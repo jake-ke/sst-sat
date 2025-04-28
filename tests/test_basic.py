@@ -66,9 +66,10 @@ sst.setStatisticLoadLevel(7)
 sst.enableStatisticsForComponentName("solver", [
     "decisions",
     "propagations", 
-    "backtracks",
-    "assigned_vars",
-    "conflicts"
+    "assigns",
+    "unassigns",
+    "conflicts",
+    "learned"
 ], {
     "type": "sst.AccumulatorStatistic",
     "rate": "1ns"

@@ -210,9 +210,10 @@ private:
     // Statistics
     Statistic<uint64_t>* stat_decisions;
     Statistic<uint64_t>* stat_propagations;
-    Statistic<uint64_t>* stat_backtracks;
-    Statistic<uint64_t>* stat_assigned_vars;
+    Statistic<uint64_t>* stat_assigns;
+    Statistic<uint64_t>* stat_unassigns;
     Statistic<uint64_t>* stat_conflicts;
+    Statistic<uint64_t>* stat_learned;
 };
 
 #endif // SATSOLVER_H
