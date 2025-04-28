@@ -9,6 +9,10 @@
 #include <string>
 #include "heap.h"  // Include the heap class
 
+//-----------------------------------------------------------------------------------
+// Type Definitions and Constants
+//-----------------------------------------------------------------------------------
+
 enum State { INIT, PARSING, SOLVING, DONE };
 
 // Define types for variables and literals
@@ -38,6 +42,10 @@ inline Lit toLit(int dimacs_lit) {
 inline int toInt(Lit p) { return sign(p) ? -var(p) : var(p); }
 
 const Lit lit_Undef = { 0 }; // Special undefined literal
+
+//-----------------------------------------------------------------------------------
+// Data Structures
+//-----------------------------------------------------------------------------------
 
 struct Clause {
     std::vector<Lit> literals;
@@ -78,9 +86,14 @@ struct VarOrderLt {
     }
 };
 
+//-----------------------------------------------------------------------------------
+// Component Class
+//-----------------------------------------------------------------------------------
+
 class SATSolver : public SST::Component {
 
 public:
+    // SST ELI Registrations
     SST_ELI_REGISTER_COMPONENT(
         SATSolver,
         "satsolver",
@@ -110,6 +123,7 @@ public:
         {"mem_link", "Connection to HBM", {"memHierarchy.MemEventBase"}}
     )
 
+    // Component Lifecycle Methods
     SATSolver(SST::ComponentId_t id, SST::Params& params);
     ~SATSolver();
 
@@ -118,12 +132,43 @@ public:
     virtual void complete(unsigned int phase) override;
     virtual void finish() override;
 
+    // Event Handling Methods
     bool clockTick(SST::Cycle_t currentCycle);
     void handleMemEvent(SST::Interfaces::StandardMem::Request* req);
+    
+    // Input Processing
     void parseDIMACS(const std::string& content);
+    
+    // Core CDCL Algorithm
     bool solveCDCL();  // Renamed from solveDPLL to solveCDCL
+    bool decide();
+    int unitPropagate();  // returns conflict clause index or ClauseRef_Undef if no conflict
+    void analyze(int conflict, std::vector<Lit>& learnt_clause, int& backtrack_level);
+    void backtrack(int backtrack_level);
+    
+    // Trail Management
+    void trailEnqueue(Lit literal, int reason = ClauseRef_Undef);
+    void unassignVariable(Var var);
+    int current_level() { return trail_lim.size(); }  // Changed to use trail_lim
+    
+    // Clause Management
+    void attachClause(int clause_idx);
+    void insert_watch(Lit p, Watcher w);
+    inline int toWatchIndex(Lit p) { return p.x; }
+    void ensureVarCapacity(Var v);
+    
+    // Decision Heuristics
+    Lit chooseBranchVariable();
+    void insertVarOrder(Var v);                    // Insert variable into order heap
+    void varDecayActivity();                       // Decay all variable activities
+    void varBumpActivity(Var v);                   // Bump a variable's activity
+    
+    // Utility Functions
+    double drand(uint64_t& seed);                  // Random number generator
+    int irand(uint64_t& seed, int size);           // Integer random in range [0,size-1]
 
 private:
+    // State Variables
     State state;
     SST::Output output;
     SST::Interfaces::StandardMem* memory;
@@ -161,36 +206,12 @@ private:
     double random_var_freq;           // Frequency of random decisions
     uint64_t random_seed;             // Seed for random number generation
     
+    // Statistics
     Statistic<uint64_t>* stat_decisions;
     Statistic<uint64_t>* stat_propagations;
     Statistic<uint64_t>* stat_backtracks;
     Statistic<uint64_t>* stat_assigned_vars;
     Statistic<uint64_t>* stat_conflicts;
-
-    // CDCL helper functions
-    int unitPropagate();  // returns conflict clause index or ClauseRef_Undef if no conflict
-    bool decide();
-    void backtrack(int backtrack_level);
-    void analyze(int conflict, std::vector<Lit>& learnt_clause, int& backtrack_level);
-    
-    // Utility functions for CDCL
-    void trailEnqueue(Lit literal, int reason = ClauseRef_Undef);
-    void unassignVariable(Var var);
-    Lit chooseBranchVariable();
-    int current_level() { return trail_lim.size(); }  // Changed to use trail_lim
-    
-    // Activity-based decision heuristics
-    void varDecayActivity();                       // Decay all variable activities
-    void varBumpActivity(Var v);                   // Bump a variable's activity
-    void insertVarOrder(Var v);                    // Insert variable into order heap
-    double drand(uint64_t& seed);                  // Random number generator
-    int irand(uint64_t& seed, int size);           // Integer random in range [0,size-1]
-
-    // Two Watched Literals helper functions
-    inline int toWatchIndex(Lit p) { return p.x; }
-    void attachClause(int clause_idx);
-    void insert_watch(Lit p, Watcher w);
-    void ensureVarCapacity(Var v);
 };
 
 #endif // SATSOLVER_H

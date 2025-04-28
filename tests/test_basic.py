@@ -59,8 +59,6 @@ memory.addParams({
 link = sst.Link("mem_link")
 link.connect((iface, "lowlink", "1ns"), (memctrl, "highlink", "1ns"))
 
-print(f"CNF content ({len(cnf_content)} bytes)")
-
 # Enable statistics - different types for different stats
 sst.setStatisticLoadLevel(7)
 
