@@ -343,11 +343,13 @@ bool SATSolver::solveCDCL() {
 
     // Make a new decision
     if (!decide()) {
-        output.output("SAT: Formula is satisfiable\nSolution: ");
-        for (Var v = 1; v < (Var)variables.size(); v++) {
-            output.output("x%d=%d ", v, variables[v].value ? 1 : 0);
+        output.output("SAT: Formula is satisfiable\n");
+        if (output.getVerboseLevel() >= 3) {
+            for (Var v = 1; v < (Var)variables.size(); v++) {
+                output.output("x%d=%d ", v, variables[v].value ? 1 : 0);
+            }
+            output.output("\n");
         }
-        output.output("\n");
         primaryComponentOKToEndSim();
         return true;
     }

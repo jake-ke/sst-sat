@@ -72,7 +72,7 @@ sst.enableStatisticsForComponentName("solver", [
     "learned"
 ], {
     "type": "sst.AccumulatorStatistic",
-    "rate": "1ns"
+    "rate": "100ns"
 })
 
 sst.setStatisticOutput("sst.statOutputCSV", 
