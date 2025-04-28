@@ -24,7 +24,7 @@ solver = sst.Component("solver", "satsolver.SATSolver")
 file_size = os.path.getsize(cnf_path)
 solver.addParams({
     "clock" : "1GHz",
-    "verbose" : "2",
+    "verbose" : "1",
     "filesize" : str(file_size)  # Add file size parameter
 })
 
@@ -69,7 +69,8 @@ sst.enableStatisticsForComponentName("solver", [
     "decisions",
     "propagations", 
     "backtracks",
-    "assigned_vars"
+    "assigned_vars",
+    "conflicts"
 ], {
     "type": "sst.AccumulatorStatistic",
     "rate": "1ns"

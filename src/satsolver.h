@@ -7,6 +7,7 @@
 #include <map>
 #include <vector>
 #include <string>
+#include "heap.h"  // Include the heap class
 
 enum State { INIT, PARSING, SOLVING, DONE };
 
@@ -66,6 +67,17 @@ struct Watcher {
     Watcher(int ci, Lit b) : clause_idx(ci), blocker(b) {}
 };
 
+// Comparator for the variable activity heap
+struct VarOrderLt {
+    const std::vector<double>& activity;
+    
+    VarOrderLt(const std::vector<double>& act) : activity(act) {}
+    
+    bool operator()(int x, int y) const {
+        return activity[x] > activity[y];  // Higher activity first
+    }
+};
+
 class SATSolver : public SST::Component {
 
 public:
@@ -81,14 +93,17 @@ public:
     SST_ELI_DOCUMENT_PARAMS(
         {"clock", "Clock frequency", "1GHz"},
         {"verbose", "Verbosity level", "0"},
-        {"filesize", "Size of CNF file to read", "0"}
+        {"filesize", "Size of CNF file to read", "0"},
+        {"var_decay", "Variable activity decay factor", "0.95"},
+        {"random_var_freq", "Frequency of random decisions", "0.02"}
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
         {"decisions", "Number of decisions made", "count", 1},
         {"propagations", "Number of propagations", "count", 1},
         {"backtracks", "Number of backtracks", "count", 1},
-        {"assigned_vars", "Current number of assigned variables", "count", 1}
+        {"assigned_vars", "Current number of assigned variables", "count", 1},
+        {"conflicts", "Number of conflicts", "count", 1}
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -136,10 +151,21 @@ private:
     // Two Watched Literals implementation
     std::vector<std::vector<Watcher>> watches;  // Indexed by literal encoding
     
+    // Variable activity for VSIDS
+    std::vector<double> activity;     // Activity score for each variable
+    std::vector<bool> polarity;       // Saved phase (polarity) for each variable
+    std::vector<bool> decision;       // Whether variable is eligible for decisions
+    Heap<Var, VarOrderLt> order_heap; // Heap of variables ordered by activity
+    double var_inc;                   // Amount to bump variable activity by
+    double var_decay;                 // Variable activity decay factor
+    double random_var_freq;           // Frequency of random decisions
+    uint64_t random_seed;             // Seed for random number generation
+    
     Statistic<uint64_t>* stat_decisions;
     Statistic<uint64_t>* stat_propagations;
     Statistic<uint64_t>* stat_backtracks;
     Statistic<uint64_t>* stat_assigned_vars;
+    Statistic<uint64_t>* stat_conflicts;
 
     // CDCL helper functions
     int unitPropagate();  // returns conflict clause index or ClauseRef_Undef if no conflict
@@ -150,9 +176,16 @@ private:
     // Utility functions for CDCL
     void trailEnqueue(Lit literal, int reason = ClauseRef_Undef);
     void unassignVariable(Var var);
-    Var chooseBranchVariable();
+    Lit chooseBranchVariable();
     int current_level() { return trail_lim.size(); }  // Changed to use trail_lim
     
+    // Activity-based decision heuristics
+    void varDecayActivity();                       // Decay all variable activities
+    void varBumpActivity(Var v);                   // Bump a variable's activity
+    void insertVarOrder(Var v);                    // Insert variable into order heap
+    double drand(uint64_t& seed);                  // Random number generator
+    int irand(uint64_t& seed, int size);           // Integer random in range [0,size-1]
+
     // Two Watched Literals helper functions
     inline int toWatchIndex(Lit p) { return p.x; }
     void attachClause(int clause_idx);

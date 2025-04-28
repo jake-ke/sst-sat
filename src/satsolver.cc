@@ -5,6 +5,9 @@
 SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     SST::Component(id), 
     state(INIT),
+    order_heap(VarOrderLt(activity)),
+    random_seed(91648253),
+    var_inc(1.0),
     requestPending(false) {
     
     // Initialize output
@@ -17,6 +20,10 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     registerClock(params.find<std::string>("clock", "1GHz"),
                  new SST::Clock::Handler<SATSolver>(this, &SATSolver::clockTick));
 
+    // Initialize activity-related variables
+    var_decay = params.find<double>("var_decay", 0.95);
+    random_var_freq = params.find<double>("random_var_freq", 0.02);
+    
     // Configure StandardMem interface
     SST::Interfaces::StandardMem::Handler<SATSolver>* handler = 
         new SST::Interfaces::StandardMem::Handler<SATSolver>(this, &SATSolver::handleMemEvent);
@@ -37,6 +44,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_propagations = registerStatistic<uint64_t>("propagations");
     stat_backtracks = registerStatistic<uint64_t>("backtracks");
     stat_assigned_vars = registerStatistic<uint64_t>("assigned_vars");
+    stat_conflicts = registerStatistic<uint64_t>("conflicts");
     
     // Component should not end simulation until solution is found
     registerAsPrimaryComponent();
@@ -76,6 +84,19 @@ void SATSolver::complete(unsigned int phase) {
 
 void SATSolver::finish() {
     memory->finish();
+    
+    performGlobalStatisticOutput();
+    // // Print solver statistics
+    // output.output("============================[ Solver Statistics ]============================\n");
+    // output.output("Decisions    : %lu\n", stat_decisions->getData());
+    // output.output("Propagations : %lu\n", stat_propagations);
+    // output.output("Conflicts    : %lu\n", stat_conflicts);
+    // output.output("Backtracks   : %lu\n", stat_backtracks);
+    // output.output("Variables    : %zu (Total), %lu (Assigned)\n", 
+    //     variables.size() - 1, stat_assigned_vars);
+    // output.output("Clauses      : %zu (Total), %zu (Learned)\n", 
+    //     clauses.size(), 0); // TODO: Count learned clauses separately
+    // output.output("===========================================================================\n");
 }
 
 void SATSolver::handleMemEvent(SST::Interfaces::StandardMem::Request* req) {
@@ -110,7 +131,7 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
             return false;
             
         case SOLVING:
-            if (solveCDCL()) {  // Changed from solveDPLL to solveCDCL
+            if (solveCDCL()) {
                 output.verbose(CALL_INFO, 1, 0, "Solver Done\n");
                 state = DONE;
             }
@@ -132,6 +153,9 @@ void SATSolver::parseDIMACS(const std::string& content) {
     clauses.clear();
     variables.clear();
     watches.clear();
+    activity.clear();
+    polarity.clear();
+    decision.clear();
     
     while (std::getline(iss, line)) {
         // Skip empty lines
@@ -171,8 +195,16 @@ void SATSolver::parseDIMACS(const std::string& content) {
                     ensureVarCapacity(v);
                 }
                 
-                if (!clause.literals.empty()) {
+                assert (!clause.literals.empty());
+                if (clause.literals.size() == 1) {
+                    // Unit clause
+                    trailEnqueue(clause.literals[0]);
+                    num_clauses--;
+                    output.verbose(CALL_INFO, 3, 0, "Unit clause: %d\n", toInt(clause.literals[0]));
+                } else {
                     clauses.push_back(clause);
+
+                    // debugging outputs
                     std::ostringstream clause_output;
                     clause_output << "Added clause " << clauses.size() - 1 << ":";
                     for (const Lit& lit : clause.literals) {
@@ -199,6 +231,18 @@ void SATSolver::parseDIMACS(const std::string& content) {
     output.output("Successfully parsed %zu clauses with %zu variables\n", 
         clauses.size(), variables.size());
     
+    // initialization
+    qhead = 0;
+    seen.resize(variables.size(), 0);
+    activity.resize(variables.size(), 0.0);
+    polarity.resize(variables.size(), false); // Default phase is false
+    decision.resize(variables.size(), true);  // All variables are decision variables
+    
+    // Insert variables into the heap
+    for (Var v = 1; v < (Var)variables.size(); v++) {
+        insertVarOrder(v);
+    }
+    
     // Setup watched literals for all clauses
     for (int i = 0; i < clauses.size(); i++) {
         attachClause(i);
@@ -221,31 +265,6 @@ void SATSolver::parseDIMACS(const std::string& content) {
             }
         }
         output.output("\n");
-    }
-
-    // initialization
-    qhead = 0;
-    seen.resize(variables.size(), 0);
-}
-
-void SATSolver::attachClause(int clause_idx) {
-    Clause& c = clauses[clause_idx];
-    if (c.literals.size() > 1) {
-        // Watch the first two literals in the clause
-        Lit not_lit0 = ~c.literals[0];
-        Lit not_lit1 = ~c.literals[1];
-        insert_watch(not_lit0, Watcher(clause_idx, c.literals[1]));
-        insert_watch(not_lit1, Watcher(clause_idx, c.literals[0]));
-    } else if (c.literals.size() == 1) {
-        // Unit clause - immediately assign the variable at level 0
-        Var v = var(c.literals[0]);
-        variables[v].assigned = true;
-        variables[v].value = !sign(c.literals[0]);
-        variables[v].level = 0;
-        variables[v].reason = ClauseRef_Undef;  // Changed from -1
-        stat_assigned_vars->addData(1);
-        output.verbose(CALL_INFO, 3, 0, "ASSIGN: x%d = %d at level %zu due to unit clause %d\n", 
-            v, variables[v].value ? 1 : 0, variables[v].level, clause_idx);
     }
 }
 
@@ -365,15 +384,25 @@ int SATSolver::unitPropagate() {
     return conflict;
 }
 
+// set up two-watched literals
+void SATSolver::attachClause(int clause_idx) {
+    Clause& c = clauses[clause_idx];
+    // Watch the first two literals in the clause
+    Lit not_lit0 = ~c.literals[0];
+    Lit not_lit1 = ~c.literals[1];
+    insert_watch(not_lit0, Watcher(clause_idx, c.literals[1]));
+    insert_watch(not_lit1, Watcher(clause_idx, c.literals[0]));
+}
+
 // Updated to track reason for propagation and add to trail
 void SATSolver::trailEnqueue(Lit literal, int reason) {
-    trail.push_back(literal);  // Add to trail
     Var v = var(literal);
     variables[v].assigned = true;
     variables[v].value = !sign(literal);
     variables[v].level = current_level();
     variables[v].reason = reason;
-    
+    trail.push_back(literal);  // Add to trail
+
     stat_assigned_vars->addData(1);
     output.verbose(CALL_INFO, 3, 0, "ASSIGN: x%d = %d at level %d due to clause %d\n", 
         v, variables[v].value ? 1 : 0, current_level(), reason);
@@ -383,12 +412,13 @@ void SATSolver::trailEnqueue(Lit literal, int reason) {
 bool SATSolver::solveCDCL() {
     output.verbose(CALL_INFO, 2, 0, "=== New CDCL Solver Step Start ===\n");
     
-    // Unit propagation - now returns a conflict clause index or ClauseRef_Undef
+    // Unit propagation: returns a conflict clause index or ClauseRef_Undef
     int conflict = unitPropagate();
     
-    if (conflict != ClauseRef_Undef) {  // Changed from (size_t)-1
-        // Conflict detected during propagation
+    if (conflict != ClauseRef_Undef) {
         output.verbose(CALL_INFO, 2, 0, "CONFLICT: Found unsatisfiable clause %d\n", conflict);
+        
+        stat_conflicts->addData(1);
         
         if (trail_lim.empty()) {
             // Conflict at decision level 0 means the formula is UNSAT
@@ -405,13 +435,20 @@ bool SATSolver::solveCDCL() {
         // Backtrack to the appropriate level
         backtrack(backtrack_level);
         
-        // Add the learned clause
-        Clause new_clause(learnt_clause, true);
-        int clause_idx = clauses.size();
-        clauses.push_back(new_clause);
-        attachClause(clause_idx);
+        if (learnt_clause.size() == 1){
+            // unit learnt clause will be instantly propagated
+            trailEnqueue(learnt_clause[0]);
+        }
+        else{
+            // Add the learned clause
+            Clause new_clause(learnt_clause, true);
+            int clause_idx = clauses.size();
+            clauses.push_back(new_clause);
+            attachClause(clause_idx);  
+            trailEnqueue(learnt_clause[0], clause_idx);
+        }
         
-        trailEnqueue(learnt_clause[0], clause_idx);
+        varDecayActivity();
         return false;
     }
 
@@ -419,7 +456,7 @@ bool SATSolver::solveCDCL() {
     if (!decide()) {
         output.output("SAT: Formula is satisfiable\nSolution: ");
         for (Var v = 1; v < (Var)variables.size(); v++) {
-            output.output("x%d=%d ", v, variables[v].value);
+            output.output("x%d=%d ", v, variables[v].value ? 1 : 0);
         }
         output.output("\n");
         primaryComponentOKToEndSim();
@@ -430,33 +467,36 @@ bool SATSolver::solveCDCL() {
 }
 
 bool SATSolver::decide() {
-    Var v = chooseBranchVariable();
-    if (v == 0) {
+    Lit lit = chooseBranchVariable();
+    if (lit == lit_Undef) {
         output.verbose(CALL_INFO, 2, 0, "DECIDE: No unassigned variables left\n");
         return false;
     }
 
-    // Make a positive literal for the decision
-    Lit lit = mkLit(v, false);
-    trail_lim.push_back(trail.size());
+    trail_lim.push_back(trail.size());  // new decision level
     trailEnqueue(lit);
  
-    output.verbose(CALL_INFO, 3, 0, "DECIDE: setting x%d = true at level %d\n", v, current_level());
+    output.verbose(CALL_INFO, 3, 0, "DECIDE: setting x%d = %s at level %d\n", 
+        var(lit), polarity[var(lit)] ? "false" : "true", current_level());
     stat_decisions->addData(1);
-        return true;
+    return true;
 }
 
-// Updated backtracking with non-chronological backtrack support
 void SATSolver::backtrack(int backtrack_level) {
     output.verbose(CALL_INFO, 3, 0, "BACKTRACK: From level %d to level %d\n", 
         current_level(), backtrack_level);
     
     // Unassign all variables above backtrack_level using the trail
     for (int i = trail.size() - 1; i >= int(trail_lim[backtrack_level]); i--) {
-        Var v = var(trail[i]);
+        Lit p = trail[i];
+        Var v = var(p);
+        
+        polarity[v] = sign(p);
         unassignVariable(v);
-        output.verbose(CALL_INFO, 3, 0, "BACKTRACK: Unassigning x%d from level %zu\n", 
-            v, variables[v].level);
+        insertVarOrder(v);
+        
+        output.verbose(CALL_INFO, 3, 0, "BACKTRACK: Unassigning x%d from level %zu, saved polarity %s\n", 
+            v, variables[v].level, polarity[v] ? "false" : "true");
         stat_backtracks->addData(1);
     }
     
@@ -465,19 +505,69 @@ void SATSolver::backtrack(int backtrack_level) {
     trail_lim.resize(backtrack_level);
 }
 
-// Utility functions
 void SATSolver::unassignVariable(int var) {
     variables[var].assigned = false;
-    stat_assigned_vars->addData(-1);  // One less variable assigned
+    stat_assigned_vars->addData(-1);
 }
 
-int SATSolver::chooseBranchVariable() {
-    for (Var v = 1; v < (Var)variables.size(); v++) {
-        if (!variables[v].assigned) {
-            return v; // Return first unassigned variable
+Lit SATSolver::chooseBranchVariable() {
+    Var next = var_Undef;
+    
+    if (!order_heap.empty() && drand(random_seed) < random_var_freq) {
+        next = order_heap[irand(random_seed, order_heap.size())];
+        if (!variables[next].assigned && decision[next]) {
+            output.verbose(CALL_INFO, 3, 0, "DECISION: Random selection of var %d\n", next);
         }
     }
-    return 0; // No unassigned variables
+    
+    while (next == var_Undef || variables[next].assigned || !decision[next]) {
+        if (order_heap.empty()) {
+            next = var_Undef;
+            break;
+        } else
+            next = order_heap.removeMin();
+    }
+
+    output.verbose(CALL_INFO, 5, 0, "DECISION: Selected var %d (activity=%f)\n", next, activity[next]);
+    if (next == var_Undef) return lit_Undef;
+    return mkLit(next, polarity[next]);
+}
+
+void SATSolver::insertVarOrder(Var v) {
+    if (!order_heap.inHeap(v) && decision[v]) {
+        order_heap.insert(v);
+        output.verbose(CALL_INFO, 4, 0, "HEAP: Inserted var %d into order heap\n", v);
+    }
+}
+
+void SATSolver::varDecayActivity() {
+    var_inc *= 1.0 / var_decay;
+    output.verbose(CALL_INFO, 4, 0, "ACTIVITY: Decayed activity increment to %f\n", var_inc);
+}
+
+void SATSolver::varBumpActivity(Var v) {
+    if ((activity[v] += var_inc) > 1e100) {
+        output.verbose(CALL_INFO, 3, 0, "ACTIVITY: Rescaling all activities\n");
+        for (size_t i = 0; i < activity.size(); i++) {
+            activity[i] *= 1e-100;
+        }
+        var_inc *= 1e-100;
+    }
+    
+    if (order_heap.inHeap(v)) {
+        order_heap.decrease(v);
+    }
+    
+    output.verbose(CALL_INFO, 4, 0, "ACTIVITY: Bumped var %d to %f\n", v, activity[v]);
+}
+
+double SATSolver::drand(uint64_t& seed) {
+    seed = seed * 1389796 % 2147483647;
+    return ((double)seed / 2147483647);
+}
+
+int SATSolver::irand(uint64_t& seed, int size) {
+    return (int)(drand(seed) * size);
 }
 
 void SATSolver::insert_watch(Lit p, Watcher w) {
@@ -495,8 +585,8 @@ void SATSolver::ensureVarCapacity(Var v) {
 }
 
 // Conflict analysis function to learn from conflicts
-void SATSolver::analyze(int conflict_idx, std::vector<Lit>& learnt_clause, int& backtrack_level) {
-    output.verbose(CALL_INFO, 3, 0, "ANALYZE: Starting conflict analysis of clause %d\n", conflict_idx);
+void SATSolver::analyze(int confl, std::vector<Lit>& learnt_clause, int& backtrack_level) {
+    output.verbose(CALL_INFO, 3, 0, "ANALYZE: Starting conflict analysis of clause %d\n", confl);
     
     // Debug print for trail
     if (output.getVerboseLevel() >= 3) {
@@ -519,14 +609,15 @@ void SATSolver::analyze(int conflict_idx, std::vector<Lit>& learnt_clause, int& 
     int pathC = 0;  // Counter for literals at current decision level
     Lit p = lit_Undef;
     int index = trail.size() - 1;
-        
+    
     // Add literals from conflict clause to learnt clause
     do {
-        Clause& c = clauses[conflict_idx];
+        assert(confl != ClauseRef_Undef); // (otherwise should be UIP)
+        Clause& c = clauses[confl];
         
         // Debug print for current clause
         if (output.getVerboseLevel() >= 4) {
-            std::string clause_str = "ANALYZE: Processing clause " + std::to_string(conflict_idx) + ":";
+            std::string clause_str = "ANALYZE: Processing clause " + std::to_string(confl) + ":";
             for (const auto& lit : c.literals) {
                 clause_str += " " + std::to_string(toInt(lit));
             }
@@ -542,6 +633,8 @@ void SATSolver::analyze(int conflict_idx, std::vector<Lit>& learnt_clause, int& 
                 toInt(q), v, variables[v].level);
             
             if (!seen[v] && variables[v].level > 0) {
+                varBumpActivity(v);
+                
                 seen[v] = 1;
                 output.verbose(CALL_INFO, 5, 0, "ANALYZE:     Marking var %d as seen\n", v);
                 
@@ -558,15 +651,14 @@ void SATSolver::analyze(int conflict_idx, std::vector<Lit>& learnt_clause, int& 
         }
 
         // Select next literal to expand from the trail
-        int old_index = index;
         while (!seen[var(trail[index--])]);
         p = trail[index+1];
-        conflict_idx = variables[var(p)].reason;
+        confl = variables[var(p)].reason;
         seen[var(p)] = 0;
         pathC--;
         
-        output.verbose(CALL_INFO, 4, 0, "ANALYZE: Selected trail literal %d (var %d), moved from index %d to %d, reason=%d, pathC=%d\n", 
-            toInt(p), var(p), old_index, index, conflict_idx, pathC);
+        output.verbose(CALL_INFO, 4, 0, "ANALYZE: Selected trail literal %d, index %d, reason=%d, pathC=%d\n", 
+            toInt(p), index, confl, pathC);
         
     } while (pathC > 0);
     
@@ -597,12 +689,12 @@ void SATSolver::analyze(int conflict_idx, std::vector<Lit>& learnt_clause, int& 
     for (size_t j = 0; j < learnt_clause.size(); j++) {
         seen[var(learnt_clause[j])] = 0;
     }
-    
+
     // Print learnt clause for debug
     if (output.getVerboseLevel() >= 3) {
         std::string clause_str = "LEARNT CLAUSE:";
         for (const auto& lit : learnt_clause) {
-                        clause_str += " " + std::to_string(toInt(lit));
+            clause_str += " " + std::to_string(toInt(lit));
         }
         output.verbose(CALL_INFO, 3, 0, "%s, backtrack_level=%d\n", 
             clause_str.c_str(), backtrack_level);
