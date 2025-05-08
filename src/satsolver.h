@@ -50,10 +50,11 @@ const Lit lit_Undef = { 0 }; // Special undefined literal
 struct Clause {
     std::vector<Lit> literals;
     bool learnt;  // Flag to identify if this is a learnt clause
+    double activity;  // Activity score for this clause
     
-    Clause() : learnt(false) {}
+    Clause() : learnt(false), activity(0) {}
     Clause(const std::vector<Lit>& lits, bool is_learnt = false) 
-        : literals(lits), learnt(is_learnt) {}
+        : literals(lits), learnt(is_learnt), activity(0) {}
     int size() const { return literals.size(); }
 };
 
@@ -108,15 +109,19 @@ public:
         {"verbose", "Verbosity level", "0"},
         {"filesize", "Size of CNF file to read", "0"},
         {"var_decay", "Variable activity decay factor", "0.95"},
-        {"random_var_freq", "Frequency of random decisions", "0.02"}
+        {"clause_decay", "Clause activity decay factor", "0.999"},
+        {"random_var_freq", "Frequency of random decisions", "0.02"},
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
         {"decisions", "Number of decisions made", "count", 1},
         {"propagations", "Number of propagations", "count", 1},
-        {"backtracks", "Number of backtracks", "count", 1},
-        {"assigned_vars", "Current number of assigned variables", "count", 1},
-        {"conflicts", "Number of conflicts", "count", 1}
+        {"assigns", "Number of variable assignments", "count", 1},
+        {"unassigns", "Number of variable unassignments", "count", 1},
+        {"conflicts", "Number of conflicts", "count", 1},
+        {"learned", "Number of learnt clauses", "count", 1},
+        {"removed", "Number of clauses removed during DB reductions", "count", 1},
+        {"db_reductions", "Number of clause database reductions", "count", 1}
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -151,11 +156,12 @@ public:
     void unassignVariable(Var var);
     int current_level() { return trail_lim.size(); }  // Changed to use trail_lim
     
-    // Clause Management
-    void attachClause(int clause_idx);
-    void insert_watch(Lit p, Watcher w);
+    // Two-Watched Literals
     inline int toWatchIndex(Lit p) { return p.x; }
-    void ensureVarCapacity(Var v);
+    void attachClause(int clause_idx);
+    void detachClause(int clause_idx);
+    void insert_watch(Lit p, Watcher w);
+    void remove_watch(std::vector<Watcher>& ws, int clause_idx);
     
     // Decision Heuristics
     Lit chooseBranchVariable();
@@ -163,10 +169,21 @@ public:
     void varDecayActivity();                       // Decay all variable activities
     void varBumpActivity(Var v);                   // Bump a variable's activity
     
+    // Clause Activity
+    void claDecayActivity();
+    void claBumpActivity(int clause_idx);
+    void reduceDB();
+    bool locked(int clause_idx);  // Check if clause is locked (reason for assignment)
+
     // Utility Functions
+    inline bool value(Var v) { return variables[v].value; }
+    inline bool value(Lit p) { return variables[var(p)].value ^ sign(p); }
+    void ensureVarCapacity(Var v);
     double drand(uint64_t& seed);                  // Random number generator
     int irand(uint64_t& seed, int size);           // Integer random in range [0,size-1]
     uint64_t getStatCount(Statistic<uint64_t>* stat);
+    inline int nAssigns() const { return trail.size(); }
+    inline int nLearnts() const { return clauses.size() - num_clauses; }
 
 private:
     // State Variables
@@ -207,6 +224,19 @@ private:
     double random_var_freq;           // Frequency of random decisions
     uint64_t random_seed;             // Seed for random number generation
     
+    // Clause activity
+    double clause_decay;
+    double cla_inc;
+    
+    // DB reduction parameters
+    double learntsize_factor;
+    double learntsize_inc;
+    double max_learnts;
+    int learnt_adjust_start_confl;
+    double learnt_adjust_inc;
+    double learnt_adjust_confl;
+    int learnt_adjust_cnt;
+    
     // Statistics
     Statistic<uint64_t>* stat_decisions;
     Statistic<uint64_t>* stat_propagations;
@@ -214,6 +244,8 @@ private:
     Statistic<uint64_t>* stat_unassigns;
     Statistic<uint64_t>* stat_conflicts;
     Statistic<uint64_t>* stat_learned;
+    Statistic<uint64_t>* stat_removed;
+    Statistic<uint64_t>* stat_db_reductions;
 };
 
 #endif // SATSOLVER_H

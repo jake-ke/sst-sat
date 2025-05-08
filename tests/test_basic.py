@@ -69,7 +69,9 @@ sst.enableStatisticsForComponentName("solver", [
     "assigns",
     "unassigns",
     "conflicts",
-    "learned"
+    "learned",
+    "removed",
+    "db_reductions"
 ], {
     "type": "sst.AccumulatorStatistic",
     "rate": "100ns"
