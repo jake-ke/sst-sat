@@ -111,6 +111,7 @@ public:
         {"var_decay", "Variable activity decay factor", "0.95"},
         {"clause_decay", "Clause activity decay factor", "0.999"},
         {"random_var_freq", "Frequency of random decisions", "0.02"},
+        {"decision_file", "Path to a file containing decision sequence", ""},
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -121,7 +122,8 @@ public:
         {"conflicts", "Number of conflicts", "count", 1},
         {"learned", "Number of learnt clauses", "count", 1},
         {"removed", "Number of clauses removed during DB reductions", "count", 1},
-        {"db_reductions", "Number of clause database reductions", "count", 1}
+        {"db_reductions", "Number of clause database reductions", "count", 1},
+        {"minimized_literals", "Number of literals removed by clause minimization", "count", 1}
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -168,12 +170,16 @@ public:
     void insertVarOrder(Var v);                    // Insert variable into order heap
     void varDecayActivity();                       // Decay all variable activities
     void varBumpActivity(Var v);                   // Bump a variable's activity
+    void loadDecisionSequence(const std::string& filename);  // user-defined decision sequence
     
     // Clause Activity
     void claDecayActivity();
     void claBumpActivity(int clause_idx);
     void reduceDB();
     bool locked(int clause_idx);  // Check if clause is locked (reason for assignment)
+
+    // Clause Minimization
+    bool litRedundant(Lit p);
 
     // Utility Functions
     inline bool value(Var v) { return variables[v].value; }
@@ -184,8 +190,16 @@ public:
     uint64_t getStatCount(Statistic<uint64_t>* stat);
     inline int nAssigns() const { return trail.size(); }
     inline int nLearnts() const { return clauses.size() - num_clauses; }
+    std::string printClause(const Clause& c);
 
 private:
+    // Structure for clause minimization
+    struct ShrinkStackElem {
+        size_t i;
+        Lit l;
+        ShrinkStackElem(size_t _i, Lit _l) : i(_i), l(_l) {}
+    };
+  
     // State Variables
     State state;
     SST::Output output;
@@ -210,6 +224,9 @@ private:
     
     // Clause learning
     std::vector<char> seen;  // Temporary array for conflict analysis
+    int ccmin_mode;  // Conflict clause minimization mode
+    std::vector<ShrinkStackElem> analyze_stack;  // Stack for clause minimization
+    std::vector<Lit> analyze_toclear;  // Literals to clear after analysis
 
     // Two Watched Literals implementation
     std::vector<std::vector<Watcher>> watches;  // Indexed by literal encoding
@@ -227,7 +244,7 @@ private:
     // Clause activity
     double clause_decay;
     double cla_inc;
-    
+
     // DB reduction parameters
     double learntsize_factor;
     double learntsize_inc;
@@ -236,7 +253,7 @@ private:
     double learnt_adjust_inc;
     double learnt_adjust_confl;
     int learnt_adjust_cnt;
-    
+
     // Statistics
     Statistic<uint64_t>* stat_decisions;
     Statistic<uint64_t>* stat_propagations;
@@ -246,6 +263,12 @@ private:
     Statistic<uint64_t>* stat_learned;
     Statistic<uint64_t>* stat_removed;
     Statistic<uint64_t>* stat_db_reductions;
+    Statistic<uint64_t>* stat_minimized_literals;
+
+    // User-defined decision sequence
+    std::vector<std::pair<Var, bool>> decision_sequence; // (variable, sign) pairs
+    size_t decision_seq_idx;                             // Current position in sequence
+    bool has_decision_sequence;                          // Whether a decision sequence was provided
 };
 
 #endif // SATSOLVER_H

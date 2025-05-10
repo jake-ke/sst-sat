@@ -10,8 +10,16 @@ if len(sys.argv) > 1:
         sys.exit(1)
 else:
     cnf_path = os.path.join(os.path.dirname(__file__), "test.cnf")
-
 print(f"Using CNF file: {cnf_path}")
+
+# Get decision file path from command line (optional)
+decision_path = None
+if len(sys.argv) > 2:
+    decision_path = sys.argv[2]
+    if not os.path.exists(decision_path):
+        print(f"Error: Decision file '{decision_path}' not found")
+        sys.exit(1)
+    print(f"Using decision file: {decision_path}")
 
 # Read CNF file content
 with open(cnf_path, 'r') as f:
@@ -22,11 +30,14 @@ solver = sst.Component("solver", "satsolver.SATSolver")
 
 # Get file size and pass it to solver
 file_size = os.path.getsize(cnf_path)
-solver.addParams({
+params = {
     "clock" : "1GHz",
     "verbose" : "1",
     "filesize" : str(file_size)  # Add file size parameter
-})
+}
+if decision_path:
+    params["decision_file"] = decision_path
+solver.addParams(params)
 
 # Configure memory interface
 iface = solver.setSubComponent("memory", "memHierarchy.standardInterface")
@@ -71,7 +82,8 @@ sst.enableStatisticsForComponentName("solver", [
     "conflicts",
     "learned",
     "removed",
-    "db_reductions"
+    "db_reductions",
+    "minimized_literals"
 ], {
     "type": "sst.AccumulatorStatistic",
     "rate": "100ns"
