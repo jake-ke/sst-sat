@@ -61,12 +61,14 @@ def main():
     
     # Extract test names without dates
     def get_test_name(filename):
-        # Assuming format like "test_name_YYYY-MM-DD.log" or "test_name_timestamp.log"
-        # Strip out date/timestamp parts (customize this pattern based on your actual filenames)
+        # Get the base filename without path and extension
         base_name = os.path.basename(filename)
-        # Match everything up to the last underscore or till the extension
-        match = re.match(r'(.+?)(?:_\d|\.)', base_name)
-        return match.group(1) if match else base_name
+        base_name = os.path.splitext(base_name)[0]  # Remove .log extension
+        
+        timestamp_pattern = r'_(sat|unsat)_\d+(?:_\d+)?$'
+        base_name = re.sub(timestamp_pattern, '', base_name)
+        
+        return base_name
     
     # Map reference files by their test names
     reference_map = {}
