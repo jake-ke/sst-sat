@@ -445,6 +445,7 @@ bool SATSolver::solveCDCL() {
 //-----------------------------------------------------------------------------------
 
 bool SATSolver::decide() {
+    stat_decisions->addData(1);
     Lit lit = lit_Undef;
     
     // Use decision sequence if available and not exhausted
@@ -479,7 +480,6 @@ bool SATSolver::decide() {
     trail_lim.push_back(trail.size());  // new decision level
     trailEnqueue(lit);
  
-    stat_decisions->addData(1);
     return true;
 }
 
@@ -492,6 +492,7 @@ int SATSolver::unitPropagate() {
     int conflict = ClauseRef_Undef;
 
     while (qhead < trail.size()) {
+        stat_propagations->addData(1);
         Lit p = trail[qhead++];
         Lit not_p = ~p;
         int watch_idx = toWatchIndex(p);
@@ -585,7 +586,6 @@ int SATSolver::unitPropagate() {
                     "UNIT: Clause %d forces literal %d (to true)\n",
                     clause_idx, toInt(first));
                 trailEnqueue(first, clause_idx);
-                stat_propagations->addData(1);
             }
         NextClause:;
         }
