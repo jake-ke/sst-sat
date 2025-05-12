@@ -112,6 +112,9 @@ public:
         {"clause_decay", "Clause activity decay factor", "0.999"},
         {"random_var_freq", "Frequency of random decisions", "0.02"},
         {"decision_file", "Path to a file containing decision sequence", ""},
+        {"luby_restart", "Use Luby restart sequence", "true"},
+        {"restart_first", "Initial restart limit", "100"},
+        {"restart_inc", "Restart limit increase factor", "2.0"},
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -123,7 +126,8 @@ public:
         {"learned", "Number of learnt clauses", "count", 1},
         {"removed", "Number of clauses removed during DB reductions", "count", 1},
         {"db_reductions", "Number of clause database reductions", "count", 1},
-        {"minimized_literals", "Number of literals removed by clause minimization", "count", 1}
+        {"minimized_literals", "Number of literals removed by clause minimization", "count", 1},
+        {"restarts", "Number of restarts", "count", 1},
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -180,6 +184,9 @@ public:
 
     // Clause Minimization
     bool litRedundant(Lit p);
+
+    // Restart helpers
+    double luby(double y, int x);                 // Calculate Luby sequence value
 
     // Utility Functions
     inline bool value(Var v) { return variables[v].value; }
@@ -254,6 +261,14 @@ private:
     double learnt_adjust_confl;
     int learnt_adjust_cnt;
 
+    // Restart parameters
+    bool luby_restart;                  // Whether to use Luby sequence for restarts
+    int restart_first;                  // Initial restart limit
+    double restart_inc;                 // Factor to increase restart limit
+    int curr_restarts;                  // Number of restarts performed
+    int conflicts_until_restart;        // Number of conflicts to trigger next restart
+    int conflictC;                      // Number of conflicts since last restart
+
     // Statistics
     Statistic<uint64_t>* stat_decisions;
     Statistic<uint64_t>* stat_propagations;
@@ -264,6 +279,7 @@ private:
     Statistic<uint64_t>* stat_removed;
     Statistic<uint64_t>* stat_db_reductions;
     Statistic<uint64_t>* stat_minimized_literals;
+    Statistic<uint64_t>* stat_restarts;
 
     // User-defined decision sequence
     std::vector<std::pair<Var, bool>> decision_sequence; // (variable, sign) pairs

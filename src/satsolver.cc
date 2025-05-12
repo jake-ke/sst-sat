@@ -4,6 +4,7 @@
 #include "sst/core/statapi/stataccumulator.h"
 #include <algorithm>  // For std::sort
 #include <fstream>    // For reading decision file
+#include <cmath>      // For pow function
 
 //-----------------------------------------------------------------------------------
 // Component Lifecycle Methods
@@ -23,7 +24,13 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     requestPending(false),
     ccmin_mode(2),
     decision_seq_idx(0),
-    has_decision_sequence(false) {
+    has_decision_sequence(false),
+    luby_restart(true),
+    restart_first(100),
+    restart_inc(2.0),
+    curr_restarts(0),
+    conflicts_until_restart(restart_first),
+    conflictC(0) {
     
     // Initialize output
     output.init("SATSolver-" + getName() + "-> ", 
@@ -34,6 +41,12 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     // Configure clock
     registerClock(params.find<std::string>("clock", "1GHz"),
                  new SST::Clock::Handler<SATSolver>(this, &SATSolver::clockTick));
+
+    // Get file size parameter
+    filesize = params.find<size_t>("filesize", 0);
+    if (filesize == 0) {
+        output.fatal(CALL_INFO, -1, "File size parameter not provided\n");
+    }
 
     // Initialize activity-related variables
     var_decay = params.find<double>("var_decay", 0.95);
@@ -73,16 +86,11 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_removed = registerStatistic<uint64_t>("removed");
     stat_db_reductions = registerStatistic<uint64_t>("db_reductions");
     stat_minimized_literals = registerStatistic<uint64_t>("minimized_literals");
+    stat_restarts = registerStatistic<uint64_t>("restarts");
     
     // Component should not end simulation until solution is found
     registerAsPrimaryComponent();
     primaryComponentDoNotEndSim();
-
-    // Get file size parameter
-    filesize = params.find<size_t>("filesize", 0);
-    if (filesize == 0) {
-        output.fatal(CALL_INFO, -1, "File size parameter not provided\n");
-    }
 }
 
 SATSolver::~SATSolver() {}
@@ -123,6 +131,7 @@ void SATSolver::finish() {
     output.output("Assigns      : %lu\n", getStatCount(stat_assigns));
     output.output("UnAssigns    : %lu\n", getStatCount(stat_unassigns));
     output.output("Minimized    : %lu\n", getStatCount(stat_minimized_literals));
+    output.output("Restarts     : %lu\n", getStatCount(stat_restarts));
     output.output("Variables    : %zu (Total), %lu (Assigned)\n", 
         variables.size() - 1,
         getStatCount(stat_assigns) - getStatCount(stat_unassigns));
@@ -332,6 +341,23 @@ void SATSolver::parseDIMACS(const std::string& content) {
 bool SATSolver::solveCDCL() {
     output.verbose(CALL_INFO, 2, 0, "=== New CDCL Solver Step Start ===\n");
     
+    // Check if we need to restart
+    if (conflictC >= conflicts_until_restart) {
+        // Restart by backtracking to decision level 0
+        backtrack(0);
+        conflictC = 0;
+        curr_restarts++;
+        stat_restarts->addData(1);
+        
+        // Update the restart limit using Luby sequence or geometric progression
+        double rest_base = luby_restart ? luby(restart_inc, curr_restarts) : pow(restart_inc, curr_restarts);
+        conflicts_until_restart = rest_base * restart_first;
+        
+        output.verbose(CALL_INFO, 2, 0, 
+            "RESTART: #%d, new conflict limit=%d\n", 
+            curr_restarts, conflicts_until_restart);
+    }
+    
     // Unit propagation: returns a conflict clause index or ClauseRef_Undef
     int conflict = unitPropagate();
     
@@ -339,6 +365,7 @@ bool SATSolver::solveCDCL() {
         output.verbose(CALL_INFO, 2, 0,
             "CONFLICT: Found unsatisfiable clause %d\n", conflict);
         
+        conflictC++;
         stat_conflicts->addData(1);
         
         if (trail_lim.empty()) {
@@ -1137,6 +1164,26 @@ bool SATSolver::litRedundant(Lit p) {
             c = clauses[variables[var(p)].reason];
         }
     }
+}
+
+//-----------------------------------------------------------------------------------
+// Restart Helpers
+//-----------------------------------------------------------------------------------
+
+// Calculate the value of the Luby sequence at position x
+double SATSolver::luby(double y, int x) {
+    // Find the finite subsequence that contains index 'x', and the
+    // size of that subsequence:
+    int size, seq;
+    for (size = 1, seq = 0; size < x+1; seq++, size = 2*size+1);
+
+    while (size-1 != x) {
+        size = (size-1)>>1;
+        seq--;
+        x = x % size;
+    }
+
+    return pow(y, seq);
 }
 
 //-----------------------------------------------------------------------------------

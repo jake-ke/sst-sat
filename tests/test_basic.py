@@ -83,7 +83,8 @@ sst.enableStatisticsForComponentName("solver", [
     "learned",
     "removed",
     "db_reductions",
-    "minimized_literals"
+    "minimized_literals",
+    "restarts"
 ], {
     "type": "sst.AccumulatorStatistic",
     "rate": "100ns"
