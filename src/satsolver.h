@@ -219,6 +219,7 @@ private:
     size_t filesize;
     uint32_t num_vars;
     uint32_t num_clauses;
+    bool sort_clauses;
     
     // SAT solver state
     std::vector<Clause> clauses;

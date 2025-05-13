@@ -2,6 +2,7 @@
 
 # Create logs directory if it doesn't exist
 LOGS_DIR="./logs"
+# LOGS_DIR="./logs_dec"
 mkdir -p "$LOGS_DIR"
 
 # Create a timestamp for this run
@@ -22,10 +23,17 @@ unsat_total=0
 # Define directories
 SAT_DIR=~/michael_sat_solver/SAT_test_cases/sat
 UNSAT_DIR=~/michael_sat_solver/SAT_test_cases/unsat
+DECISION_DIR="" # Default to empty
+
+# Check if decision directory was provided
+if [[ $# -gt 0 ]]; then
+    DECISION_DIR="$1"
+fi
 
 echo "Starting tests at $(date)"
 echo "Logs will be saved to $LOGS_DIR"
 echo "Summary will be saved to $LOG_FILE"
+[[ -n "$DECISION_DIR" ]] && echo "Using decision files from $DECISION_DIR"
 
 # Function to log messages to both console and log file
 log_message() {
@@ -63,16 +71,36 @@ run_tests_for_directory() {
         start_time=$(date +"%H:%M:%S")
         log_message "[$start_time] Testing $filename..."
         
-        # Run with timeout of 30 minutes (1800 seconds)
-        timeout 1800 sst ../tests/test_basic.py -- "$file" > "$LOGS_DIR/${filename}_${dir_type}_$TIMESTAMP.log" 2>&1
+        # Check if decision file exists and should be used
+        command="timeout 1800 sst ../tests/test_basic.py -- \"$file\""
+        if [[ -n "$DECISION_DIR" ]]; then
+            decision_file="${DECISION_DIR}/${filename}.dec"
+            if [[ -f "$decision_file" ]]; then
+                log_message "Using decision file: $decision_file"
+                command="timeout 1800 sst ../tests/test_basic.py -- \"$file\" \"$decision_file\""
+            else
+                log_message "Decision file not found for $filename"
+            fi
+        fi
+
+        # Run the test with proper command
+        eval $command > "$LOGS_DIR/${filename}_${dir_type}_$TIMESTAMP.log" 2>&1
         
         end_time=$(date +"%H:%M:%S")
         
         # Check exit status
         exit_status=$?
         if [ $exit_status -eq 0 ]; then
-            log_message "[$end_time]   PASSED"
-            eval "$passed_var=\$(($passed_var + 1))"
+            # Check for ERROR occurrences even in passed tests
+            log_file="$LOGS_DIR/${filename}_${dir_type}_$TIMESTAMP.log"
+            error_count=$(grep -c "ERROR" "$log_file")
+            if [ $error_count -gt 0 ]; then
+                log_message "[$end_time]   FAILED (found $error_count errors in $log_file)"
+                eval "$failed_var=\$(($failed_var + 1))"
+            else
+                log_message "[$end_time]   PASSED"
+                eval "$passed_var=\$(($passed_var + 1))"
+            fi
         elif [ $exit_status -eq 124 ] || [ $exit_status -eq 142 ]; then
             # 124 and 142 are timeout's exit codes
             log_message "[$end_time]   TIMED OUT"

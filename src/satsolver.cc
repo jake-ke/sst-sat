@@ -48,6 +48,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
         output.fatal(CALL_INFO, -1, "File size parameter not provided\n");
     }
 
+    sort_clauses = params.find<bool>("sort_clauses", true);
+
     // Initialize activity-related variables
     var_decay = params.find<double>("var_decay", 0.95);
     clause_decay = params.find<double>("clause_decay", 0.999);  // Add clause decay parameter
@@ -127,7 +129,7 @@ void SATSolver::finish() {
     output.output("Conflicts    : %lu\n", getStatCount(stat_conflicts));
     output.output("Learned      : %lu\n", getStatCount(stat_learned));
     output.output("Removed      : %lu\n", getStatCount(stat_removed));
-    output.output("DB Reduction : %lu\n", getStatCount(stat_db_reductions));
+    output.output("DB_Reductions: %lu\n", getStatCount(stat_db_reductions));
     output.output("Assigns      : %lu\n", getStatCount(stat_assigns));
     output.output("UnAssigns    : %lu\n", getStatCount(stat_unassigns));
     output.output("Minimized    : %lu\n", getStatCount(stat_minimized_literals));
@@ -260,6 +262,10 @@ void SATSolver::parseDIMACS(const std::string& content) {
                         "Unit clause: %d\n",
                         toInt(clause.literals[0]));
                 } else {
+                    if (sort_clauses) {
+                        // Sort literals in the clause
+                        std::sort(clause.literals.begin(), clause.literals.end());
+                    }
                     clauses.push_back(clause);
 
                     // debugging outputs
@@ -341,23 +347,6 @@ void SATSolver::parseDIMACS(const std::string& content) {
 bool SATSolver::solveCDCL() {
     output.verbose(CALL_INFO, 2, 0, "=== New CDCL Solver Step Start ===\n");
     
-    // Check if we need to restart
-    if (conflictC >= conflicts_until_restart) {
-        // Restart by backtracking to decision level 0
-        backtrack(0);
-        conflictC = 0;
-        curr_restarts++;
-        stat_restarts->addData(1);
-        
-        // Update the restart limit using Luby sequence or geometric progression
-        double rest_base = luby_restart ? luby(restart_inc, curr_restarts) : pow(restart_inc, curr_restarts);
-        conflicts_until_restart = rest_base * restart_first;
-        
-        output.verbose(CALL_INFO, 2, 0, 
-            "RESTART: #%d, new conflict limit=%d\n", 
-            curr_restarts, conflicts_until_restart);
-    }
-    
     // Unit propagation: returns a conflict clause index or ClauseRef_Undef
     int conflict = unitPropagate();
     
@@ -416,6 +405,24 @@ bool SATSolver::solveCDCL() {
         return false;
     }
 
+    // Check if we need to restart
+    if (conflictC >= conflicts_until_restart) {
+        // Restart by backtracking to decision level 0
+        backtrack(0);
+        conflictC = 0;
+        curr_restarts++;
+        stat_restarts->addData(1);
+        
+        // Update the restart limit using Luby sequence or geometric progression
+        double rest_base = luby_restart ? luby(restart_inc, curr_restarts) : pow(restart_inc, curr_restarts);
+        conflicts_until_restart = rest_base * restart_first;
+        
+        output.verbose(CALL_INFO, 2, 0, 
+            "RESTART: #%d, new conflict limit=%d\n", 
+            curr_restarts, conflicts_until_restart);
+        return false;
+    }
+
     // Check if we need to reduce the learnt clause database
     if (nLearnts() - nAssigns() >= max_learnts) {
         output.verbose(CALL_INFO, 3, 0, 
@@ -450,25 +457,34 @@ bool SATSolver::decide() {
     
     // Use decision sequence if available and not exhausted
     if (has_decision_sequence && decision_seq_idx < decision_sequence.size()) {
-        Var next_var = decision_sequence[decision_seq_idx].first;
-        bool next_sign = decision_sequence[decision_seq_idx].second;
-        decision_seq_idx++;
-        
-        // Check if variable can be decided on
-        if (!variables[next_var].assigned && decision[next_var]) {
-            lit = mkLit(next_var, !next_sign); // Note: mkLit's sign is negated in the API
-            output.verbose(CALL_INFO, 2, 0, 
-                "DECISION: Using predefined decision %zu: var %d = %s\n", 
-                decision_seq_idx, next_var, next_sign ? "true" : "false");
-        } else {
-            // Assert false if a decision from the sequence is unavailable
-            output.fatal(CALL_INFO, -1, 
-                "ERROR: Cannot make predefined decision %zu (var %d=%d) - variable is already assigned or not decidable\n", 
-                decision_seq_idx-1, next_var, next_sign ? 1 : 0);
-            assert(false); // Should not reach this point
-            return false;
+        while (decision_seq_idx < decision_sequence.size() && lit == lit_Undef) {
+            Var next_var = decision_sequence[decision_seq_idx].first;
+            bool next_sign = decision_sequence[decision_seq_idx].second;
+            decision_seq_idx++;
+            
+            // Check if variable can be decided on
+            if (!variables[next_var].assigned && decision[next_var]) {
+                lit = mkLit(next_var, !next_sign); // Note: mkLit's sign is negated in the API
+                output.verbose(CALL_INFO, 2, 0, 
+                    "DECISION: Using predefined decision %zu: var %d = %s\n", 
+                    decision_seq_idx, next_var, next_sign ? "true" : "false");
+            } else {
+                output.output(
+                    "WARNING: Skipping predefined decision %zu (var %d), assigned/not decidable\n", 
+                    decision_seq_idx-1, next_var);
+            }
         }
-    } else {
+
+        if (decision_seq_idx >= decision_sequence.size()) {
+            output.verbose(CALL_INFO, 1, 0,
+                "DECISION: Exhausted decision sequence after %ld decisions\n",
+                getStatCount(stat_decisions));
+            has_decision_sequence = false;
+        }
+    }
+    
+    // If we couldn't use the decision sequence, fall back to normal heuristic
+    if (lit == lit_Undef) {
         // Fall back to normal decision heuristic if no sequence or exhausted
         lit = chooseBranchVariable();
         if (lit == lit_Undef) {
@@ -528,12 +544,12 @@ int SATSolver::unitPropagate() {
             Clause& c = clauses[clause_idx];
             
             // Print clause for debugging
-            output.verbose(CALL_INFO, 5, 0, "    Clause: %s\n", printClause(c).c_str());
+            output.verbose(CALL_INFO, 4, 0, "    Clause: %s\n", printClause(c).c_str());
             
             // Make sure the false literal (~p) is at position 1
             if (c.literals[0] == not_p) {
                 std::swap(c.literals[0], c.literals[1]);
-                output.verbose(CALL_INFO, 5, 0, "    Swapped literals 0 and 1\n");
+                output.verbose(CALL_INFO, 4, 0, "    Swapped literals 0 and 1\n");
             }
             assert(c.literals[1] == not_p);
             i++;
@@ -778,7 +794,7 @@ void SATSolver::backtrack(int backtrack_level) {
         unassignVariable(v);
         insertVarOrder(v);
         
-        output.verbose(CALL_INFO, 3, 0,
+        output.verbose(CALL_INFO, 4, 0,
             "BACKTRACK: Unassigning x%d from level %zu, saved polarity %s\n", 
             v, variables[v].level, polarity[v] ? "false" : "true");
     }
@@ -801,7 +817,7 @@ void SATSolver::trailEnqueue(Lit literal, int reason) {
     trail.push_back(literal);  // Add to trail
 
     stat_assigns->addData(1);
-    output.verbose(CALL_INFO, 3, 0,"ASSIGN: x%d = %d at level %d due to clause %d\n", 
+    output.verbose(CALL_INFO, 4, 0,"ASSIGN: x%d = %d at level %d due to clause %d\n", 
         v, variables[v].value ? 1 : 0, current_level(), reason);
 }
 
@@ -928,7 +944,7 @@ void SATSolver::loadDecisionSequence(const std::string& filename) {
         }
         
         decision_sequence.push_back(std::make_pair(var, sign == 1));
-        output.verbose(CALL_INFO, 3, 0, "Added decision: var %d = %s\n", 
+        output.verbose(CALL_INFO, 5, 0, "Added decision: var %d = %s\n", 
             var, (sign == 1) ? "true" : "false");
     }
     
@@ -1152,7 +1168,7 @@ bool SATSolver::litRedundant(Lit p) {
             
             // If stack is empty, we're done
             if (analyze_stack.empty()) {
-                output.verbose(CALL_INFO, 3, 0, "MIN: %d is redundant\n", toInt(p));
+                output.verbose(CALL_INFO, 4, 0, "MIN: %d is redundant\n", toInt(p));
                 return true;
             }
             

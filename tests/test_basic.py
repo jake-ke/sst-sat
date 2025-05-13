@@ -33,6 +33,7 @@ file_size = os.path.getsize(cnf_path)
 params = {
     "clock" : "1GHz",
     "verbose" : "1",
+    "sort_clauses": True,
     "filesize" : str(file_size)  # Add file size parameter
 }
 if decision_path:
