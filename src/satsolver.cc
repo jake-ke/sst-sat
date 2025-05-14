@@ -301,16 +301,13 @@ void SATSolver::parseDIMACS(const std::string& content) {
     activity.resize(variables.size(), 0.0);
     polarity.resize(variables.size(), false); // Default phase is false
     decision.resize(variables.size(), true);  // All variables are decision variables
+    cls_activity.resize(clauses.size(), 0.0);
     
     // Insert variables into the heap
-    for (Var v = 1; v < (Var)variables.size(); v++) {
-        insertVarOrder(v);
-    }
+    for (Var v = 1; v < (Var)variables.size(); v++) insertVarOrder(v);
     
     // Setup watched literals for all clauses
-    for (int i = 0; i < clauses.size(); i++) {
-        attachClause(i);
-    }
+    for (int i = 0; i < clauses.size(); i++) attachClause(i);
     
     // Print watch lists after parsing
     if (output.getVerboseLevel() >= 6) {
@@ -378,9 +375,10 @@ bool SATSolver::solveCDCL() {
         }
         else{
             // Add the learned clause
-            Clause new_clause(learnt_clause, true);
+            Clause new_clause(learnt_clause);
             int clause_idx = clauses.size();
             clauses.push_back(new_clause);
+            cls_activity.push_back(0.0);
             attachClause(clause_idx);  
             trailEnqueue(learnt_clause[0], clause_idx);
             claBumpActivity(clause_idx);
@@ -649,7 +647,7 @@ void SATSolver::analyze(int confl, std::vector<Lit>& learnt_clause, int& backtra
         Clause& c = clauses[confl];
         
         // Bump activity for learnt clauses
-        if (c.learnt)
+        if (isLearnt(confl))
             claBumpActivity(confl);
         
         // Debug print for current clause
@@ -966,19 +964,17 @@ void SATSolver::claDecayActivity() {
 void SATSolver::claBumpActivity(int clause_idx) {
     Clause& c = clauses[clause_idx];
     
-    if ((c.activity += cla_inc) > 1e20) {
+    if ((cls_activity[clause_idx] += cla_inc) > 1e20) {
         // Rescale all clause activities if they get too large
         output.verbose(CALL_INFO, 3, 0, "ACTIVITY: Rescaling all clause activities\n");
-        for (size_t i = 0; i < clauses.size(); i++) {
-            if (clauses[i].learnt) { // Only rescale learnt clauses
-                clauses[i].activity *= 1e-20;
-            }
+        for (size_t i = nLearnts(); i < clauses.size(); i++) {
+            cls_activity[i] *= 1e-20;
         }
         cla_inc *= 1e-20;
     }
     
     output.verbose(CALL_INFO, 4, 0, "ACTIVITY: Bumped clause %d to %f\n", 
-        clause_idx, c.activity);
+        clause_idx, cls_activity[clause_idx]);
 }
 
 // Check if a clause is "locked" - exactly matching MiniSat's implementation
@@ -1011,7 +1007,7 @@ void SATSolver::reduceDB() {
     std::sort(learnts.begin(), learnts.end(), [&](int i, int j) {
         return clauses[i].size() > 2 && 
               (clauses[j].size() == 2 ||
-              clauses[i].activity < clauses[j].activity);
+              cls_activity[i] < cls_activity[j]);
     });
     
     // 3. Extra activity limit for removal
@@ -1031,11 +1027,11 @@ void SATSolver::reduceDB() {
         
         // Only remove non-binary, unlocked clauses
         if (c.size() > 2 && !locked(idx) && 
-            (i < learnts.size() / 2 || c.activity < extra_lim)) {
+            (i < learnts.size() / 2 || cls_activity[idx] < extra_lim)) {
             
             output.verbose(CALL_INFO, 4, 0, 
                 "REDUCEDB: Marking clause %d for removal (size=%d, activity=%.2e)\n", 
-                idx, c.size(), c.activity);
+                idx, c.size(), cls_activity[idx]);
                 
             // Mark for removal and detach from watch lists
             to_remove[idx] = true;

@@ -49,12 +49,9 @@ const Lit lit_Undef = { 0 }; // Special undefined literal
 
 struct Clause {
     std::vector<Lit> literals;
-    bool learnt;  // Flag to identify if this is a learnt clause
-    double activity;  // Activity score for this clause
     
-    Clause() : learnt(false), activity(0) {}
-    Clause(const std::vector<Lit>& lits, bool is_learnt = false) 
-        : literals(lits), learnt(is_learnt), activity(0) {}
+    Clause() {}
+    Clause(const std::vector<Lit>& lits) : literals(lits) {}
     int size() const { return literals.size(); }
 };
 
@@ -197,6 +194,7 @@ public:
     uint64_t getStatCount(Statistic<uint64_t>* stat);
     inline int nAssigns() const { return trail.size(); }
     inline int nLearnts() const { return clauses.size() - num_clauses; }
+    inline bool isLearnt(int clause_idx) const { return clause_idx >= nLearnts(); }
     std::string printClause(const Clause& c);
 
 private:
@@ -250,6 +248,7 @@ private:
     uint64_t random_seed;             // Seed for random number generation
     
     // Clause activity
+    std::vector<double> cls_activity;
     double clause_decay;
     double cla_inc;
 
