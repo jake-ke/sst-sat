@@ -302,7 +302,6 @@ void SATSolver::parseDIMACS(const std::string& content) {
     activity.resize(variables.size(), 0.0);
     polarity.resize(variables.size(), false); // Default phase is false
     decision.resize(variables.size(), true);  // All variables are decision variables
-    cls_activity.resize(clauses.size(), 0.0);
     
     // Insert variables into the heap
     for (Var v = 1; v < (Var)variables.size(); v++) insertVarOrder(v);
@@ -803,6 +802,129 @@ void SATSolver::backtrack(int backtrack_level) {
 }
 
 //-----------------------------------------------------------------------------------
+// clause deletion
+//-----------------------------------------------------------------------------------
+// Remove half of the learnt clauses, 
+// minus the clauses locked by the current assignment. 
+// Locked clauses are clauses that are reason to some assignment. 
+// Binary clauses are never removed.
+void SATSolver::reduceDB() {
+    output.verbose(CALL_INFO, 2, 0, 
+        "REDUCEDB: Starting clause database reduction\n");
+    
+    // 1. Collect learnt clauses indices
+    std::vector<int> learnts;
+    learnts.reserve(clauses.size() - num_clauses);
+    for (int i = num_clauses; i < clauses.size(); i++) {
+        learnts.push_back(i);
+    }
+    
+    // 2. Sort learnt clauses by activity
+    std::sort(learnts.begin(), learnts.end(), [&](int i, int j) {
+        return clauses[i].size() > 2 && 
+              (clauses[j].size() == 2 ||
+              clauses[i].activity < clauses[j].activity);
+    });
+    
+    // 3. Extra activity limit for removal
+    double extra_lim = learnts.size() > 0 ? cla_inc / learnts.size() : 0;
+    
+    output.verbose(CALL_INFO, 3, 0, 
+        "REDUCEDB: Found %zu learnt clauses, extra_lim = %f\n", 
+        learnts.size(), extra_lim);
+    
+    // 4. First pass: mark clauses for removal
+    std::vector<bool> to_remove(clauses.size(), false);
+    int removed = 0;
+    
+    for (size_t i = 0; i < learnts.size(); i++) {
+        int idx = learnts[i];
+        Clause& c = clauses[idx];
+        
+        // Only remove non-binary, unlocked clauses
+        if (c.size() > 2 && !locked(idx) && 
+            (i < learnts.size() / 2 || c.activity < extra_lim)) {
+            output.verbose(CALL_INFO, 4, 0, 
+                "REDUCEDB: Marking clause %d for removal (size=%d, activity=%.2e)\n", 
+                idx, c.size(), c.activity);
+                
+            // Mark for removal and detach from watch lists
+            to_remove[idx] = true;
+            detachClause(idx);
+            removed++;
+        }
+    }
+    
+    // 5. Build clause map (old index -> new index)
+    std::vector<int> clause_map(clauses.size());
+    int i, j;
+    for (i = j = num_clauses; i < clauses.size(); i++) {
+        if (!to_remove[i]) {
+            clause_map[i] = j++;
+        } else {
+            clause_map[i] = ClauseRef_Undef;
+        }
+    }
+    
+    // 6. Update reasons for assigned variables in trail
+    for (int i = 0; i < trail.size(); i++) {
+        Var v = var(trail[i]);
+        int old_reason = variables[v].reason;
+        // skip original clauses and decision variables
+        if (old_reason >= num_clauses && old_reason != ClauseRef_Undef) {
+            // Fatal error: trying to remove a locked clause referenced by a var
+            assert(!to_remove[old_reason]);
+            variables[v].reason = clause_map[old_reason];
+            output.verbose(CALL_INFO, 5, 0, 
+                "REDUCEDB: Updated var %d reason from %d to %d\n", 
+                v, old_reason, variables[v].reason);
+        }
+    }
+    
+    // 7. Update all watch lists with new indices
+    for (size_t i = 0; i < watches.size(); i++) {
+        std::vector<Watcher>& ws = watches[i];
+        size_t new_size = 0;
+        for (size_t k = 0; k < ws.size(); k++) {
+            int old_idx = ws[k].clause_idx;
+            if (old_idx >= num_clauses) {
+                // Fatal error: trying to remove a locked clause referenced by a var
+                assert(!to_remove[old_idx]);
+                // Update index in watcher and keep it
+                ws[k].clause_idx = clause_map[old_idx];
+                ws[new_size++] = ws[k];
+                
+                if (clause_map[old_idx] != old_idx) {
+                    output.verbose(CALL_INFO, 6, 0, 
+                        "REDUCEDB: Updated watcher reference from %d to %d\n",
+                        old_idx, ws[k].clause_idx);
+                }
+            }
+        }
+        ws.resize(new_size);
+    }
+    
+    // 8. Finally, compact the clauses vector
+    std::vector<Clause> new_clauses;
+    new_clauses.reserve(clauses.size() - removed);
+    
+    for (size_t i = 0; i < clauses.size(); i++) {
+        if (!to_remove[i]) {
+            new_clauses.push_back(clauses[i]);
+        }
+    }
+    
+    clauses.swap(new_clauses);
+    
+    output.verbose(CALL_INFO, 3, 0, 
+        "REDUCEDB: Removed %d learnt clauses, new clause count: %zu\n", 
+        removed, clauses.size());
+        
+    stat_db_reductions->addData(1);
+    stat_removed->addDataNTimes(removed, 1);
+}
+
+//-----------------------------------------------------------------------------------
 // Trail Management
 //-----------------------------------------------------------------------------------
 
@@ -983,126 +1105,6 @@ bool SATSolver::locked(int clause_idx) {
     return variables[v].assigned && 
            value(c.literals[0]) == true &&      // First literal is true
            variables[v].reason == clause_idx;   // This clause is the reason
-}
-
-// Remove half of the learnt clauses, 
-// minus the clauses locked by the current assignment. 
-// Locked clauses are clauses that are reason to some assignment. 
-// Binary clauses are never removed.
-void SATSolver::reduceDB() {
-    output.verbose(CALL_INFO, 2, 0, 
-        "REDUCEDB: Starting clause database reduction\n");
-    
-    // 1. Collect learnt clauses indices
-    std::vector<int> learnts;
-    learnts.reserve(clauses.size() - num_clauses);
-    for (int i = num_clauses; i < clauses.size(); i++) {
-        learnts.push_back(i);
-    }
-    
-    // 2. Sort learnt clauses by activity
-    std::sort(learnts.begin(), learnts.end(), [&](int i, int j) {
-        return clauses[i].size() > 2 && 
-              (clauses[j].size() == 2 ||
-              clauses[i].activity < clauses[j].activity);
-    });
-    
-    // 3. Extra activity limit for removal
-    double extra_lim = learnts.size() > 0 ? cla_inc / learnts.size() : 0;
-    
-    output.verbose(CALL_INFO, 3, 0, 
-        "REDUCEDB: Found %zu learnt clauses, extra_lim = %f\n", 
-        learnts.size(), extra_lim);
-    
-    // 4. First pass: mark clauses for removal
-    std::vector<bool> to_remove(clauses.size(), false);
-    int removed = 0;
-    
-    for (size_t i = 0; i < learnts.size(); i++) {
-        int idx = learnts[i];
-        Clause& c = clauses[idx];
-        
-        // Only remove non-binary, unlocked clauses
-        if (c.size() > 2 && !locked(idx) && 
-            (i < learnts.size() / 2 || c.activity < extra_lim)) {
-            output.verbose(CALL_INFO, 4, 0, 
-                "REDUCEDB: Marking clause %d for removal (size=%d, activity=%.2e)\n", 
-                idx, c.size(), c.activity);
-                
-            // Mark for removal and detach from watch lists
-            to_remove[idx] = true;
-            detachClause(idx);
-            removed++;
-        }
-    }
-    
-    // 5. Build clause map (old index -> new index)
-    std::vector<int> clause_map(clauses.size());
-    int i, j;
-    for (i = j = num_clauses; i < clauses.size(); i++) {
-        if (!to_remove[i]) {
-            clause_map[i] = j++;
-        } else {
-            clause_map[i] = ClauseRef_Undef;
-        }
-    }
-    
-    // 6. Update reasons for assigned variables in trail
-    for (int i = 0; i < trail.size(); i++) {
-        Var v = var(trail[i]);
-        int old_reason = variables[v].reason;
-        // skip original clauses and decision variables
-        if (old_reason >= num_clauses && old_reason != ClauseRef_Undef) {
-            // Fatal error: trying to remove a locked clause referenced by a var
-            assert(!to_remove[old_reason]);
-            variables[v].reason = clause_map[old_reason];
-            output.verbose(CALL_INFO, 5, 0, 
-                "REDUCEDB: Updated var %d reason from %d to %d\n", 
-                v, old_reason, variables[v].reason);
-        }
-    }
-    
-    // 7. Update all watch lists with new indices
-    for (size_t i = 0; i < watches.size(); i++) {
-        std::vector<Watcher>& ws = watches[i];
-        size_t new_size = 0;
-        for (size_t k = 0; k < ws.size(); k++) {
-            int old_idx = ws[k].clause_idx;
-            if (old_idx >= num_clauses) {
-                // Fatal error: trying to remove a locked clause referenced by a var
-                assert(!to_remove[old_idx]);
-                // Update index in watcher and keep it
-                ws[k].clause_idx = clause_map[old_idx];
-                ws[new_size++] = ws[k];
-                
-                if (clause_map[old_idx] != old_idx) {
-                    output.verbose(CALL_INFO, 6, 0, 
-                        "REDUCEDB: Updated watcher reference from %d to %d\n",
-                        old_idx, ws[k].clause_idx);
-                }
-            }
-        }
-        ws.resize(new_size);
-    }
-    
-    // 8. Finally, compact the clauses vector
-    std::vector<Clause> new_clauses;
-    new_clauses.reserve(clauses.size() - removed);
-    
-    for (size_t i = 0; i < clauses.size(); i++) {
-        if (!to_remove[i]) {
-            new_clauses.push_back(clauses[i]);
-        }
-    }
-    
-    clauses.swap(new_clauses);
-    
-    output.verbose(CALL_INFO, 3, 0, 
-        "REDUCEDB: Removed %d learnt clauses, new clause count: %zu\n", 
-        removed, clauses.size());
-        
-    stat_db_reductions->addData(1);
-    stat_removed->addDataNTimes(removed, 1);
 }
 
 //-----------------------------------------------------------------------------------
