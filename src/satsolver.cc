@@ -378,7 +378,6 @@ bool SATSolver::solveCDCL() {
             Clause new_clause(learnt_clause);
             int clause_idx = clauses.size();
             clauses.push_back(new_clause);
-            cls_activity.push_back(0.0);
             attachClause(clause_idx);  
             trailEnqueue(learnt_clause[0], clause_idx);
             claBumpActivity(clause_idx);
@@ -819,7 +818,7 @@ void SATSolver::trailEnqueue(Lit literal, int reason) {
         v, variables[v].value ? 1 : 0, current_level(), reason);
 }
 
-void SATSolver::unassignVariable(int var) {
+void SATSolver::unassignVariable(Var var) {
     variables[var].assigned = false;
     stat_unassigns->addData(1);
 }
@@ -964,17 +963,17 @@ void SATSolver::claDecayActivity() {
 void SATSolver::claBumpActivity(int clause_idx) {
     Clause& c = clauses[clause_idx];
     
-    if ((cls_activity[clause_idx] += cla_inc) > 1e20) {
+    if ((c.activity += cla_inc) > 1e20) {
         // Rescale all clause activities if they get too large
         output.verbose(CALL_INFO, 3, 0, "ACTIVITY: Rescaling all clause activities\n");
         for (size_t i = nLearnts(); i < clauses.size(); i++) {
-            cls_activity[i] *= 1e-20;
+            clauses[i].activity *= 1e-20;
         }
         cla_inc *= 1e-20;
     }
     
     output.verbose(CALL_INFO, 4, 0, "ACTIVITY: Bumped clause %d to %f\n", 
-        clause_idx, cls_activity[clause_idx]);
+        clause_idx, c.activity);
 }
 
 // Check if a clause is "locked" - exactly matching MiniSat's implementation
@@ -1007,7 +1006,7 @@ void SATSolver::reduceDB() {
     std::sort(learnts.begin(), learnts.end(), [&](int i, int j) {
         return clauses[i].size() > 2 && 
               (clauses[j].size() == 2 ||
-              cls_activity[i] < cls_activity[j]);
+              clauses[i].activity < clauses[j].activity);
     });
     
     // 3. Extra activity limit for removal
@@ -1027,11 +1026,10 @@ void SATSolver::reduceDB() {
         
         // Only remove non-binary, unlocked clauses
         if (c.size() > 2 && !locked(idx) && 
-            (i < learnts.size() / 2 || cls_activity[idx] < extra_lim)) {
-            
+            (i < learnts.size() / 2 || c.activity < extra_lim)) {
             output.verbose(CALL_INFO, 4, 0, 
                 "REDUCEDB: Marking clause %d for removal (size=%d, activity=%.2e)\n", 
-                idx, c.size(), cls_activity[idx]);
+                idx, c.size(), c.activity);
                 
             // Mark for removal and detach from watch lists
             to_remove[idx] = true;

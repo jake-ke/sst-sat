@@ -49,9 +49,11 @@ const Lit lit_Undef = { 0 }; // Special undefined literal
 
 struct Clause {
     std::vector<Lit> literals;
-    
-    Clause() {}
-    Clause(const std::vector<Lit>& lits) : literals(lits) {}
+    double activity;  // Activity score for this clause
+
+    Clause() : activity(0) {}
+    Clause(const std::vector<Lit>& lits) 
+        : literals(lits), activity(0) {}
     int size() const { return literals.size(); }
 };
 
