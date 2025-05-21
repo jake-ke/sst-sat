@@ -93,7 +93,7 @@ run_tests_for_directory() {
         if [ $exit_status -eq 0 ]; then
             # Check for ERROR occurrences even in passed tests
             log_file="$LOGS_DIR/${filename}_${dir_type}_$TIMESTAMP.log"
-            error_count=$(grep -c "ERROR" "$log_file")
+            error_count=$(grep -i -c -E "error|fault" "$log_file")
             if [ $error_count -gt 0 ]; then
                 log_message "[$end_time]   FAILED (found $error_count errors in $log_file)"
                 eval "$failed_var=\$(($failed_var + 1))"
