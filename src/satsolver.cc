@@ -297,6 +297,7 @@ void SATSolver::parseDIMACS(const std::string& content) {
     
     // initialization
     qhead = 0;
+    watches.resize(2 * (num_vars + 1));
     seen.resize(variables.size(), 0);
     activity.resize(variables.size(), 0.0);
     polarity.resize(variables.size(), false); // Default phase is false
@@ -511,7 +512,6 @@ int SATSolver::unitPropagate() {
         int watch_idx = toWatchIndex(p);
         if (watch_idx >= (int)watches.size())
             continue;  // No watches for this literal
-        
         std::vector<Watcher>& ws = watches[watch_idx];
         
         output.verbose(CALL_INFO, 3, 0,
@@ -563,6 +563,7 @@ int SATSolver::unitPropagate() {
             }
             
             // Look for a new literal to watch
+            // can be a true literal for faster termination
             for (size_t k = 2; k < c.size(); k++) {
                 Lit lit = c.literals[k];
                 if (!variables[var(lit)].assigned || value(lit) == true) {
@@ -844,9 +845,6 @@ void SATSolver::detachClause(int clause_idx) {
 
 void SATSolver::insert_watch(Lit p, Watcher w) {
     int idx = toWatchIndex(p);
-    if (idx >= (int)watches.size()) {
-        watches.resize(idx + 1);
-    }
     watches[idx].push_back(w);
 }
 
