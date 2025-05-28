@@ -129,22 +129,22 @@ summary="
 Test Summary
 ===============================================
 SAT Tests:
-  Total:      $sat_total
-  Passed:     $sat_passed
-  Timed out:  $sat_timedout
-  Failed:     $sat_failed
+    Total:      $sat_total
+    Passed:     $sat_passed
+    Timed out:  $sat_timedout
+    Failed:     $sat_failed
 
 UNSAT Tests:
-  Total:      $unsat_total
-  Passed:     $unsat_passed
-  Timed out:  $unsat_timedout
-  Failed:     $unsat_failed
+    Total:      $unsat_total
+    Passed:     $unsat_passed
+    Timed out:  $unsat_timedout
+    Failed:     $unsat_failed
 
 Overall:
-  Total tests: $total
-  Passed:      $passed
-  Timed out:   $timedout
-  Failed:      $failed
+    Total tests: $total
+    Passed:      $passed
+    Timed out:   $timedout
+    Failed:      $failed
 ===============================================
 Test run completed at $(date)
 "
