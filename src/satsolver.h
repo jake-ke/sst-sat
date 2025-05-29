@@ -11,6 +11,7 @@
 #include <boost/coroutine2/all.hpp>
 #include "structs.h"
 #include "async_heap.h"
+#include "async_variables.h"
 
 //-----------------------------------------------------------------------------------
 // Type Definitions and Constants
@@ -25,11 +26,8 @@ enum SolverState {
     DECIDE,
     ANALYZE,
     BACKTRACK,
-    INSERT_VAR,
     REDUCE,
     RESTART,
-    HEAP_WAIT,
-    PROCESS_ACTIVITY,  // New state for processing activity bumps
     DONE 
 };
 
@@ -44,8 +42,6 @@ inline Lit toLit(int dimacs_lit) {
 }
 inline int toInt(Lit p) { return sign(p) ? -var(p) : var(p); }
 
-const Lit lit_Undef = { 0 }; // Special undefined literal
-
 //-----------------------------------------------------------------------------------
 // Data Structures
 //-----------------------------------------------------------------------------------
@@ -58,15 +54,6 @@ struct Clause {
     Clause(const std::vector<Lit>& lits) 
         : literals(lits), activity(0) {}
     int size() const { return literals.size(); }
-};
-
-struct Variable {
-    bool assigned;
-    bool value;
-    size_t level;                // Decision level when variable was assigned
-    int reason;                  // Index of clause that caused this assignment, or ClauseRef_Undef
-    
-    Variable() : assigned(false), value(false), level(0), reason(ClauseRef_Undef) {}
 };
 
 // Watcher structure for 2WL scheme
@@ -108,8 +95,9 @@ public:
         {"luby_restart", "Use Luby restart sequence", "true"},
         {"restart_first", "Initial restart limit", "100"},
         {"restart_inc", "Restart limit increase factor", "2.0"},
-        {"heap_base_addr", "Base address for heap memory", "0x10000000"},
-        {"indices_base_addr", "Base address for indices memory", "0x20000000"},
+        {"heap_base_addr", "Base address for heap memory", "0x00000000"},
+        {"indices_base_addr", "Base address for indices memory", "0x10000000"},
+        {"variables_base_addr", "Base address for variables memory", "0x20000000"},
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -126,14 +114,14 @@ public:
     )
 
     SST_ELI_DOCUMENT_PORTS(
-        {"mem_link", "Connection to main memory", {"memHierarchy.MemEventBase"}},
-        {"heapmem_link", "Connection to heap memory", {"memHierarchy.MemEventBase"}},
+        {"cnf_mem_link", "Connection to CNF memory", {"memHierarchy.MemEventBase"}},
+        {"global_mem_link", "Connection to global memory", {"memHierarchy.MemEventBase"}},
         {"heap_port", "Link to external heap subcomponent", {"sst.Event"}}
     )
     
     SST_ELI_DOCUMENT_SUBCOMPONENT_SLOTS(
-        {"memory", "Memory interface for CNF data", "SST::Interfaces::StandardMem"},
-        {"heap_memory", "Memory interface for Heap", "SST::Interfaces::StandardMem"},
+        {"cnf_memory", "Memory interface for CNF data", "SST::Interfaces::StandardMem"},
+        {"global_memory", "Memory interface for Heap and Variables", "SST::Interfaces::StandardMem"},
         {"order_heap", "ordered heap for VSIDS", "Heap"}
     )
 
@@ -147,16 +135,16 @@ public:
     virtual void finish() override;
 
     // Event Handling Methods
-    void handleMemEvent(SST::Interfaces::StandardMem::Request* req);
-    void handleHeapMemEvent(SST::Interfaces::StandardMem::Request* req);
-    void handleHeapResponse(SST::Event* ev); // New handler for heap responses
-    
+    void handleCnfMemEvent(SST::Interfaces::StandardMem::Request* req);
+    void handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req);
+    void handleHeapResponse(SST::Event* ev);
+
     // Top level FSM
     bool clockTick(SST::Cycle_t currentCycle);
-    void execPropagate();
+    void execPropagate(coro_t::push_type &yield);
     void execAnalyze(coro_t::push_type &yield);
     void execBacktrack(coro_t::push_type &yield);
-    void execReduce();
+    void execReduce(coro_t::push_type &yield);
     void execRestart(coro_t::push_type &yield);
     void execDecide(coro_t::push_type &yield);
     
@@ -166,15 +154,15 @@ public:
     // Core CDCL Algorithm
     void initialize(coro_t::push_type &yield);
     bool decide(coro_t::push_type &yield);
-    int unitPropagate();  // returns conflict clause index or ClauseRef_Undef if no conflict
+    int unitPropagate(coro_t::push_type &yield);
     void analyze(coro_t::push_type &yield);
     void backtrack(coro_t::push_type &yield, int backtrack_level);
     
     // Trail Management
-    void trailEnqueue(Lit literal, int reason = ClauseRef_Undef);
-    void unassignVariable(Var var);
-    int current_level() { return trail_lim.size(); }  // Changed to use trail_lim
-    
+    void trailEnqueue(coro_t::push_type &yield, Lit literal, int reason = ClauseRef_Undef);
+    void unassignVariable(coro_t::push_type &yield, Var var);
+    int current_level() { return trail_lim.size(); }
+
     // Two-Watched Literals
     inline int toWatchIndex(Lit p) { return p.x; }
     void attachClause(int clause_idx);
@@ -191,18 +179,18 @@ public:
     // Clause Activity
     void claDecayActivity();
     void claBumpActivity(int clause_idx);
-    void reduceDB();
-    bool locked(int clause_idx);  // Check if clause is locked (reason for assignment)
+    void reduceDB(coro_t::push_type &yield);                // Reduce the learnt clause database
+    bool locked(coro_t::push_type &yield, int clause_idx);  // Check if clause is locked (reason for assignment)
 
     // Clause Minimization
-    bool litRedundant(Lit p);
+    bool litRedundant(coro_t::push_type &yield, Lit p);
 
     // Restart helpers
     double luby(double y, int x);                 // Calculate Luby sequence value
 
     // Utility Functions
-    inline bool value(Var v) { return variables[v].value; }
-    inline bool value(Lit p) { return variables[var(p)].value ^ sign(p); }
+    inline bool value(Var v) { return var_value[v]; }
+    inline bool value(Lit p) { return var_value[var(p)] ^ sign(p); }
     void ensureVarCapacity(Var v);
     double drand(uint64_t& seed);                  // Random number generator
     int irand(uint64_t& seed, int size);           // Integer random in range [0,size-1]
@@ -225,8 +213,8 @@ private:
     // State Variables
     SolverState state, next_state;
     SST::Output output;
-    SST::Interfaces::StandardMem* memory;         // For CNF data
-    SST::Interfaces::StandardMem* heap_memory;    // For heap operations
+    SST::Interfaces::StandardMem* cnf_memory;    // For CNF data
+    SST::Interfaces::StandardMem* global_memory; // For heap and variables operations
     std::string dimacs_content;
     SST::Cycle_t currentCycle;
     coro_t::pull_type* coroutine; // Coroutine for async operations
@@ -237,14 +225,16 @@ private:
     uint32_t num_vars;
     uint32_t num_clauses;
     bool sort_clauses;
+    std::vector<Lit> initial_units;     // Initial unit clauses from DIMACS
     
     // SAT solver state
     std::vector<Clause> clauses;
-    std::vector<Variable> variables;  // Indexed by variable number
+    std::vector<bool> var_assigned;     // Whether each variable is assigned
+    std::vector<bool> var_value;        // Value of each variable
     
-    // Trail for recording assignment order
+    // Implication graph
     uint qhead;
-    std::vector<Lit> trail;           // Sequence of assignments in chronological order
+    std::vector<Lit> trail;            // Sequence of assignments in chronological order
     std::vector<uint> trail_lim;       // Indices in trail for the first literal at each decision level
     
     // Clause learning
@@ -268,11 +258,13 @@ private:
     double var_decay;                   // Variable activity decay factor
     double random_var_freq;             // Frequency of random decisions
     uint64_t random_seed;               // Seed for random number generation
-    Var pending_var;                    // Variable being processed
-    Lit pending_lit;                    // Literal being processed
     SST::Link* heap_link;               // Link to async heap
     uint64_t heap_base_addr;            // Base address for heap memory
     uint64_t indices_base_addr;         // Base address for indices memory
+
+    // Variables instance for asynchronous memory access to variable data
+    Variables* variables;
+    uint64_t variables_base_addr;
     
     // Clause activity
     double clause_decay;

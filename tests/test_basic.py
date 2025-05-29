@@ -68,9 +68,10 @@ with open(args.cnf_path, 'r') as f:
 # Create the SAT solver component
 solver = sst.Component("solver", "satsolver.SATSolver")
 
-# Define memory addresses for heap operations
+# Define memory addresses for global memory operations
 heap_base_addr = 0x00000000
 indices_base_addr = 0x10000000
+variables_base_addr = 0x20000000
 
 # Get file size and pass it to solver
 file_size = os.path.getsize(args.cnf_path)
@@ -81,6 +82,7 @@ params = {
     "filesize" : str(file_size),
     "heap_base_addr" : hex(heap_base_addr),
     "indices_base_addr" : hex(indices_base_addr),
+    "variables_base_addr" : hex(variables_base_addr),
     "random_var_freq": str(args.random_var_freq),
     "var_decay": str(args.var_decay),
     "clause_decay": str(args.clause_decay)
@@ -99,11 +101,11 @@ heap.addParams({
 })
 
 # Configure memory interface for CNF data
-iface = solver.setSubComponent("memory", "memHierarchy.standardInterface")
+cnf_iface = solver.setSubComponent("cnf_memory", "memHierarchy.standardInterface")
 
 # Create memory controller for CNF data
-memctrl = sst.Component("memory", "memHierarchy.MemController")
-memctrl.addParams({
+cnf_memctrl = sst.Component("cnf_memory", "memHierarchy.MemController")
+cnf_memctrl.addParams({
     "clock" : "1GHz",
     "backing" : "mmap",
     "backing_size_unit" : "1B",
@@ -118,18 +120,18 @@ memctrl.addParams({
 })
 
 # Create memory backend for CNF data
-memory = memctrl.setSubComponent("backend", "memHierarchy.simpleMem")
-memory.addParams({
+cnf_memory = cnf_memctrl.setSubComponent("backend", "memHierarchy.simpleMem")
+cnf_memory.addParams({
     "access_time" : "10ns",
     "mem_size" : "512MiB",
 })
 
-# Configure memory interface for heap operations
-heap_iface = solver.setSubComponent("heap_memory", "memHierarchy.standardInterface")
+# Configure memory interface for global operations (heap and variables)
+global_iface = solver.setSubComponent("global_memory", "memHierarchy.standardInterface")
 
-# Create memory controller for heap operations
-heap_memctrl = sst.Component("heap_memory", "memHierarchy.MemController")
-heap_memctrl.addParams({
+# Create memory controller for global operations
+global_memctrl = sst.Component("global_memory", "memHierarchy.MemController")
+global_memctrl.addParams({
     "clock" : "1GHz",
     "debug" : "1",
     "debug_level" : "10",
@@ -139,9 +141,9 @@ heap_memctrl.addParams({
     "mem_size" : "1GiB",
 })
 
-# Create memory backend for heap operations
-heap_memory = heap_memctrl.setSubComponent("backend", "memHierarchy.simpleMem")
-heap_memory.addParams({
+# Create memory backend for global operations
+global_memory = global_memctrl.setSubComponent("backend", "memHierarchy.simpleMem")
+global_memory.addParams({
     "access_time" : "1ns",
     "mem_size" : "1GiB",
 })
@@ -150,13 +152,13 @@ heap_memory.addParams({
 solver_heap_link = sst.Link("solver_heap_link")
 solver_heap_link.connect((solver, "heap_port", "1ns"), (heap, "response", "1ns"))
 
-# Connect solver to main memory controller
-mem_link = sst.Link("mem_link")
-mem_link.connect((iface, "lowlink", "1ns"), (memctrl, "highlink", "1ns"))
+# Connect solver to CNF memory controller
+cnf_mem_link = sst.Link("cnf_mem_link")
+cnf_mem_link.connect((cnf_iface, "lowlink", "1ns"), (cnf_memctrl, "highlink", "1ns"))
 
-# Connect solver to heap memory controller
-heapmem_link = sst.Link("heapmem_link")
-heapmem_link.connect((heap_iface, "lowlink", "1ns"), (heap_memctrl, "highlink", "1ns"))
+# Connect solver to global memory controller
+global_mem_link = sst.Link("global_mem_link")
+global_mem_link.connect((global_iface, "lowlink", "1ns"), (global_memctrl, "highlink", "1ns"))
 
 # Enable statistics - different types for different stats
 sst.setStatisticLoadLevel(7)

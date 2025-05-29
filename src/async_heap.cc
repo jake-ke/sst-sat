@@ -5,9 +5,7 @@ Heap::Heap(SST::ComponentId_t id, SST::Params& params, const VarOrderLt& c,
     : SST::SubComponent(id), lt(c), memory(mem), state(IDLE), heap_size(0),
       outstanding_mem_requests(0), heap_addr(heap_base_addr), indices_addr(indices_base_addr) {
     
-    output.init("HEAP-" + getName() + "-> ",
-        params.find<int>("verbose", 0), 0, SST::Output::STDOUT);
-    printf("verbose level: %d\n", params.find<int>("verbose", 0));
+    output.init("HEAP-> ", params.find<int>("verbose", 0), 0, SST::Output::STDOUT);
 
     registerClock(params.find<std::string>("clock", "1GHz"),
         new SST::Clock::Handler<Heap>(this, &Heap::tick));
@@ -98,7 +96,7 @@ void Heap::write(uint64_t addr, Var val) {
 }
 
 void Heap::complete(int res) {
-    output.verbose(CALL_INFO, 7, 0, "Complete: %d, res %d\n", current_op, res);
+    output.verbose(CALL_INFO, 7, 0, "Completed Op %d, res %d\n", current_op, res);
     assert(outstanding_mem_requests == 0);
     HeapRespEvent* ev = new HeapRespEvent(res);
     response_port->send(ev);
@@ -216,7 +214,7 @@ void Heap::decrease(coro_t::push_type &heap_sink) {
 }
 
 void Heap::insert(coro_t::push_type &heap_sink) {
-    output.verbose(CALL_INFO, 7, 0, "Insert: key %d\n", key);
+    output.verbose(CALL_INFO, 7, 0, "Insert: key %d, heap size %ld\n", key, heap_size);
     write(indexAddr(key), heap_size);
     heap_sink();
     
@@ -233,7 +231,7 @@ void Heap::insert(coro_t::push_type &heap_sink) {
 }
 
 void Heap::removeMin(coro_t::push_type &heap_sink) {
-    output.verbose(CALL_INFO, 7, 0, "RemoveMin\n");
+    output.verbose(CALL_INFO, 7, 0, "RemoveMin, heap size %ld\n", heap_size);
     sst_assert(heap_size > 0, CALL_INFO, -1, "Heap is empty, cannot remove min\n");
     
     read(heapAddr(0));
@@ -243,13 +241,13 @@ void Heap::removeMin(coro_t::push_type &heap_sink) {
     write(indexAddr(min_var), -1);
     heap_sink();
     
-    heap_size--;
     if (heap_size == 1) {
+        heap_size--;
         complete(min_var);
         return;
     }
 
-    read(heapAddr(heap_size));
+    read(heapAddr(heap_size - 1));
     heap_sink();
     Var last_var = read_data;
 
@@ -258,8 +256,10 @@ void Heap::removeMin(coro_t::push_type &heap_sink) {
 
     write(heapAddr(0), last_var);
     heap_sink();
-
-    percolateDown(0, heap_sink);
+    
+    heap_size--;
+    if (heap_size > 1)
+        percolateDown(0, heap_sink);
     complete(min_var);
 }
 

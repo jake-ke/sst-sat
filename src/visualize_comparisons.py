@@ -218,8 +218,8 @@ def main():
     assert len(sys.argv) == 3, "Usage: python visualize_comparisons.py <logs_dir> <logs_dir_2>"
     
     # Load and merge data
-    logs_dir = '/home/jakeke/sst/scratch/src/sst-sat/src/logs'
-    backup_dir = '/home/jakeke/sst/scratch/src/sst-sat/src/logs_bak'
+    logs_dir = sys.argv[1]
+    backup_dir = sys.argv[2]
     
     print(f"Loading logs from: {logs_dir}")
     df_current = load_all_logs(logs_dir)
@@ -228,7 +228,7 @@ def main():
     df_merged = pd.merge(df_current, df_backup, on='problem', suffixes=('_current', '_backup'))
     
     if not df_merged.empty:
-        create_scatter_plots(sys.argv[1], sys.argv[2])
+        create_scatter_plots(logs_dir, backup_dir)
         print_summary_stats(df_merged)
     else:
         print("No data available for comparison!")

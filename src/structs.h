@@ -17,6 +17,14 @@ struct Lit {
     bool operator != (const Lit& other) const { return x != other.x; }
     bool operator <  (const Lit& other) const { return x < other.x; }
 };
+const Lit lit_Undef = { 0 }; // Special undefined literal
+
+struct Variable {
+    size_t level;   // Decision level when variable was assigned
+    int reason;     // Index of clause that caused this assignment
+    
+    Variable() : level(0), reason(ClauseRef_Undef) {}
+};
 
 // Comparator for the variable activity heap
 struct VarOrderLt {
