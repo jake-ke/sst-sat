@@ -1,6 +1,8 @@
 #ifndef structs_h
 #define structs_h
 
+using coro_t = boost::coroutines2::coroutine<void>;
+
 // Define types for variables and literals
 typedef int Var;
 const Var var_Undef = 0;

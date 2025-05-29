@@ -91,6 +91,13 @@ if args.decision_output_path:
     params["decision_output_file"] = args.decision_output_path
 solver.addParams(params)
 
+
+# Create the external heap subcomponent
+heap = solver.setSubComponent("order_heap", "satsolver.Heap")
+heap.addParams({
+    "verbose" : str(args.verbose),
+})
+
 # Configure memory interface for CNF data
 iface = solver.setSubComponent("memory", "memHierarchy.standardInterface")
 
@@ -113,7 +120,7 @@ memctrl.addParams({
 # Create memory backend for CNF data
 memory = memctrl.setSubComponent("backend", "memHierarchy.simpleMem")
 memory.addParams({
-    "access_time" : "100ns",
+    "access_time" : "10ns",
     "mem_size" : "512MiB",
 })
 
@@ -126,7 +133,7 @@ heap_memctrl.addParams({
     "clock" : "1GHz",
     "debug" : "1",
     "debug_level" : "10",
-    "verbose" : "10",
+    "verbose" : "0",
     "addr_range_start" : "0",
     "addr_range_end" : "0x3FFFFFFF",
     "mem_size" : "1GiB",
@@ -139,16 +146,13 @@ heap_memory.addParams({
     "mem_size" : "1GiB",
 })
 
-# Create the external heap subcomponent
-heap = solver.setSubComponent("order_heap", "satsolver.Heap")
-
 # Connect solver to heap
 solver_heap_link = sst.Link("solver_heap_link")
 solver_heap_link.connect((solver, "heap_port", "1ns"), (heap, "response", "1ns"))
 
 # Connect solver to main memory controller
-link = sst.Link("mem_link")
-link.connect((iface, "lowlink", "1ns"), (memctrl, "highlink", "1ns"))
+mem_link = sst.Link("mem_link")
+mem_link.connect((iface, "lowlink", "1ns"), (memctrl, "highlink", "1ns"))
 
 # Connect solver to heap memory controller
 heapmem_link = sst.Link("heapmem_link")
@@ -171,7 +175,7 @@ sst.enableStatisticsForComponentName("solver", [
     "restarts"
 ], {
     "type": "sst.AccumulatorStatistic",
-    "rate": "100ns"
+    "rate": "100us"
 })
 
 sst.setStatisticOutput("sst.statOutputCSV", 

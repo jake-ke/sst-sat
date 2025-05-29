@@ -8,6 +8,7 @@
 #include <vector>
 #include <string>
 #include <fstream>    // For reading decision file
+#include <boost/coroutine2/all.hpp>
 #include "structs.h"
 #include "async_heap.h"
 
@@ -18,7 +19,8 @@
 // Unified state machine combining high-level states and detailed operations
 enum SolverState { 
     IDLE,
-    INIT, 
+    INIT,
+    STEP,
     PROPAGATE,
     DECIDE,
     ANALYZE,
@@ -145,28 +147,28 @@ public:
     virtual void finish() override;
 
     // Event Handling Methods
-    bool clockTick(SST::Cycle_t currentCycle);
     void handleMemEvent(SST::Interfaces::StandardMem::Request* req);
     void handleHeapMemEvent(SST::Interfaces::StandardMem::Request* req);
     void handleHeapResponse(SST::Event* ev); // New handler for heap responses
     
-    // Event-driven execution methods (remove executeNextOperation)
+    // Top level FSM
+    bool clockTick(SST::Cycle_t currentCycle);
     void execPropagate();
-    void execAnalyze();
-    void execBacktrack();
+    void execAnalyze(coro_t::push_type &yield);
+    void execBacktrack(coro_t::push_type &yield);
     void execReduce();
-    void execRestart();
+    void execRestart(coro_t::push_type &yield);
+    void execDecide(coro_t::push_type &yield);
     
     // Input Processing
     void parseDIMACS(const std::string& content);
     
     // Core CDCL Algorithm
-    void init();
-    void decide1();
-    void decide2();
+    void initialize(coro_t::push_type &yield);
+    bool decide(coro_t::push_type &yield);
     int unitPropagate();  // returns conflict clause index or ClauseRef_Undef if no conflict
-    void analyze(int conflict, std::vector<Lit>& learnt_clause, int& backtrack_level);
-    void backtrack();
+    void analyze(coro_t::push_type &yield);
+    void backtrack(coro_t::push_type &yield, int backtrack_level);
     
     // Trail Management
     void trailEnqueue(Lit literal, int reason = ClauseRef_Undef);
@@ -181,12 +183,10 @@ public:
     void remove_watch(std::vector<Watcher>& ws, int clause_idx);
     
     // Decision Heuristics
-    Lit chooseBranchVariable();
-    void insertVarOrder();                    // Insert variable into order heap
-    void varDecayActivity();                       // Decay all variable activities
-    void varBumpActivity(Var v);                   // Bump a variable's activity
-    void processPendingActivity();
-    void loadDecisionSequence(const std::string& filename);  // user-defined decision sequence
+    Lit chooseBranchVariable(coro_t::push_type &yield);
+    void insertVarOrder(coro_t::push_type &yield, Var v);   // Insert variable into order heap
+    void varDecayActivity();                                // Decay all variable activities
+    void varBumpActivity(coro_t::push_type &yield, Var v);  // Bump a variable's activity
     
     // Clause Activity
     void claDecayActivity();
@@ -211,6 +211,8 @@ public:
     inline int nLearnts() const { return clauses.size() - num_clauses; }
     inline bool isLearnt(int clause_idx) const { return clause_idx >= nLearnts(); }
     std::string printClause(const Clause& c);
+    void loadDecisionSequence(const std::string& filename);  // user-defined decision sequence
+    void dumpDecision(Lit lit);
 
 private:
     // Structure for clause minimization
@@ -227,14 +229,14 @@ private:
     SST::Interfaces::StandardMem* heap_memory;    // For heap operations
     std::string dimacs_content;
     SST::Cycle_t currentCycle;
+    coro_t::pull_type* coroutine; // Coroutine for async operations
+    int heap_resp;
 
     // Parsing state
     size_t filesize;
     uint32_t num_vars;
     uint32_t num_clauses;
     bool sort_clauses;
-    int var_i;
-    bool restart_pending;;
     
     // SAT solver state
     std::vector<Clause> clauses;
@@ -247,7 +249,7 @@ private:
     
     // Clause learning
     int conflict;                               // Conflict clause index from propagation
-    std::vector<Lit> learnt;                    // Learnt clause from conflict analysis
+    std::vector<Lit> learnt_clause;             // Learnt clause from conflict analysis
     int bt_level;                               // Backtrack level from conflict analysis
     std::vector<char> seen;                     // Temporary array for conflict analysis
     int ccmin_mode;                             // Conflict clause minimization mode
@@ -261,7 +263,7 @@ private:
     std::vector<double> activity;       // Activity score for each variable
     std::vector<bool> polarity;         // Saved phase (polarity) for each variable
     std::vector<bool> decision;         // Whether variable is eligible for decisions
-    Heap* order_heap;   // Heap of variables ordered by activity
+    Heap* order_heap;                   // Heap of variables ordered by activity
     double var_inc;                     // Amount to bump variable activity by
     double var_decay;                   // Variable activity decay factor
     double random_var_freq;             // Frequency of random decisions
@@ -309,14 +311,9 @@ private:
     std::vector<std::pair<Var, bool>> decision_sequence; // (variable, sign) pairs
     size_t decision_seq_idx;                             // Current position in sequence
     bool has_decision_sequence;                          // Whether a decision sequence was provided
-
-    // asynchronous communication queues
-    std::vector<Var> activity_bump_queue; // Queue for variables to bump activity
-
     // Decision output
     std::string decision_output_file;
     std::ofstream decision_output_stream;
-    void dumpDecision(Lit lit);
 };
 
 #endif // SATSOLVER_H

@@ -14,7 +14,6 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     state(IDLE),
     pending_var(var_Undef),
     random_seed(91648253),
-    var_i(1),
     var_inc(1.0),
     cla_inc(1.0),
     learntsize_factor((double)1/(double)3),
@@ -25,7 +24,6 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     decision_seq_idx(0),
     has_decision_sequence(false),
     luby_restart(true),
-    restart_pending(0),
     restart_first(100),
     restart_inc(2.0),
     curr_restarts(0),
@@ -94,10 +92,6 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
         SST::ComponentInfo::SHARE_PORTS | SST::ComponentInfo::SHARE_STATS,
         VarOrderLt(activity), heap_memory, heap_base_addr, indices_base_addr
     );
-    // order_heap = loadAnonymousSubComponent<Heap>("satsolver.Heap", "order_heap", 0,
-    //     SST::ComponentInfo::SHARE_NONE,
-    //     params, VarOrderLt(activity), heap_memory
-    // );
     sst_assert(order_heap != nullptr, CALL_INFO, -1, "Unable to load Heap subcomponent\n");
 
     // Configure the link to the heap subcomponent
@@ -186,196 +180,6 @@ void SATSolver::finish() {
         clauses.size(), 
         getStatCount(stat_learned) - getStatCount(stat_removed));
     output.output("===========================================================================\n");
-}
-
-//-----------------------------------------------------------------------------------
-// Event Handling Methods
-//-----------------------------------------------------------------------------------
-
-void SATSolver::handleMemEvent(SST::Interfaces::StandardMem::Request* req) {
-    SST::Interfaces::StandardMem::ReadResp* resp = 
-        dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req);
-    
-    if (resp) {
-        // Convert byte data back to string
-        std::vector<uint8_t>& data = resp->data;
-        dimacs_content = std::string(data.begin(), data.end());
-        output.verbose(CALL_INFO, 1, 0,
-            "Received %zu bytes from memory\n", resp->data.size());
-        parseDIMACS(dimacs_content);
-        output.verbose(CALL_INFO, 1, 0,
-            "Parsed %u variables, %u clauses\n\n", num_vars, num_clauses);
-        state = INIT;
-        var_i = 1;  // Start inserting variables into the heap
-    }
-    delete req;
-}
-
-void SATSolver::handleHeapMemEvent(SST::Interfaces::StandardMem::Request* req) {
-    order_heap->handleMem(req);
-}
-
-void SATSolver::handleHeapResponse(SST::Event* ev) {
-    HeapRespEvent* resp = dynamic_cast<HeapRespEvent*>(ev);
-    if (!resp) {
-        output.fatal(CALL_INFO, -1, "Received invalid event type on heap_port\n");
-        delete ev;
-        return;
-    }
-    output.verbose(CALL_INFO, 7, 0, "Received heap response, next_state %d, heap_size %zu\n", next_state, order_heap->size());
-    assert(resp->success);
-    pending_var = resp->result;
-    switch(next_state) {
-        case INIT: var_i++; init(); break;
-        case DECIDE: decide2(); break;
-        case INSERT_VAR: 
-            if (!resp->result) { // not in the heap then insert
-                Var v = var(trail[var_i]);
-                order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INSERT, v));
-                next_state = BACKTRACK;
-                state = HEAP_WAIT;
-                output.verbose(CALL_INFO, 4, 0, "HEAP: Inserted var %d into order heap\n", v);
-            }
-            else {
-                output.verbose(CALL_INFO, 4, 0, "HEAP: already in the heap\n");
-                var_i--;
-                insertVarOrder();
-            }
-            break;
-        case BACKTRACK: var_i--; insertVarOrder(); break;  // Continue inserting variables
-        case PROCESS_ACTIVITY:
-            var_i++;  // Move to next variable
-            processPendingActivity();
-            break;
-        default: output.fatal(CALL_INFO, -1, "Invalid state: %d\n", state);
-    }
-    delete ev;
-}
-
-bool SATSolver::clockTick(SST::Cycle_t cycle) {
-    switch (state) {
-        case IDLE: return false; // skip prints
-        case INIT: init(); break;
-        case PROPAGATE: execPropagate(); break;
-        case DECIDE: decide1(); break;
-        case ANALYZE: execAnalyze(); break;
-        // case PROCESS_ACTIVITY: processPendingActivity(); break;
-        case BACKTRACK: insertVarOrder(); break;
-        case REDUCE: execReduce(); break;
-        case RESTART: execRestart(); break;
-        case DONE: return true;
-        case HEAP_WAIT: return false; // skip prints
-        default: output.fatal(CALL_INFO, -1, "Invalid state: %d\n", state);
-    }
-    output.verbose(CALL_INFO, 2, 0, "=== Clock Tick %ld === State: %d\n", cycle, state);
-    return false;
-}
-
-void SATSolver::init() {
-    // Insert variables into the heap
-    if (var_i <= num_vars && decision[var_i]) {
-        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INSERT, var_i));
-        output.verbose(CALL_INFO, 4, 0, "HEAP: Inserted var %d into order heap\n", var_i);
-        state = HEAP_WAIT;
-        next_state = INIT;
-        return;
-    }
-    state = PROPAGATE;
-}
-
-void SATSolver::execPropagate() {
-    conflict = unitPropagate();
-    
-    if (conflict != ClauseRef_Undef) {
-        if (decision_output_stream.is_open()) decision_output_stream << "#Conflict" << std::endl;
-        output.verbose(CALL_INFO, 2, 0, "CONFLICT: clause %d\n", conflict);
-        conflictC++;
-        stat_conflicts->addData(1);
-        
-        if (trail_lim.empty()) {
-            output.output("UNSATISFIABLE: conflict at level 0\n");
-            state = DONE;
-            primaryComponentOKToEndSim();
-            return;
-        }
-        // learn from the conflict
-        state = ANALYZE;
-    } else if (conflictC >= conflicts_until_restart) {
-        var_i = trail.size() - 1;
-        bt_level = 0;
-        restart_pending = 1;
-        state = BACKTRACK;
-    }
-    else if (nLearnts() - nAssigns() >= max_learnts)
-        state = REDUCE;
-    else state = DECIDE;
-}
-
-void SATSolver::execAnalyze() {
-    learnt.clear();
-    analyze(conflict, learnt, bt_level);
-    // Start processing activity bumps before backtracking
-    var_i = 0;
-    processPendingActivity();
-}
-
-void SATSolver::execBacktrack() {
-    backtrack();
-    
-    if (learnt.size() == 1) {
-        // Unit learnt clause will be instantly propagated
-        trailEnqueue(learnt[0]);
-    } else {
-        // Add the learned clause
-        Clause new_clause(learnt);
-        int clause_idx = clauses.size();
-        clauses.push_back(new_clause);
-        attachClause(clause_idx);  
-        trailEnqueue(learnt[0], clause_idx);
-        claBumpActivity(clause_idx);
-        stat_learned->addData(1);
-    }
-    
-    varDecayActivity();
-    claDecayActivity();
-    
-    // Periodically adjust learntsize limits
-    if (--learnt_adjust_cnt == 0) {
-        learnt_adjust_confl *= learnt_adjust_inc;
-        learnt_adjust_cnt = (int)learnt_adjust_confl;
-        max_learnts *= learntsize_inc;
-        output.verbose(CALL_INFO, 3, 0, 
-            "LEARN: Adjusted learnt_adjust_confl to %.0f\n", learnt_adjust_confl);
-        output.verbose(CALL_INFO, 3, 0, 
-            "LEARN: Adjusted max_learnts to %.0f\n", max_learnts);
-    }
-
-    // Continue with unit propagation
-    state = PROPAGATE;
-}
-
-void SATSolver::execReduce() {
-    output.verbose(CALL_INFO, 3, 0, "REDUCE: %d - %d >= %.0f\n", 
-        nLearnts(), nAssigns(), max_learnts);
-    reduceDB();
-    state = DECIDE;
-}
-
-void SATSolver::execRestart() {
-    // Restart by backtracking to decision level 0
-    backtrack();
-    conflictC = 0;
-    curr_restarts++;
-    stat_restarts->addData(1);
-    
-    // Update the restart limit using Luby sequence or geometric progression
-    double rest_base = luby_restart ? luby(restart_inc, curr_restarts) : pow(restart_inc, curr_restarts);
-    conflicts_until_restart = rest_base * restart_first;
-    
-    output.verbose(CALL_INFO, 2, 0, "RESTART: #%d, new limit=%d\n", 
-        curr_restarts, conflicts_until_restart);
-    restart_pending = 0;
-    state = PROPAGATE;
 }
 
 //-----------------------------------------------------------------------------------
@@ -515,10 +319,210 @@ void SATSolver::parseDIMACS(const std::string& content) {
 }
 
 //-----------------------------------------------------------------------------------
+// Event Handling Methods
+//-----------------------------------------------------------------------------------
+
+void SATSolver::handleMemEvent(SST::Interfaces::StandardMem::Request* req) {
+    SST::Interfaces::StandardMem::ReadResp* resp = 
+        dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req);
+    
+    if (resp) {
+        // Convert byte data back to string
+        std::vector<uint8_t>& data = resp->data;
+        dimacs_content = std::string(data.begin(), data.end());
+        output.verbose(CALL_INFO, 1, 0,
+            "Received %zu bytes from memory\n", resp->data.size());
+        parseDIMACS(dimacs_content);
+        output.verbose(CALL_INFO, 1, 0,
+            "Parsed %u variables, %u clauses\n\n", num_vars, num_clauses);
+        state = INIT;
+    }
+    delete resp;
+}
+
+void SATSolver::handleHeapMemEvent(SST::Interfaces::StandardMem::Request* req) {
+    sst_assert(req != nullptr, CALL_INFO, -1, "Received null request in handleHeapMemEvent\n");
+    output.verbose(CALL_INFO, 7, 0, "SATSolver::handleHeapMemEvent received\n");
+    order_heap->handleMem(req);
+    delete req;
+}
+
+void SATSolver::handleHeapResponse(SST::Event* ev) {
+    output.verbose(CALL_INFO, 7, 0, "SATSolver::handleHeapResponse\n");
+    HeapRespEvent* resp = dynamic_cast<HeapRespEvent*>(ev);
+    sst_assert(resp != nullptr, CALL_INFO, -1, "Invalid heap response event\n");
+    heap_resp = resp->result;
+    state = STEP;
+    delete resp;
+}
+
+bool SATSolver::clockTick(SST::Cycle_t cycle) {
+    switch (state) {
+        case IDLE: return false; // skip prints
+        case INIT: 
+            coroutine = new coro_t::pull_type(
+                [this](coro_t::push_type &yield) { initialize(yield); });
+            state = IDLE;
+            break;
+        case PROPAGATE:
+            execPropagate();
+            break;
+        case DECIDE:
+            coroutine = new coro_t::pull_type(
+                [this](coro_t::push_type &yield) { execDecide(yield); });
+            state = IDLE;
+            break;
+        case ANALYZE:
+            coroutine = new coro_t::pull_type(
+                [this](coro_t::push_type &yield) { execAnalyze(yield); });
+            state = IDLE;
+            break;
+        case BACKTRACK:
+            coroutine = new coro_t::pull_type(
+                [this](coro_t::push_type &yield) { execBacktrack(yield); });
+            state = IDLE;
+            break;
+        case REDUCE:
+            execReduce();
+            break;
+        case RESTART:
+            coroutine = new coro_t::pull_type(
+                [this](coro_t::push_type &yield) { execRestart(yield); });
+            state = IDLE;
+            break;
+        case STEP:
+            (*coroutine)();
+            if (*coroutine) {
+                state = IDLE;  // Continue coroutine later
+            } else {
+                delete coroutine;
+                coroutine = nullptr;  // coroutine will set the next state
+            }
+            break;
+        case DONE: primaryComponentOKToEndSim(); return true;
+        default: output.fatal(CALL_INFO, -1, "Invalid state: %d\n", state);
+    }
+    output.verbose(CALL_INFO, 2, 0, "=== Clock Tick %ld === State: %d\n", cycle, state);
+    return false;
+}
+
+void SATSolver::initialize(coro_t::push_type &yield) {
+    // Insert variables into the heap
+    for(Var v = 1; v < (Var)num_vars; v++) {
+        if (!decision[v]) continue;
+        output.verbose(CALL_INFO, 6, 0, "HEAP: Inserting var %d into order heap\n", v);
+        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INSERT, v));
+        yield();
+        output.verbose(CALL_INFO, 6, 0, "HEAP: Inserted var %d into order heap\n", v);
+    }
+    state = PROPAGATE;
+}
+
+void SATSolver::execPropagate() {
+    conflict = unitPropagate();
+    
+    if (conflict != ClauseRef_Undef) {
+        if (decision_output_stream.is_open()) decision_output_stream << "#Conflict" << std::endl;
+        output.verbose(CALL_INFO, 2, 0, "CONFLICT: clause %d\n", conflict);
+        conflictC++;
+        stat_conflicts->addData(1);
+        
+        if (trail_lim.empty()) {
+            output.output("UNSATISFIABLE: conflict at level 0\n");
+            state = DONE;
+            primaryComponentOKToEndSim();
+            return;
+        }
+        // learn from the conflict
+        state = ANALYZE;
+    } else if (conflictC >= conflicts_until_restart) state = RESTART;
+    else if (nLearnts() - nAssigns() >= max_learnts) state = REDUCE;
+    else state = DECIDE;
+}
+
+void SATSolver::execAnalyze(coro_t::push_type &yield) {
+    analyze(yield);
+    state = BACKTRACK;
+}
+
+void SATSolver::execBacktrack(coro_t::push_type &yield) {
+    backtrack(yield, bt_level);
+    
+    if (learnt_clause.size() == 1) {
+        // Unit learnt clause will be instantly propagated
+        trailEnqueue(learnt_clause[0]);
+    } else {
+        // Add the learned clause
+        Clause new_clause(learnt_clause);
+        int clause_idx = clauses.size();
+        clauses.push_back(new_clause);
+        attachClause(clause_idx);  
+        trailEnqueue(learnt_clause[0], clause_idx);
+        claBumpActivity(clause_idx);
+        stat_learned->addData(1);
+    }
+    
+    varDecayActivity();
+    claDecayActivity();
+    
+    // Periodically adjust learntsize limits
+    if (--learnt_adjust_cnt == 0) {
+        learnt_adjust_confl *= learnt_adjust_inc;
+        learnt_adjust_cnt = (int)learnt_adjust_confl;
+        max_learnts *= learntsize_inc;
+        output.verbose(CALL_INFO, 3, 0, 
+            "LEARN: Adjusted learnt_adjust_confl to %.0f\n", learnt_adjust_confl);
+        output.verbose(CALL_INFO, 3, 0, 
+            "LEARN: Adjusted max_learnts to %.0f\n", max_learnts);
+    }
+
+    state = PROPAGATE;
+}
+
+void SATSolver::execReduce() {
+    output.verbose(CALL_INFO, 3, 0, "REDUCE: %d - %d >= %.0f\n", 
+        nLearnts(), nAssigns(), max_learnts);
+    reduceDB();
+    state = DECIDE;
+}
+
+void SATSolver::execRestart(coro_t::push_type &yield) {
+    // Restart by backtracking to decision level 0
+    backtrack(yield, 0);
+    conflictC = 0;
+    curr_restarts++;
+    stat_restarts->addData(1);
+    
+    // Update the restart limit using Luby sequence or geometric progression
+    double rest_base = luby_restart ? luby(restart_inc, curr_restarts) : pow(restart_inc, curr_restarts);
+    conflicts_until_restart = rest_base * restart_first;
+    
+    output.verbose(CALL_INFO, 2, 0, "RESTART: #%d, new limit=%d\n", 
+        curr_restarts, conflicts_until_restart);
+    state = PROPAGATE;
+}
+
+void SATSolver::execDecide(coro_t::push_type &yield) {
+    if (!decide(yield)) {
+        state = DONE;
+        output.output("SATISFIABLE: All variables assigned\n");
+        if (output.getVerboseLevel() >= 3) {
+            for (Var v = 1; v < (Var)variables.size(); v++) {
+                output.output("x%d=%d ", v, variables[v].value ? 1 : 0);
+            }
+            output.output("\n");
+        }
+        return;
+    }
+    state = PROPAGATE;
+}
+
+//-----------------------------------------------------------------------------------
 // decision
 //-----------------------------------------------------------------------------------
 
-void SATSolver::decide1() {
+bool SATSolver::decide(coro_t::push_type &yield) {
+    stat_decisions->addData(1);
     Lit lit = lit_Undef;
     
     // Use decision sequence if available and not exhausted
@@ -548,66 +552,21 @@ void SATSolver::decide1() {
             has_decision_sequence = false;
         }
     }
-
-    if (lit != lit_Undef) {
-        trail_lim.push_back(trail.size());  // new decision level
-        trailEnqueue(lit);
-        state = PROPAGATE;
-    } else if (!order_heap->empty() && drand(random_seed) < random_var_freq) {
-        // random decision from the heap
-        int rand_idx = irand(random_seed, order_heap->size());
-        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::READ, rand_idx));
-        state = HEAP_WAIT;
-        next_state = DECIDE;
-    } else {
-        // use minimum from the heap
-        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::REMOVE_MIN));
-        state = HEAP_WAIT;
-        next_state = DECIDE;
-    }
-}
-
-void SATSolver::decide2() {
-    output.verbose(CALL_INFO, 4, 0, "DECIDE2: pending_var=%d, assigned=%d\n", 
-        pending_var, variables[pending_var].assigned);
-    if (pending_var == var_Undef || variables[pending_var].assigned || !decision[pending_var]) {
-        if (order_heap->empty()) {
-            // No more decisions possible - formula is SAT
-            output.output("SAT: satisfiable\n");
-            if (output.getVerboseLevel() >= 3) {
-                for (Var v = 1; v < (Var)variables.size(); v++) {
-                    output.output("x%d=%d ", v, variables[v].value ? 1 : 0);
-                }
-                output.output("\n");
-            }
-            state = DONE;
-            primaryComponentOKToEndSim();
-            return;
-        } else {
-            order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::REMOVE_MIN));
-            state = HEAP_WAIT;
-            next_state = DECIDE;
-            return;
+    
+    // If we couldn't use the decision sequence, fall back to normal heuristic
+    if (lit == lit_Undef) {
+        // Fall back to normal decision heuristic if no sequence or exhausted
+        lit = chooseBranchVariable(yield);
+        if (lit == lit_Undef) {
+            output.verbose(CALL_INFO, 2, 0, "DECIDE: No unassigned variables left\n");
+            return false;
         }
     }
-    Lit lit = mkLit(pending_var, polarity[pending_var]);
-    output.verbose(CALL_INFO, 5, 0, "DECISION: Selected literal %d\n", toInt(lit));
-    
-    if (decision_output_stream.is_open()) { // Dump this decision to file if enabled
-        dumpDecision(lit);
-    }
-    stat_decisions->addData(1);
+
+    if (decision_output_stream.is_open()) dumpDecision(lit);
     trail_lim.push_back(trail.size());  // new decision level
     trailEnqueue(lit);
-    state = PROPAGATE;
-}
-
-void SATSolver::dumpDecision(Lit lit) {
-    Var v = var(lit);
-    // Value is 1 for true, 0 for false
-    // Note: sign(lit) is inverted because in the solver, sign true means negative
-    int value = sign(lit) ? 0 : 1;
-    decision_output_stream << v << " " << value << std::endl;
+    return true;
 }
 
 //-----------------------------------------------------------------------------------
@@ -728,9 +687,9 @@ int SATSolver::unitPropagate() {
 // analyze
 //-----------------------------------------------------------------------------------
 
-void SATSolver::analyze(int confl, std::vector<Lit>& learnt_clause, int& backtrack_level) {
+void SATSolver::analyze(coro_t::push_type &yield) {
     output.verbose(CALL_INFO, 3, 0,
-        "ANALYZE: Starting conflict analysis of clause %d\n", confl);
+        "ANALYZE: Starting conflict analysis of clause %d\n", conflict);
     
     // Debug print for trail
     if (output.getVerboseLevel() >= 3) {
@@ -756,12 +715,12 @@ void SATSolver::analyze(int confl, std::vector<Lit>& learnt_clause, int& backtra
     
     // Add literals from conflict clause to learnt clause
     do {
-        assert(confl != ClauseRef_Undef); // (otherwise should be UIP)
-        Clause& c = clauses[confl];
+        assert(conflict != ClauseRef_Undef); // (otherwise should be UIP)
+        Clause& c = clauses[conflict];
         
         // Bump activity for learnt clauses
-        if (isLearnt(confl))
-            claBumpActivity(confl);
+        if (isLearnt(conflict))
+            claBumpActivity(conflict);
         
         // Debug print for current clause
         output.verbose(CALL_INFO, 4, 0,
@@ -777,7 +736,7 @@ void SATSolver::analyze(int confl, std::vector<Lit>& learnt_clause, int& backtra
                 toInt(q), v, variables[v].level);
             
             if (!seen[v] && variables[v].level > 0) {
-                varBumpActivity(v);
+                varBumpActivity(yield, v);
                 
                 seen[v] = 1;
                 output.verbose(CALL_INFO, 5, 0,
@@ -800,13 +759,13 @@ void SATSolver::analyze(int confl, std::vector<Lit>& learnt_clause, int& backtra
         // Select next literal to expand from the trail
         while (!seen[var(trail[index--])]);
         p = trail[index+1];
-        confl = variables[var(p)].reason;
+        conflict = variables[var(p)].reason;
         seen[var(p)] = 0;
         pathC--;
         
         output.verbose(CALL_INFO, 4, 0,
             "ANALYZE: Selected trail literal %d, index %d, reason=%d, pathC=%d\n", 
-            toInt(p), index, confl, pathC);
+            toInt(p), index, conflict, pathC);
         
     } while (pathC > 0);
     
@@ -862,7 +821,7 @@ void SATSolver::analyze(int confl, std::vector<Lit>& learnt_clause, int& backtra
     // Find backtrack level
     if (learnt_clause.size() == 1) {
         // 0 if only one literal in learnt clause
-        backtrack_level = 0;
+        bt_level = 0;
     } else {
         // Find the second highest level in the clause
         int max_i = 1;
@@ -877,7 +836,7 @@ void SATSolver::analyze(int confl, std::vector<Lit>& learnt_clause, int& backtra
         Lit p = learnt_clause[max_i];
         learnt_clause[max_i] = learnt_clause[1];
         learnt_clause[1] = p;
-        backtrack_level = variables[var(p)].level;
+        bt_level = variables[var(p)].level;
     }
 
     // Clear seen vector for next analysis
@@ -885,33 +844,34 @@ void SATSolver::analyze(int confl, std::vector<Lit>& learnt_clause, int& backtra
 
     // Print learnt clause for debug
     output.verbose(CALL_INFO, 3, 0, "LEARNT CLAUSE: %s\n", printClause(learnt_clause).c_str());
-    output.verbose(CALL_INFO, 3, 0, "backtrack_level = %d\n", backtrack_level);
+    output.verbose(CALL_INFO, 3, 0, "Backtrack Level = %d\n", bt_level);
 }
 
 //-----------------------------------------------------------------------------------
 // backtrack
 //-----------------------------------------------------------------------------------
 
-void SATSolver::backtrack() {
+void SATSolver::backtrack(coro_t::push_type &yield, int backtrack_level) {
     output.verbose(CALL_INFO, 3, 0, "BACKTRACK From level %d to level %d\n", 
-        current_level(), bt_level);
+        current_level(), backtrack_level);
     
-    // Unassign all variables above bt_level using the trail
-    for (int i = trail.size() - 1; i >= int(trail_lim[bt_level]); i--) {
+    // Unassign all variables above backtrack_level using the trail
+    for (int i = trail.size() - 1; i >= int(trail_lim[backtrack_level]); i--) {
         Lit p = trail[i];
         Var v = var(p);
         
         polarity[v] = sign(p);
         unassignVariable(v);
+        insertVarOrder(yield, v);
         
         output.verbose(CALL_INFO, 4, 0,
             "BACKTRACK: Unassigning x%d from level %zu, saved polarity %s\n", 
             v, variables[v].level, polarity[v] ? "false" : "true");
     }
     
-    qhead = trail_lim[bt_level];
-    trail.resize(trail_lim[bt_level]);
-    trail_lim.resize(bt_level);
+    qhead = trail_lim[backtrack_level];
+    trail.resize(trail_lim[backtrack_level]);
+    trail_lim.resize(backtrack_level);
 }
 
 //-----------------------------------------------------------------------------------
@@ -1100,26 +1060,44 @@ void SATSolver::remove_watch(std::vector<Watcher>& ws, int clause_idx) {
 //-----------------------------------------------------------------------------------
 // Decision Heuristics
 //-----------------------------------------------------------------------------------
+Lit SATSolver::chooseBranchVariable(coro_t::push_type &yield) {
+    Var next = var_Undef;
+    if (!order_heap->empty() && drand(random_seed) < random_var_freq) {
+        int rand_idx = irand(random_seed, order_heap->size());
+        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::READ, rand_idx));
+        yield();
+        next = heap_resp;
 
-// insert var: check if inheap
-void SATSolver::insertVarOrder() {
-    if (var_i < int(trail_lim[bt_level])) {
-        output.verbose(CALL_INFO, 3, 0, "INSERT: finished with heapsize %zu\n", order_heap->size());
-        if (restart_pending) execRestart();
-        else execBacktrack();
-        return;
+        if (!variables[next].assigned && decision[next]) {
+            output.verbose(CALL_INFO, 3, 0, "DECISION: Random selection of var %d\n", next);
+        }
     }
     
-    Var v = var(trail[var_i]);
-    if (!decision[v]) {
-        var_i--;
-        return;
+    while (next == var_Undef || variables[next].assigned || !decision[next]) {
+        if (order_heap->empty()) {
+            next = var_Undef;
+            break;
+        }
+        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::REMOVE_MIN));
+        yield();
+        next = heap_resp;
     }
 
+    output.verbose(CALL_INFO, 5, 0, "DECISION: Selected var %d (activity=%f)\n",
+        next, activity[next]);
+    if (next == var_Undef) return lit_Undef;
+    return mkLit(next, polarity[next]);
+}
+
+void SATSolver::insertVarOrder(coro_t::push_type &yield, Var v) {
     order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::IN_HEAP, v));
-    output.verbose(CALL_INFO, 4, 0, "INSERT: Checking if var %d is in heap\n", v);
-    state = HEAP_WAIT;
-    next_state = INSERT_VAR;
+    yield();
+    
+    if (!(bool)heap_resp && decision[v]) {
+        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INSERT, v));
+        yield();
+        output.verbose(CALL_INFO, 4, 0, "HEAP: Inserted var %d into order heap\n", v);
+    }
 }
 
 void SATSolver::varDecayActivity() {
@@ -1128,7 +1106,7 @@ void SATSolver::varDecayActivity() {
         "ACTIVITY: Decayed activity increment to %f\n", var_inc);
 }
 
-void SATSolver::varBumpActivity(Var v) {
+void SATSolver::varBumpActivity(coro_t::push_type &yield, Var v) {
     if ((activity[v] += var_inc) > 1e100) {
         output.verbose(CALL_INFO, 3, 0, "ACTIVITY: Rescaling all activities\n");
         for (size_t i = 0; i < activity.size(); i++) {
@@ -1136,64 +1114,11 @@ void SATSolver::varBumpActivity(Var v) {
         }
         var_inc *= 1e-100;
     }
-    activity_bump_queue.push_back(v);  // Queue for heap update
-}
-
-// New function to process activity bumps one at a time
-void SATSolver::processPendingActivity() {
-    if (var_i >= activity_bump_queue.size()) {
-        // All variables processed, continue with backtracking
-        activity_bump_queue.clear();
-        state = BACKTRACK;
-        var_i = trail.size() - 1;
-        return;
-    }
     
-    // Process next variable in queue
-    Var v = activity_bump_queue[var_i];
-    
-    // Send decrease request to heap
     order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::DECREASE, v));
+    yield();
+    
     output.verbose(CALL_INFO, 4, 0, "ACTIVITY: Bumped var %d to %f\n", v, activity[v]);
-    
-    // Wait for response
-    state = HEAP_WAIT;
-    next_state = PROCESS_ACTIVITY;
-    
-    output.verbose(CALL_INFO, 4, 0, 
-        "ACTIVITY: Processing heap decrease for var %d (%d/%zu)\n", 
-        v, var_i + 1, activity_bump_queue.size());
-}
-
-//-----------------------------------------------------------------------------------
-// Decision Sequence Loading
-//-----------------------------------------------------------------------------------
-
-void SATSolver::loadDecisionSequence(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        output.fatal(CALL_INFO, -1, "Could not open decision file: %s\n", filename.c_str());
-    }
-    
-    decision_sequence.clear();
-    std::string line;
-    int line_number = 0, var, sign;
-    
-    while (std::getline(file, line)) {
-        line_number++;
-        if (line.empty() || line[0] == '#' || line[0] == 'c') continue;
-            
-        std::istringstream iss(line);
-        if (!(iss >> var >> sign) || var <= 0 || (sign != 0 && sign != 1)) {
-            output.fatal(CALL_INFO, -1, "Error in decision file at line %d\n", line_number);
-        }
-        
-        decision_sequence.push_back(std::make_pair(var, sign == 1));
-        output.verbose(CALL_INFO, 5, 0, "Added decision: var %d = %s\n", 
-            var, (sign == 1) ? "true" : "false");
-    }
-    
-    output.verbose(CALL_INFO, 1, 0, "Loaded %zu decisions from file\n", decision_sequence.size());
 }
 
 //-----------------------------------------------------------------------------------
@@ -1356,4 +1281,39 @@ std::string SATSolver::printClause(const Clause& c) {
     for (const auto& lit : c.literals)
         clause_str += " " + std::to_string(toInt(lit));
     return clause_str;
+}
+
+void SATSolver::loadDecisionSequence(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        output.fatal(CALL_INFO, -1, "Could not open decision file: %s\n", filename.c_str());
+    }
+    
+    decision_sequence.clear();
+    std::string line;
+    int line_number = 0, var, sign;
+    
+    while (std::getline(file, line)) {
+        line_number++;
+        if (line.empty() || line[0] == '#' || line[0] == 'c') continue;
+            
+        std::istringstream iss(line);
+        if (!(iss >> var >> sign) || var <= 0 || (sign != 0 && sign != 1)) {
+            output.fatal(CALL_INFO, -1, "Error in decision file at line %d\n", line_number);
+        }
+        
+        decision_sequence.push_back(std::make_pair(var, sign == 1));
+        output.verbose(CALL_INFO, 5, 0, "Added decision: var %d = %s\n", 
+            var, (sign == 1) ? "true" : "false");
+    }
+    
+    output.verbose(CALL_INFO, 1, 0, "Loaded %zu decisions from file\n", decision_sequence.size());
+}
+
+void SATSolver::dumpDecision(Lit lit) {
+    Var v = var(lit);
+    // Value is 1 for true, 0 for false
+    // Note: sign(lit) is inverted because in the solver, sign true means negative
+    int value = sign(lit) ? 0 : 1;
+    decision_output_stream << v << " " << value << std::endl;
 }

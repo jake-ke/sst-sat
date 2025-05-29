@@ -72,12 +72,12 @@ run_tests_for_directory() {
         log_message "[$start_time] Testing $filename..."
         
         # Check if decision file exists and should be used
-        command="timeout 1800 sst ../tests/test_basic.py -- \"$file\""
+        command="timeout 1800 sst ../tests/test_basic.py -- --cnf \"$file\""
         if [[ -n "$DECISION_DIR" ]]; then
             decision_file="${DECISION_DIR}/${filename}.dec"
             if [[ -f "$decision_file" ]]; then
                 log_message "Using decision file: $decision_file"
-                command="timeout 1800 sst ../tests/test_basic.py -- \"$file\" \"$decision_file\""
+                command="timeout 1800 sst ../tests/test_basic.py -- --cnf \"$file\" --dec \"$decision_file\""
             else
                 log_message "Decision file not found for $filename"
             fi
