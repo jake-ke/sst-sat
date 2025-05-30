@@ -1017,18 +1017,12 @@ void SATSolver::reduceDB(coro_t::push_type &yield) {
     // 7. Update all watch lists with new indices
     for (size_t i = 0; i < watches.size(); i++) {
         std::vector<Watcher>& ws = watches[i];
-        size_t new_size = 0;
         for (size_t k = 0; k < ws.size(); k++) {
             int old_idx = ws[k].clause_idx;
-            if (old_idx < num_clauses) {
-                // Keep all watchers for original clauses
-                ws[new_size++] = ws[k];
-            } else if (!to_remove[old_idx]) {
-                // Only update indices for learnt clauses that aren't being removed
-                ws[k].clause_idx = clause_map[old_idx];
-                ws[new_size++] = ws[k];
-                
+            // Only update indices for learnt clauses that aren't being removed
+            if (old_idx >= num_clauses && !to_remove[old_idx]) {
                 if (clause_map[old_idx] != old_idx) {
+                    ws[k].clause_idx = clause_map[old_idx];
                     output.verbose(CALL_INFO, 6, 0, 
                         "REDUCEDB: Updated watcher reference from %d to %d\n",
                         old_idx, ws[k].clause_idx);
@@ -1036,7 +1030,6 @@ void SATSolver::reduceDB(coro_t::push_type &yield) {
             }
             // Skip watchers for removed clauses (they were already detached)
         }
-        ws.resize(new_size);
     }
     
     // 8. Finally, compact the clauses vector

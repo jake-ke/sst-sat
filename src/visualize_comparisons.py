@@ -11,6 +11,18 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
+
+def detect_log_format(content):
+    """Detect whether this is a minisat or satsolver log."""
+    # Check for satsolver format indicators
+    if 'Using CNF file:' in content and 'Simulation is complete' in content:
+        return 'satsolver'
+    # Check for minisat format indicators
+    elif 'Problem Statistics' in content and 'conflicts             :' in content:
+        return 'minisat'
+    else:
+        return 'unknown'
 
 def parse_log_file(filepath):
     """Parse a single log file and extract statistics."""
@@ -19,46 +31,78 @@ def parse_log_file(filepath):
         with open(filepath, 'r') as f:
             content = f.read()
         
-        # Extract filename
-        filename_match = re.search(r'Using CNF file: .*/([^/\n]+)', content)
-        if filename_match:
-            stats['problem'] = filename_match.group(1)
-        else:
-            # Fallback: try to extract from first line
-            first_line = content.split('\n')[0] if content else ""
-            if first_line and not first_line.startswith('Using CNF file:'):
-                stats['problem'] = first_line.strip()
+        log_format = detect_log_format(content)
+        
+        if log_format == 'satsolver':
+            # Extract filename for satsolver logs
+            filename_match = re.search(r'Using CNF file: .*/([^/\n]+)', content)
+            if filename_match:
+                stats['problem'] = filename_match.group(1)
             else:
                 return None
-        
-        # Extract statistics using regex
-        stat_patterns = {
-            'decisions': r'Decisions\s*:\s*(\d+)',
-            'propagations': r'Propagations\s*:\s*(\d+)',
-            'conflicts': r'Conflicts\s*:\s*(\d+)', 
-            'learned': r'Learned\s*:\s*(\d+)',
-            'removed': r'Removed\s*:\s*(\d+)',
-            'db_reductions': r'DB_Reductions\s*:\s*(\d+)',
-            'minimized': r'Minimized\s*:\s*(\d+)',
-            'restarts': r'Restarts\s*:\s*(\d+)',
-        }
-        
-        for stat, pattern in stat_patterns.items():
-            match = re.search(pattern, content)
-            if match:
-                stats[stat] = int(match.group(1))
-        
-        # Extract simulation time
-        time_match = re.search(r'Simulation is complete, simulated time: ([\d.]+)\s*(\w+)', content)
-        if time_match:
-            time_val = float(time_match.group(1))
-            time_unit = time_match.group(2)
-            # Convert to milliseconds
-            if time_unit == 'us':
-                time_val *= 0.001
-            elif time_unit == 's':
-                time_val *= 1000
-            stats['sim_time_ms'] = time_val
+            
+            # Extract statistics using regex for satsolver format
+            stat_patterns = {
+                'decisions': r'Decisions\s*:\s*(\d+)',
+                'propagations': r'Propagations\s*:\s*(\d+)',
+                'conflicts': r'Conflicts\s*:\s*(\d+)', 
+                'learned': r'Learned\s*:\s*(\d+)',
+                'removed': r'Removed\s*:\s*(\d+)',
+                'db_reductions': r'DB_Reductions\s*:\s*(\d+)',
+                'minimized': r'Minimized\s*:\s*(\d+)',
+                'restarts': r'Restarts\s*:\s*(\d+)',
+            }
+            
+            for stat, pattern in stat_patterns.items():
+                match = re.search(pattern, content)
+                if match:
+                    stats[stat] = int(match.group(1))
+            
+            # Extract simulation time
+            time_match = re.search(r'Simulation is complete, simulated time: ([\d.]+)\s*(\w+)', content)
+            if time_match:
+                time_val = float(time_match.group(1))
+                time_unit = time_match.group(2)
+                # Convert to milliseconds
+                if time_unit == 'us':
+                    time_val *= 0.001
+                elif time_unit == 's':
+                    time_val *= 1000
+                stats['sim_time_ms'] = time_val
+                
+        elif log_format == 'minisat':
+            # Extract problem name from filename for minisat logs
+            basename = os.path.basename(filepath)
+            # Remove timestamp pattern and .log extension
+            problem_name = re.sub(r'_(sat|unsat)_\d+.*\.log$', '', basename)
+            stats['problem'] = problem_name
+            
+            # Extract statistics using regex for minisat format
+            minisat_patterns = {
+                'decisions': r'decisions\s*:\s*(\d+)',
+                'propagations': r'propagations\s*:\s*(\d+)',
+                'conflicts': r'conflicts\s*:\s*(\d+)',
+                'learned': r'learned\s*:\s*(\d+)',
+                'removed': r'removed\s*:\s*(\d+)',
+                'db_reductions': r'db_reductions\s*:\s*(\d+)',
+                'minimized': r'minimized\s*:\s*(\d+)',
+                'restarts': r'restarts\s*:\s*(\d+)',
+            }
+            
+            for stat, pattern in minisat_patterns.items():
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    stats[stat] = int(match.group(1))
+            
+            # Minisat doesn't have simulation time, but we can estimate from CPU time if available
+            # For now, we'll leave it as None to avoid comparison issues
+            
+        else:
+            # Unknown format - try to extract filename from filepath
+            basename = os.path.basename(filepath)
+            problem_name = re.sub(r'_(sat|unsat)_\d+.*\.log$', '', basename)
+            stats['problem'] = problem_name
+            return None
             
     except Exception as e:
         print(f"Error parsing {filepath}: {e}")
@@ -154,11 +198,48 @@ def create_scatter_plots(logs_dir, backup_dir):
                 ax.grid(True, alpha=0.3)
                 ax.legend(fontsize=9)
                 
+                # Add zoom inset for lower region (skip for log scale)
+                if not (min_val > 0 and metric == 'sim_time_ms'):
+                    # Calculate tight zoom region based on 0th-5th percentile
+                    x_5th = np.percentile(x_vals, 5)
+                    y_5th = np.percentile(y_vals, 5)
+                    
+                    # Set very tight zoom limits - bottom 5% of data with small fallback
+                    zoom_max_x = max(x_5th, min_val + (max_val - min_val) * 0.03)
+                    zoom_max_y = max(y_5th, min_val + (max_val - min_val) * 0.03)
+                    
+                    # Only create inset if there are enough points in the zoom region
+                    zoom_mask = (x_vals <= zoom_max_x) & (y_vals <= zoom_max_y)
+                    if zoom_mask.sum() > 2:  # Need at least 3 points
+                        # Create 35% size inset box in lower right corner
+                        axins = inset_axes(ax, width="45%", height="45%", loc='lower right')
+                        
+                        # Plot data in inset with transparency
+                        axins.scatter(x_vals, y_vals, alpha=0.8, s=16, color='steelblue', 
+                                    edgecolors='black', linewidth=0.3)
+                        
+                        # Set zoom limits
+                        axins.set_xlim(min_val, zoom_max_x)
+                        axins.set_ylim(min_val, zoom_max_y)
+                        
+                        # Add y=x line to inset
+                        axins.plot([min_val, zoom_max_x], [min_val, zoom_max_y], 'r--', 
+                                 alpha=0.9, linewidth=1.5)
+                        
+                        # Style inset with transparency
+                        axins.patch.set_alpha(0.95)  # More opaque background
+                        axins.grid(True, alpha=0.3)
+                        axins.tick_params(labelsize=7)
+                        
+                        # Add subtle indication lines from main plot to inset
+                        mark_inset(ax, axins, loc1=2, loc2=4, fc="none", ec="gray", 
+                                 alpha=0.3, linestyle=':', linewidth=0.8)
+
                 # Add text showing improvement/regression stats
                 if len(x_vals) > 0:
                     improvements = (y_vals < x_vals).sum()
                     regressions = (y_vals > x_vals).sum()
-                    ax.text(0.05, 0.95, f'Better: {improvements}\nWorse: {regressions}', 
+                    ax.text(0.05, 0.85, f'Better: {improvements}\nWorse: {regressions}', 
                            transform=ax.transAxes, fontsize=9, verticalalignment='top',
                            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
             else:
