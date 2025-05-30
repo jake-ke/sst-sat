@@ -27,7 +27,9 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     restart_inc(2.0),
     curr_restarts(0),
     conflicts_until_restart(restart_first),
-    conflictC(0) {
+    conflictC(0),
+    yield_ptr(nullptr),
+    variables(nullptr, 0, nullptr) {
     
     // Initialize output
     output.init("MAIN-> ", params.find<int>("verbose", 0), 0, SST::Output::STDOUT);
@@ -93,8 +95,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     );
     sst_assert(order_heap != nullptr, CALL_INFO, -1, "Unable to load Heap subcomponent\n");
 
-    // Create Variables object
-    variables = new Variables(global_memory, variables_base_addr);
+    // Create Variables object by pass point of yield_ptr
+    variables = Variables(global_memory, variables_base_addr, &yield_ptr);
 
     // Configure the link to the heap subcomponent
     heap_link = configureLink("heap_port", 
@@ -130,10 +132,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     primaryComponentDoNotEndSim();
 }
 
-SATSolver::~SATSolver() {
-    // Cleanup
-    delete variables;
-}
+SATSolver::~SATSolver() {}
 
 void SATSolver::init(unsigned int phase) {
     cnf_memory->init(phase);
@@ -338,7 +337,7 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
     
     // Route the request to the appropriate handler based on address range
     if (addr >= variables_base_addr) {  // Variables request
-        variables->handleMem(req);
+        variables.handleMem(req);
         state = STEP;
     } else order_heap->handleMem(req);  // Heap request
     
@@ -359,7 +358,10 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
         case IDLE: return false; // skip prints
         case INIT: 
             coroutine = new coro_t::pull_type(
-                [this](coro_t::push_type &yield) { initialize(yield); });
+                [this](coro_t::push_type &yield) {
+                    yield_ptr = &yield; 
+                    initialize(); 
+                });
             state = IDLE;
             break;
         case STEP:
@@ -371,44 +373,65 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
                 output.verbose(CALL_INFO, 7, 0, "coroutine completed\n");
                 delete coroutine;
                 coroutine = nullptr;  // coroutine will set the next state
+                yield_ptr = nullptr;  // Clear yield pointer when coroutine completes
             }
             break;
         case PROPAGATE:
             coroutine = new coro_t::pull_type(
-                [this](coro_t::push_type &yield) { execPropagate(yield); });
+                [this](coro_t::push_type &yield) {
+                    yield_ptr = &yield;
+                    execPropagate(); 
+                });
             if (!(*coroutine)) {
                 output.verbose(CALL_INFO, 7, 0, "Coroutine never paused but completed\n");
                 delete coroutine;
                 coroutine = nullptr;
+                yield_ptr = nullptr;
             } else state = IDLE;
             break;
         case DECIDE:
             coroutine = new coro_t::pull_type(
-                [this](coro_t::push_type &yield) { execDecide(yield); });
+                [this](coro_t::push_type &yield) {
+                    yield_ptr = &yield;
+                    execDecide(); 
+                });
             if (!(*coroutine)) {
                 output.verbose(CALL_INFO, 7, 0, "Coroutine never paused but completed\n");
                 delete coroutine;
                 coroutine = nullptr;
+                yield_ptr = nullptr;
             } else state = IDLE;
             break;
         case ANALYZE:
             coroutine = new coro_t::pull_type(
-                [this](coro_t::push_type &yield) { execAnalyze(yield); });
+                [this](coro_t::push_type &yield) {
+                    yield_ptr = &yield;
+                    execAnalyze(); 
+                });
             state = IDLE;
             break;
         case BACKTRACK:
             coroutine = new coro_t::pull_type(
-                [this](coro_t::push_type &yield) { execBacktrack(yield); });
+                [this](coro_t::push_type &yield) {
+                    yield_ptr = &yield;
+                    execBacktrack(); 
+                });
             state = IDLE;
             break;
         case REDUCE:
             coroutine = new coro_t::pull_type(
-                [this](coro_t::push_type &yield) { execReduce(yield); });
+                [this](coro_t::push_type &yield) {
+                    yield_ptr = &yield;
+                    execReduce(); 
+                });
             state = IDLE;
             break;
         case RESTART:
             coroutine = new coro_t::pull_type(
-                [this](coro_t::push_type &yield) { execRestart(yield); });
+                [this](coro_t::push_type &yield) {
+                    yield_ptr = &yield;
+                    execRestart(); 
+                });
             state = IDLE;
             break;
         case DONE: primaryComponentOKToEndSim(); return true;
@@ -418,7 +441,7 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
     return false;
 }
 
-void SATSolver::initialize(coro_t::push_type &yield) {
+void SATSolver::initialize() {
     qhead = 0;
     seen.resize(num_vars + 1, 0);
     activity.resize(num_vars + 1, 0.0);
@@ -427,26 +450,21 @@ void SATSolver::initialize(coro_t::push_type &yield) {
     var_assigned.resize(num_vars + 1, false);
     var_value.resize(num_vars + 1);
 
-    // Intialize reasons to ClauseRef_Undef
+    // Initialize reasons to ClauseRef_Undef
     // but level not needed, wasting bw
-    variables->write(yield, 0, std::vector<Variable>(num_vars + 1, Variable()));
-
-    // variables->read(yield, 1, num_vars);
-    // for (int i = 0; i < num_vars; i++) {
-    //     printf("Variable %d: level=%d, reason=%d\n", 
-    //         i + 1, variables->getLastReadVec()[i].level, variables->getLastReadVec()[i].reason);
-    // }
+    variables.write(0, std::vector<Variable>(num_vars + 1, Variable()));
 
     // Enqueue unit clauses from the input DIMACS
     for (int i = 0; i < initial_units.size(); i++) {
-        trailEnqueue(yield, initial_units[i]); }
+        trailEnqueue(initial_units[i]); 
+    }
     
     // Insert variables into the heap
     for(Var v = 1; v <= (Var)num_vars; v++) {
         if (!decision[v]) continue;
         output.verbose(CALL_INFO, 6, 0, "Inserting var %d into order heap\n", v);
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INSERT, v));
-        yield();
+        (*yield_ptr)();
         output.verbose(CALL_INFO, 6, 0, "Inserted var %d into order heap\n", v);
     }
 
@@ -454,8 +472,8 @@ void SATSolver::initialize(coro_t::push_type &yield) {
     state = PROPAGATE;
 }
 
-void SATSolver::execPropagate(coro_t::push_type &yield) {
-    conflict = unitPropagate(yield);
+void SATSolver::execPropagate() {
+    conflict = unitPropagate();
     
     if (conflict != ClauseRef_Undef) {
         if (decision_output_stream.is_open()) decision_output_stream << "#Conflict" << std::endl;
@@ -476,24 +494,24 @@ void SATSolver::execPropagate(coro_t::push_type &yield) {
     else state = DECIDE;
 }
 
-void SATSolver::execAnalyze(coro_t::push_type &yield) {
-    analyze(yield);
+void SATSolver::execAnalyze() {
+    analyze();
     state = BACKTRACK;
 }
 
-void SATSolver::execBacktrack(coro_t::push_type &yield) {
-    backtrack(yield, bt_level);
+void SATSolver::execBacktrack() {
+    backtrack(bt_level);
     
     if (learnt_clause.size() == 1) {
         // Unit learnt clause will be instantly propagated
-        trailEnqueue(yield, learnt_clause[0]);
+        trailEnqueue(learnt_clause[0]);
     } else {
         // Add the learned clause
         Clause new_clause(learnt_clause);
         int clause_idx = clauses.size();
         clauses.push_back(new_clause);
         attachClause(clause_idx);  
-        trailEnqueue(yield, learnt_clause[0], clause_idx);
+        trailEnqueue(learnt_clause[0], clause_idx);
         claBumpActivity(clause_idx);
         stat_learned->addData(1);
     }
@@ -515,16 +533,16 @@ void SATSolver::execBacktrack(coro_t::push_type &yield) {
     state = PROPAGATE;
 }
 
-void SATSolver::execReduce(coro_t::push_type &yield) {
+void SATSolver::execReduce() {
     output.verbose(CALL_INFO, 3, 0, "REDUCE: %d - %d >= %.0f\n", 
         nLearnts(), nAssigns(), max_learnts);
-    reduceDB(yield);
+    reduceDB();
     state = DECIDE;
 }
 
-void SATSolver::execRestart(coro_t::push_type &yield) {
+void SATSolver::execRestart() {
     output.verbose(CALL_INFO, 2, 0, "RESTART: Executing restart #%d\n", curr_restarts);
-    backtrack(yield, 0);
+    backtrack(0);
     conflictC = 0;
     curr_restarts++;
     stat_restarts->addData(1);
@@ -538,8 +556,8 @@ void SATSolver::execRestart(coro_t::push_type &yield) {
     state = PROPAGATE;
 }
 
-void SATSolver::execDecide(coro_t::push_type &yield) {
-    if (!decide(yield)) {
+void SATSolver::execDecide() {
+    if (!decide()) {
         state = DONE;
         output.output("SATISFIABLE: All variables assigned\n");
         if (output.getVerboseLevel() >= 3) {
@@ -557,7 +575,7 @@ void SATSolver::execDecide(coro_t::push_type &yield) {
 // decision
 //-----------------------------------------------------------------------------------
 
-bool SATSolver::decide(coro_t::push_type &yield) {
+bool SATSolver::decide() {
     stat_decisions->addData(1);
     Lit lit = lit_Undef;
     
@@ -589,10 +607,9 @@ bool SATSolver::decide(coro_t::push_type &yield) {
         }
     }
     
-    // If we couldn't use the decision sequence, fall back to normal heuristic
+    // If couldn't use the decision sequence, fall back to normal heuristic
     if (lit == lit_Undef) {
-        // Fall back to normal decision heuristic if no sequence or exhausted
-        lit = chooseBranchVariable(yield);
+        lit = chooseBranchVariable();
         if (lit == lit_Undef) {
             output.verbose(CALL_INFO, 2, 0, "DECIDE: No unassigned variables left\n");
             return false;
@@ -601,7 +618,7 @@ bool SATSolver::decide(coro_t::push_type &yield) {
 
     if (decision_output_stream.is_open()) dumpDecision(lit);
     trail_lim.push_back(trail.size());  // new decision level
-    trailEnqueue(yield, lit);
+    trailEnqueue(lit);
     return true;
 }
 
@@ -609,7 +626,7 @@ bool SATSolver::decide(coro_t::push_type &yield) {
 // unitPropagate
 //-----------------------------------------------------------------------------------
 
-int SATSolver::unitPropagate(coro_t::push_type &yield) {
+int SATSolver::unitPropagate() {
     output.verbose(CALL_INFO, 3, 0, "PROPAGATE: Starting unit propagation\n");
     int conflict = ClauseRef_Undef;
 
@@ -706,7 +723,7 @@ int SATSolver::unitPropagate(coro_t::push_type &yield) {
                 output.verbose(CALL_INFO, 3, 0,
                     "UNIT: Clause %d forces literal %d (to true)\n",
                     clause_idx, toInt(first));
-                trailEnqueue(yield, first, clause_idx);
+                trailEnqueue(first, clause_idx);
             }
         NextClause:;
         }
@@ -722,7 +739,7 @@ int SATSolver::unitPropagate(coro_t::push_type &yield) {
 // analyze
 //-----------------------------------------------------------------------------------
 
-void SATSolver::analyze(coro_t::push_type &yield) {
+void SATSolver::analyze() {
     output.verbose(CALL_INFO, 3, 0,
         "ANALYZE: Starting conflict analysis of clause %d\n", conflict);
     
@@ -769,11 +786,10 @@ void SATSolver::analyze(coro_t::push_type &yield) {
                 "ANALYZE: Processing literal %d\n", toInt(q));
             
             // Read variable data individually for each variable in the conflict clause
-            variables->read(yield, v);
-            Variable v_data = variables->getLastRead();
+            Variable v_data = variables(v);
 
             if (!seen[v] && v_data.level > 0) {
-                varBumpActivity(yield, v);
+                varBumpActivity(v);
                 
                 seen[v] = 1;
                 output.verbose(CALL_INFO, 5, 0,
@@ -796,8 +812,7 @@ void SATSolver::analyze(coro_t::push_type &yield) {
         // Select next literal to expand from the trail
         while (!seen[var(trail[index--])]);
         p = trail[index+1];
-        variables->read(yield, var(p));
-        conflict = variables->getLastRead().reason;
+        conflict = variables(var(p)).reason();
 
         seen[var(p)] = 0;
         pathC--;
@@ -824,20 +839,19 @@ void SATSolver::analyze(coro_t::push_type &yield) {
         if (ccmin_mode == 2) {
             // Deep minimization (more thorough)
             for (i = j = 1; i < learnt_clause.size(); i++) {
-                variables->read(yield, var(learnt_clause[i]));
+                int reason = variables(var(learnt_clause[i])).reason();
 
-                if (variables->getLastRead().reason == ClauseRef_Undef) {
+                if (reason == ClauseRef_Undef) {
                     learnt_clause[j++] = learnt_clause[i];
                     continue;
                 }
-                if (!litRedundant(yield, learnt_clause[i]))
+                if (!litRedundant(learnt_clause[i]))
                     learnt_clause[j++] = learnt_clause[i];
             }
         } else if (ccmin_mode == 1) {
             // Basic minimization (faster but less thorough)
             for (i = j = 1; i < learnt_clause.size(); i++) {
-                variables->read(yield, var(learnt_clause[i]));
-                Variable var_data = variables->getLastRead();
+                Variable var_data = variables(var(learnt_clause[i]));
                 
                 if (var_data.reason == ClauseRef_Undef)
                     learnt_clause[j++] = learnt_clause[i];
@@ -871,15 +885,14 @@ void SATSolver::analyze(coro_t::push_type &yield) {
     } else {
         // Find the second highest level in the clause
         int max_i = 1;
-        for (size_t i = 2; i < learnt_clause.size(); i++) {
-            variables->read(yield, var(learnt_clause[i]));
-            size_t level_i = variables->getLastRead().level;
+        int max_level = variables(var(learnt_clause[1])).level();
+
+        for (int i = 2; i < learnt_clause.size(); i++) {
+            int level_i = variables(var(learnt_clause[i])).level();
             
-            variables->read(yield, var(learnt_clause[max_i]));
-            size_t level_max = variables->getLastRead().level;
-            
-            if (level_i > level_max) {
+            if (level_i > max_level) {
                 max_i = i;
+                max_level = level_i;
             }
         }
         
@@ -887,9 +900,7 @@ void SATSolver::analyze(coro_t::push_type &yield) {
         Lit p = learnt_clause[max_i];
         learnt_clause[max_i] = learnt_clause[1];
         learnt_clause[1] = p;
-        variables->read(yield, var(p));
-
-        bt_level = variables->getLastRead().level;
+        bt_level = variables(var(p)).level();
     }
 
     // Clear seen vector for next analysis
@@ -904,7 +915,7 @@ void SATSolver::analyze(coro_t::push_type &yield) {
 // backtrack
 //-----------------------------------------------------------------------------------
 
-void SATSolver::backtrack(coro_t::push_type &yield, int backtrack_level) {
+void SATSolver::backtrack(int backtrack_level) {
     output.verbose(CALL_INFO, 3, 0, "BACKTRACK From level %d to level %d\n", 
         current_level(), backtrack_level);
     
@@ -914,8 +925,8 @@ void SATSolver::backtrack(coro_t::push_type &yield, int backtrack_level) {
         Var v = var(p);
         
         polarity[v] = sign(p);
-        unassignVariable(yield, v);
-        insertVarOrder(yield, v);
+        unassignVariable(v);
+        insertVarOrder(v);
         
         output.verbose(CALL_INFO, 4, 0,
             "BACKTRACK: Unassigning x%d, saved polarity %s\n", 
@@ -934,7 +945,7 @@ void SATSolver::backtrack(coro_t::push_type &yield, int backtrack_level) {
 // minus the clauses locked by the current assignment. 
 // Locked clauses are clauses that are reason to some assignment. 
 // Binary clauses are never removed.
-void SATSolver::reduceDB(coro_t::push_type &yield) {
+void SATSolver::reduceDB() {
     output.verbose(CALL_INFO, 3, 0, "REDUCEDB: Starting clause database reduction\n");
     
     // 1. Collect learnt clauses indices
@@ -967,7 +978,7 @@ void SATSolver::reduceDB(coro_t::push_type &yield) {
         Clause& c = clauses[idx];
         
         // Only remove non-binary, unlocked clauses
-        if (c.size() > 2 && !locked(yield, idx) && 
+        if (c.size() > 2 && !locked(idx) && 
             (i < learnts.size() / 2 || c.activity < extra_lim)) {
             output.verbose(CALL_INFO, 4, 0, 
                 "REDUCEDB: Marking clause %d for removal (size=%d, activity=%.2e)\n", 
@@ -996,8 +1007,7 @@ void SATSolver::reduceDB(coro_t::push_type &yield) {
     // 6. Update reasons for assigned variables in trail
     for (int i = 0; i < trail.size(); i++) {
         Var v = var(trail[i]);
-        variables->read(yield, v);
-        Variable var_data = variables->getLastRead();
+        Variable var_data = variables(v);
         
         int old_reason = var_data.reason;
         // skip original clauses and decision variables
@@ -1006,7 +1016,7 @@ void SATSolver::reduceDB(coro_t::push_type &yield) {
             assert(!to_remove[old_reason]);
             // Update the reason, but also wasted bw to update level
             var_data.reason = clause_map[old_reason];
-            variables->write(yield, v, {var_data});
+            variables(v) = {var_data};
             
             output.verbose(CALL_INFO, 5, 0, 
                 "REDUCEDB: Updated var %d reason from %d to %d\n", 
@@ -1056,7 +1066,7 @@ void SATSolver::reduceDB(coro_t::push_type &yield) {
 // Trail Management
 //-----------------------------------------------------------------------------------
 
-void SATSolver::trailEnqueue(coro_t::push_type &yield, Lit literal, int reason) {
+void SATSolver::trailEnqueue(Lit literal, int reason) {
     Var v = var(literal);
     var_assigned[v] = true;
     var_value[v] = !sign(literal);
@@ -1064,7 +1074,7 @@ void SATSolver::trailEnqueue(coro_t::push_type &yield, Lit literal, int reason) 
     Variable var_data;
     var_data.level = current_level();
     var_data.reason = reason;
-    variables->write(yield, v, {var_data});  // wait for yield
+    variables(v) = var_data;
     
     // Add to trail
     trail.push_back(literal);
@@ -1073,7 +1083,7 @@ void SATSolver::trailEnqueue(coro_t::push_type &yield, Lit literal, int reason) 
         v, var_value[v] ? 1 : 0, current_level(), reason);
 }
 
-void SATSolver::unassignVariable(coro_t::push_type &yield, Var v) {
+void SATSolver::unassignVariable(Var v) {
     var_assigned[v] = false;
     stat_unassigns->addData(1);
 }
@@ -1120,12 +1130,12 @@ void SATSolver::remove_watch(std::vector<Watcher>& ws, int clause_idx) {
 //-----------------------------------------------------------------------------------
 // Decision Heuristics
 //-----------------------------------------------------------------------------------
-Lit SATSolver::chooseBranchVariable(coro_t::push_type &yield) {
+Lit SATSolver::chooseBranchVariable() {
     Var next = var_Undef;
     if (!order_heap->empty() && drand(random_seed) < random_var_freq) {
         int rand_idx = irand(random_seed, order_heap->size());
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::READ, rand_idx));
-        yield();
+        (*yield_ptr)();
         next = heap_resp;
 
         if (!var_assigned[next] && decision[next]) {
@@ -1141,7 +1151,7 @@ Lit SATSolver::chooseBranchVariable(coro_t::push_type &yield) {
             break;
         }
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::REMOVE_MIN));
-        yield();
+        (*yield_ptr)();
         next = heap_resp;
     }
 
@@ -1151,13 +1161,13 @@ Lit SATSolver::chooseBranchVariable(coro_t::push_type &yield) {
     return mkLit(next, polarity[next]);
 }
 
-void SATSolver::insertVarOrder(coro_t::push_type &yield, Var v) {
+void SATSolver::insertVarOrder(Var v) {
     order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::IN_HEAP, v));
-    yield();
+    (*yield_ptr)();
     
     if (!(bool)heap_resp && decision[v]) {
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INSERT, v));
-        yield();
+        (*yield_ptr)();
         output.verbose(CALL_INFO, 4, 0, "Inserted var %d into order heap\n", v);
     }
 }
@@ -1168,7 +1178,7 @@ void SATSolver::varDecayActivity() {
         "ACTIVITY: Decayed activity increment to %f\n", var_inc);
 }
 
-void SATSolver::varBumpActivity(coro_t::push_type &yield, Var v) {
+void SATSolver::varBumpActivity(Var v) {
     if ((activity[v] += var_inc) > 1e100) {
         output.verbose(CALL_INFO, 3, 0, "ACTIVITY: Rescaling all activities\n");
         for (size_t i = 0; i < activity.size(); i++) {
@@ -1178,7 +1188,7 @@ void SATSolver::varBumpActivity(coro_t::push_type &yield, Var v) {
     }
     
     order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::DECREASE, v));
-    yield();
+    (*yield_ptr)();
     
     output.verbose(CALL_INFO, 4, 0, "ACTIVITY: Bumped var %d to %f\n", v, activity[v]);
 }
@@ -1212,13 +1222,11 @@ void SATSolver::claBumpActivity(int clause_idx) {
 }
 
 // Check if a clause is "locked" -- cannot be removed
-bool SATSolver::locked(coro_t::push_type &yield, int clause_idx) {
+bool SATSolver::locked(int clause_idx) {
     const Clause& c = clauses[clause_idx];
     Var v = var(c.literals[0]);
     if (c.size() == 0) return false;
-
-    variables->read(yield, v);
-    int reason = variables->getLastRead().reason;
+    int reason = variables(v).reason();
     
     return var_assigned[v] && 
            value(c.literals[0]) == true &&      // First literal is true
@@ -1230,11 +1238,10 @@ bool SATSolver::locked(coro_t::push_type &yield, int clause_idx) {
 //-----------------------------------------------------------------------------------
 
 // Check if 'p' can be removed from a conflict clause
-bool SATSolver::litRedundant(coro_t::push_type &yield, Lit p) {
+bool SATSolver::litRedundant(Lit p) {
     output.verbose(CALL_INFO, 6, 0, "MIN: Checking if %d is redundant\n", toInt(p));
     enum { seen_undef = 0, seen_source = 1, seen_removable = 2, seen_failed = 3 };
-    variables->read(yield, var(p));
-    int reason = variables->getLastRead().reason;
+    int reason = variables(var(p)).reason();
     
     assert(seen[var(p)] == seen_undef || seen[var(p)] == seen_source);
     assert(reason != ClauseRef_Undef);
@@ -1247,8 +1254,7 @@ bool SATSolver::litRedundant(coro_t::push_type &yield, Lit p) {
             // Examining the literals in the reason clause
             Lit l = c.literals[i];
             Var v = var(l);
-            variables->read(yield, v);
-            Variable v_data = variables->getLastRead();
+            Variable v_data = variables(v);
             
             // If variable at level 0 or already marked as source/removable, skip it
             if (v_data.level == 0 || seen[v] == seen_source || seen[v] == seen_removable) {
@@ -1274,8 +1280,7 @@ bool SATSolver::litRedundant(coro_t::push_type &yield, Lit p) {
             analyze_stack.push_back(ShrinkStackElem(i, p));
             i = 0;
             p = l;
-            variables->read(yield, var(p));
-            c = clauses[variables->getLastRead().reason];
+            c = clauses[variables(var(p)).reason()];
         } else {
             // Finished examining current reason clause
             if (seen[var(p)] == seen_undef) {
@@ -1295,8 +1300,7 @@ bool SATSolver::litRedundant(coro_t::push_type &yield, Lit p) {
             analyze_stack.pop_back();
             i = e.i;
             p = e.l;
-            variables->read(yield, var(p));
-            c = clauses[variables->getLastRead().reason];
+            c = clauses[variables(var(p)).reason()];
         }
     }
 }

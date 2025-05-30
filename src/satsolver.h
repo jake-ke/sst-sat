@@ -141,26 +141,26 @@ public:
 
     // Top level FSM
     bool clockTick(SST::Cycle_t currentCycle);
-    void execPropagate(coro_t::push_type &yield);
-    void execAnalyze(coro_t::push_type &yield);
-    void execBacktrack(coro_t::push_type &yield);
-    void execReduce(coro_t::push_type &yield);
-    void execRestart(coro_t::push_type &yield);
-    void execDecide(coro_t::push_type &yield);
+    void execPropagate();
+    void execAnalyze();
+    void execBacktrack();
+    void execReduce();
+    void execRestart();
+    void execDecide();
     
     // Input Processing
     void parseDIMACS(const std::string& content);
     
     // Core CDCL Algorithm
-    void initialize(coro_t::push_type &yield);
-    bool decide(coro_t::push_type &yield);
-    int unitPropagate(coro_t::push_type &yield);
-    void analyze(coro_t::push_type &yield);
-    void backtrack(coro_t::push_type &yield, int backtrack_level);
+    void initialize();
+    bool decide();
+    int unitPropagate();
+    void analyze();
+    void backtrack(int backtrack_level);
     
     // Trail Management
-    void trailEnqueue(coro_t::push_type &yield, Lit literal, int reason = ClauseRef_Undef);
-    void unassignVariable(coro_t::push_type &yield, Var var);
+    void trailEnqueue(Lit literal, int reason = ClauseRef_Undef);
+    void unassignVariable(Var var);
     int current_level() { return trail_lim.size(); }
 
     // Two-Watched Literals
@@ -171,22 +171,22 @@ public:
     void remove_watch(std::vector<Watcher>& ws, int clause_idx);
     
     // Decision Heuristics
-    Lit chooseBranchVariable(coro_t::push_type &yield);
-    void insertVarOrder(coro_t::push_type &yield, Var v);   // Insert variable into order heap
-    void varDecayActivity();                                // Decay all variable activities
-    void varBumpActivity(coro_t::push_type &yield, Var v);  // Bump a variable's activity
+    Lit chooseBranchVariable();
+    void insertVarOrder(Var v);   // Insert variable into order heap
+    void varDecayActivity();       // Decay all variable activities
+    void varBumpActivity(Var v);   // Bump a variable's activity
     
     // Clause Activity
     void claDecayActivity();
     void claBumpActivity(int clause_idx);
-    void reduceDB(coro_t::push_type &yield);                // Reduce the learnt clause database
-    bool locked(coro_t::push_type &yield, int clause_idx);  // Check if clause is locked (reason for assignment)
+    void reduceDB();               // Reduce the learnt clause database
+    bool locked(int clause_idx);   // Check if clause is locked (reason for assignment)
 
     // Clause Minimization
-    bool litRedundant(coro_t::push_type &yield, Lit p);
+    bool litRedundant(Lit p);
 
     // Restart helpers
-    double luby(double y, int x);                 // Calculate Luby sequence value
+    double luby(double y, int x);  // Calculate Luby sequence value
 
     // Utility Functions
     inline bool value(Var v) { return var_value[v]; }
@@ -218,6 +218,7 @@ private:
     std::string dimacs_content;
     SST::Cycle_t currentCycle;
     coro_t::pull_type* coroutine; // Coroutine for async operations
+    coro_t::push_type* yield_ptr; // Pointer to current yield object
     int heap_resp;
 
     // Parsing state
@@ -263,7 +264,7 @@ private:
     uint64_t indices_base_addr;         // Base address for indices memory
 
     // Variables instance for asynchronous memory access to variable data
-    Variables* variables;
+    Variables variables;
     uint64_t variables_base_addr;
     
     // Clause activity
