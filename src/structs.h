@@ -26,6 +26,16 @@ struct Variable {
     Variable() : level(0), reason(ClauseRef_Undef) {}
 };
 
+struct Clause {
+    std::vector<Lit> literals;
+    double activity;  // Activity score for this clause
+
+    Clause() : activity(0) {}
+    Clause(const std::vector<Lit>& lits) 
+        : literals(lits), activity(0) {}
+    int size() const { return literals.size(); }
+};
+
 // Comparator for the variable activity heap
 struct VarOrderLt {
     const std::vector<double>& activity;
@@ -36,5 +46,17 @@ struct VarOrderLt {
         return activity[x] > activity[y];  // Higher activity first
     }
 };
+
+// Helper functions for literals
+inline Lit mkLit(Var var, bool sign = false) { Lit p; p.x = var + var + (int)sign; return p; }
+inline Lit operator ~(Lit p) { Lit q; q.x = p.x ^ 1; return q; }
+inline bool sign(Lit p) { return p.x & 1; }
+inline int var(Lit p) { return p.x >> 1; }
+inline Lit toLit(int dimacs_lit) { 
+    int var = abs(dimacs_lit);
+    return dimacs_lit > 0 ? mkLit(var, false) : mkLit(var, true);
+}
+inline int toInt(Lit p) { return sign(p) ? -var(p) : var(p); }
+inline int toWatchIndex(Lit p) { return p.x; }
 
 #endif // structs_h

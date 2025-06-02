@@ -72,6 +72,8 @@ solver = sst.Component("solver", "satsolver.SATSolver")
 heap_base_addr = 0x00000000
 indices_base_addr = 0x10000000
 variables_base_addr = 0x20000000
+watches_base_addr = 0x30000000
+watch_nodes_base_addr = 0x40000000
 
 # Get file size and pass it to solver
 file_size = os.path.getsize(args.cnf_path)
@@ -83,6 +85,8 @@ params = {
     "heap_base_addr" : hex(heap_base_addr),
     "indices_base_addr" : hex(indices_base_addr),
     "variables_base_addr" : hex(variables_base_addr),
+    "watches_base_addr" : hex(watches_base_addr),
+    "watch_nodes_base_addr" : hex(watch_nodes_base_addr),
     "random_var_freq": str(args.random_var_freq),
     "var_decay": str(args.var_decay),
     "clause_decay": str(args.clause_decay)
@@ -137,15 +141,15 @@ global_memctrl.addParams({
     "debug_level" : "10",
     "verbose" : "0",
     "addr_range_start" : "0",
-    "addr_range_end" : "0x3FFFFFFF",
-    "mem_size" : "1GiB",
+    "addr_range_end" : "0x7FFFFFFF",
+    "mem_size" : "2GiB",
 })
 
 # Create memory backend for global operations
 global_memory = global_memctrl.setSubComponent("backend", "memHierarchy.simpleMem")
 global_memory.addParams({
     "access_time" : "1ns",
-    "mem_size" : "1GiB",
+    "mem_size" : "2GiB",
 })
 
 # Connect solver to heap

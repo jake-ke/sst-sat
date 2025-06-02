@@ -29,10 +29,12 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     conflicts_until_restart(restart_first),
     conflictC(0),
     yield_ptr(nullptr),
-    variables(nullptr, 0, nullptr) {
+    variables(0, nullptr, 0, nullptr),
+    watches(0, nullptr, 0, 0, nullptr) {
     
     // Initialize output
-    output.init("MAIN-> ", params.find<int>("verbose", 0), 0, SST::Output::STDOUT);
+    int verbose = params.find<int>("verbose", 0);
+    output.init("MAIN-> ",verbose, 0, SST::Output::STDOUT);
 
     // Configure clock
     registerClock(params.find<std::string>("clock", "1GHz"),
@@ -55,6 +57,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     heap_base_addr = std::stoull(params.find<std::string>("heap_base_addr", "0x00000000"), nullptr, 0);
     indices_base_addr = std::stoull(params.find<std::string>("indices_base_addr", "0x10000000"), nullptr, 0);
     variables_base_addr = std::stoull(params.find<std::string>("variables_base_addr", "0x20000000"), nullptr, 0);
+    watches_base_addr = std::stoull(params.find<std::string>("watches_base_addr", "0x30000000"), nullptr, 0);
+    watch_nodes_base_addr = std::stoull(params.find<std::string>("watch_nodes_base_addr", "0x40000000"), nullptr, 0);
     
     // Load decision sequence if provided
     std::string decision_file = params.find<std::string>("decision_file", "");
@@ -95,8 +99,11 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     );
     sst_assert(order_heap != nullptr, CALL_INFO, -1, "Unable to load Heap subcomponent\n");
 
-    // Create Variables object by pass point of yield_ptr
-    variables = Variables(global_memory, variables_base_addr, &yield_ptr);
+    // Create Variables object by passing point of yield_ptr
+    variables = Variables(verbose, global_memory, variables_base_addr, &yield_ptr);
+    
+    // Create Watches object
+    watches = Watches(verbose, global_memory, watches_base_addr, watch_nodes_base_addr, &yield_ptr);
 
     // Configure the link to the heap subcomponent
     heap_link = configureLink("heap_port", 
@@ -197,7 +204,6 @@ void SATSolver::parseDIMACS(const std::string& content) {
     num_vars = 0;
     num_clauses = 0;
     clauses.clear();
-    watches.clear();
     activity.clear();
     polarity.clear();
     decision.clear();
@@ -269,30 +275,6 @@ void SATSolver::parseDIMACS(const std::string& content) {
         "Parsing error: Expected %u clauses but got %zu\n", 
         num_clauses, clauses.size());
     
-    // Setup watched literals for all clauses
-    watches.resize(2 * (num_vars + 1));
-    for (int i = 0; i < clauses.size(); i++) attachClause(i);
-    
-    // Print watch lists after parsing
-    if (output.getVerboseLevel() >= 6) {
-        output.output("Watch lists after parsing:\n");
-        for (size_t i = 0; i < watches.size(); i++) {
-            const std::vector<Watcher>& watchers = watches[i];
-            
-            if (!watchers.empty()) {
-                // Convert watch index back to literal for display
-                Lit lit = toLit((i % 2 == 0) ? (i/2) : -(i/2));
-                output.output("  Watch list for ~%d, idx %zu, (%zu watchers):",
-                    toInt(~lit), i, watchers.size());
-                for (const auto& w : watchers) {
-                    output.output(" [C%d,b=%d]", w.clause_idx, toInt(w.blocker));
-                }
-                output.output("\n");
-            }
-        }
-        output.output("\n");
-    }
-    
     // Initialize learnt clause adjustment parameters
     learnt_adjust_confl = learnt_adjust_start_confl;
     learnt_adjust_cnt = (int)learnt_adjust_confl;
@@ -325,7 +307,7 @@ void SATSolver::handleCnfMemEvent(SST::Interfaces::StandardMem::Request* req) {
 
 void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req) {
     sst_assert(req != nullptr, CALL_INFO, -1, "Received null request in handleGlobalMemEvent\n");
-    output.verbose(CALL_INFO, 7, 0, "handleGlobalMemEvent received\n");
+    output.verbose(CALL_INFO, 8, 0, "handleGlobalMemEvent received\n");
     
     // Get the address from the request
     uint64_t addr = 0;
@@ -336,7 +318,10 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
     }
     
     // Route the request to the appropriate handler based on address range
-    if (addr >= variables_base_addr) {  // Variables request
+    if (addr >= watches_base_addr) {  // Watches request
+        watches.handleMem(req);
+        state = STEP;
+    } else if (addr >= variables_base_addr) {  // Variables request
         variables.handleMem(req);
         state = STEP;
     } else order_heap->handleMem(req);  // Heap request
@@ -367,10 +352,10 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
         case STEP:
             (*coroutine)();
             if (*coroutine) {
-                output.verbose(CALL_INFO, 7, 0, "coroutine paused\n");
+                output.verbose(CALL_INFO, 8, 0, "coroutine paused\n");
                 state = IDLE;  // Continue coroutine later
             } else {
-                output.verbose(CALL_INFO, 7, 0, "coroutine completed\n");
+                output.verbose(CALL_INFO, 8, 0, "coroutine completed\n");
                 delete coroutine;
                 coroutine = nullptr;  // coroutine will set the next state
                 yield_ptr = nullptr;  // Clear yield pointer when coroutine completes
@@ -383,7 +368,7 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
                     execPropagate(); 
                 });
             if (!(*coroutine)) {
-                output.verbose(CALL_INFO, 7, 0, "Coroutine never paused but completed\n");
+                output.verbose(CALL_INFO, 8, 0, "Coroutine never paused but completed\n");
                 delete coroutine;
                 coroutine = nullptr;
                 yield_ptr = nullptr;
@@ -396,7 +381,7 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
                     execDecide(); 
                 });
             if (!(*coroutine)) {
-                output.verbose(CALL_INFO, 7, 0, "Coroutine never paused but completed\n");
+                output.verbose(CALL_INFO, 8, 0, "Coroutine never paused but completed\n");
                 delete coroutine;
                 coroutine = nullptr;
                 yield_ptr = nullptr;
@@ -453,6 +438,9 @@ void SATSolver::initialize() {
     // Initialize reasons to ClauseRef_Undef
     // but level not needed, wasting bw
     variables.write(0, std::vector<Variable>(num_vars + 1, Variable()));
+
+    // Initialize watches with a single memory operation for efficiency
+    watches.initWatches(2 * (num_vars + 1), clauses);
 
     // Enqueue unit clauses from the input DIMACS
     for (int i = 0; i < initial_units.size(); i++) {
@@ -635,33 +623,42 @@ int SATSolver::unitPropagate() {
         Lit p = trail[qhead++];
         Lit not_p = ~p;
         int watch_idx = toWatchIndex(p);
-        if (watch_idx >= (int)watches.size())
-            continue;  // No watches for this literal
-        std::vector<Watcher>& ws = watches[watch_idx];
+        watches.readHeadPointer(watch_idx);
+        uint64_t head_addr = watches.getLastHeadPointer();
         
+        if (head_addr == 0) continue; // Empty watch list
+            
         output.verbose(CALL_INFO, 3, 0,
-            "PROPAGATE: Processing %zu watchers for literal %d\n", 
-            ws.size(), toInt(p));
+            "PROPAGATE: Processing watchers for literal %d\n", toInt(p));
+            
+        uint64_t curr_addr = head_addr;
+        uint64_t prev_addr = 0;
+        WatcherNode prev_watcher;
         
-        size_t i, j;
-        for (i = j = 0; i != ws.size();) {
-            // Try to avoid inspecting the clause using the blocker
-            Lit blocker = ws[i].blocker;
+        // Traverse the linked list directly
+        while (curr_addr != 0) {
+            // Read current node
+            watches.readNode(curr_addr);
+            WatcherNode current = watches.getLastReadNode();
+            
+            int clause_idx = current.clause_idx;
+            Lit blocker = current.blocker;
+            uint64_t next_addr = current.next;
             
             // Debug info for watchers
-            output.verbose(CALL_INFO, 4, 0,
-                "  Watcher[%zu]: clause %d, blocker %d, j = %zu\n", 
-                i, ws[i].clause_idx, toInt(blocker), j);
-            
+            output.verbose(CALL_INFO, 4, 0, "  Watcher: clause %d, blocker %d\n", 
+                clause_idx, toInt(blocker));
+                
             if (var_assigned[var(blocker)] && value(blocker) == true) {
                 // Blocker is true, skip to next watcher
                 output.verbose(CALL_INFO, 4, 0, "    Blocker is true, skipping\n");
-                ws[j++] = ws[i++];
+                prev_addr = curr_addr;
+                prev_watcher = current;
+                curr_addr = next_addr;
                 continue;
             }
             
             // Need to inspect the clause
-            int clause_idx = ws[i].clause_idx;
             Clause& c = clauses[clause_idx];
             
             // Print clause for debugging
@@ -673,16 +670,18 @@ int SATSolver::unitPropagate() {
                 output.verbose(CALL_INFO, 4, 0, "    Swapped literals 0 and 1\n");
             }
             assert(c.literals[1] == not_p);
-            i++;
             
             // If first literal is already true, just update the blocker and continue
             Lit first = c.literals[0];
-            Watcher w = Watcher(clause_idx, first);
-            
             if (var_assigned[var(first)] && value(first) == true) {
                 output.verbose(CALL_INFO, 4, 0,
                     "    First literal %d is true\n", toInt(first));
-                ws[j++] = w;
+                current.blocker = first;
+                watches.writeNode(curr_addr, current);
+
+                prev_addr = curr_addr;
+                prev_watcher = current;
+                curr_addr = next_addr;
                 continue;
             }
             
@@ -693,31 +692,43 @@ int SATSolver::unitPropagate() {
                 if (!var_assigned[var(lit)] || value(lit) == true) {
                     // Swap to position 1 and update watcher
                     std::swap(c.literals[1], c.literals[k]);
-                    insert_watch(~c.literals[1], w);
                     output.verbose(CALL_INFO, 4, 0, 
                         "    Found new watch: literal %d at position %zu\n", 
                         toInt(c.literals[1]), k);
-                    goto NextClause;  // postponed the deletion of the watcher
+                    
+                    output.verbose(CALL_INFO, 4, 0, "    Start watchlist insertion\n");
+                    watches.insertWatcher(toWatchIndex(~c.literals[1]), clause_idx, first);
+                    
+                    output.verbose(CALL_INFO, 4, 0, "    Start watchlist deletion for Lit %d\n", 
+                        toInt(p));
+                    if (prev_addr == 0) {
+                        // Current node is head of the list - update head pointer directly
+                        watches.writeHeadPointers(watch_idx, {next_addr});
+                    } else {
+                        // Update previous node's next pointer to skip current node
+                        prev_watcher.next = next_addr;
+                        watches.writeNode(prev_addr, prev_watcher);
+                    }
+                    // free the current node
+                    watches.freeNode(curr_addr);
+                    output.verbose(CALL_INFO, 4, 0, "    Watchlist deletion done\n");
+                    
+                    curr_addr = next_addr;
+                    goto NextClause;  // Continue with the next watcher
                 }
             }
-                        
+            
             // Did not find a new watch - clause is unit or conflicting
-            ws[j++] = w; // Keep watching current literals
             output.verbose(CALL_INFO, 4, 0, "    No new watch found\n");
             
             // Check if first literal is false (conflict) or undefined (unit)
             if (var_assigned[var(first)] && value(first) == false) {
                 // Conflict detected
-                // j may lag behind i due to a previous to-be-deleted watcher
-                // before returning the conflict, need to remove potential watchers
                 output.verbose(CALL_INFO, 3, 0,
                     "CONFLICT: Clause %d has all literals false\n", clause_idx);
                 qhead = trail.size();
                 conflict = clause_idx;
-                
-                // Copy remaining watchers
-                while (i < ws.size())
-                    ws[j++] = ws[i++];
+                break;  // Exit the loop immediately on conflict
             } else {
                 // Unit clause found, propagate
                 output.verbose(CALL_INFO, 3, 0,
@@ -725,10 +736,15 @@ int SATSolver::unitPropagate() {
                     clause_idx, toInt(first));
                 trailEnqueue(first, clause_idx);
             }
+            prev_addr = curr_addr;
+            prev_watcher = current;
+            curr_addr = next_addr;
+            
         NextClause:;
         }
         
-        ws.resize(j); // Remove deleted watchers
+        // If conflict found, stop propagation
+        // if (conflict != ClauseRef_Undef) break;
     }
     
     output.verbose(CALL_INFO, 3, 0, "PROPAGATE: no more propagations\n");
@@ -1026,19 +1042,28 @@ void SATSolver::reduceDB() {
     
     // 7. Update all watch lists with new indices
     for (size_t i = 0; i < watches.size(); i++) {
-        std::vector<Watcher>& ws = watches[i];
-        for (size_t k = 0; k < ws.size(); k++) {
-            int old_idx = ws[k].clause_idx;
+        // Get the watch list for this literal
+        watches.readHeadPointer(i);
+        uint64_t curr_addr = watches.getLastHeadPointer();
+        
+        if (curr_addr == 0) continue;  // Skip empty watch lists
+        while (curr_addr != 0) {  // Traverse the linked list
+            watches.readNode(curr_addr);
+            WatcherNode current = watches.getLastReadNode();
+            
+            int old_idx = current.clause_idx;
+            uint64_t next_addr = current.next;
             // Only update indices for learnt clauses that aren't being removed
-            if (old_idx >= num_clauses && !to_remove[old_idx]) {
-                if (clause_map[old_idx] != old_idx) {
-                    ws[k].clause_idx = clause_map[old_idx];
-                    output.verbose(CALL_INFO, 6, 0, 
-                        "REDUCEDB: Updated watcher reference from %d to %d\n",
-                        old_idx, ws[k].clause_idx);
-                }
+            if (old_idx >= num_clauses) {
+                assert(!to_remove[old_idx]);  // already been removed
+                current.clause_idx = clause_map[old_idx];
+                watches.writeNode(curr_addr, current);
+                    
+                output.verbose(CALL_INFO, 6, 0, 
+                    "REDUCEDB: Updated watcher reference from %d to %d\n",
+                    old_idx, current.clause_idx);
             }
-            // Skip watchers for removed clauses (they were already detached)
+            curr_addr = next_addr;
         }
     }
     
@@ -1094,38 +1119,19 @@ void SATSolver::unassignVariable(Var v) {
 
 void SATSolver::attachClause(int clause_idx) {
     Clause& c = clauses[clause_idx];
-    // Watch the first two literals in the clause
-    Lit not_lit0 = ~c.literals[0];
-    Lit not_lit1 = ~c.literals[1];
-    insert_watch(not_lit0, Watcher(clause_idx, c.literals[1]));
-    insert_watch(not_lit1, Watcher(clause_idx, c.literals[0]));
+    // Watch the first two literals in the clause, use each other as a blocker
+    watches[toWatchIndex(~c.literals[0])].insert(clause_idx, c.literals[1]);
+    watches[toWatchIndex(~c.literals[1])].insert(clause_idx, c.literals[0]);
 }
 
 void SATSolver::detachClause(int clause_idx) {
     Clause& c = clauses[clause_idx];
-    output.verbose(CALL_INFO, 6, 0,  "DETACH: clause %d from watcher %d and %d\n",
+    output.verbose(CALL_INFO, 6, 0, "DETACH: clause %d from watcher %d and %d\n",
         clause_idx, toInt(~c.literals[0]), toInt(~c.literals[1]));
-    remove_watch(watches[toWatchIndex(~c.literals[0])], clause_idx);
-    remove_watch(watches[toWatchIndex(~c.literals[1])], clause_idx);
+    watches[toWatchIndex(~c.literals[0])].remove(clause_idx);
+    watches[toWatchIndex(~c.literals[1])].remove(clause_idx);
 }
 
-void SATSolver::insert_watch(Lit p, Watcher w) {
-    int idx = toWatchIndex(p);
-    watches[idx].push_back(w);
-}
-
-void SATSolver::remove_watch(std::vector<Watcher>& ws, int clause_idx) {
-    bool found = false;
-    for (size_t i = 0; i < ws.size(); i++) {
-        if (ws[i].clause_idx == clause_idx) {
-            std::swap(ws[i], ws.back());
-            ws.pop_back();
-            found = true;
-            break;
-        }
-    }
-    assert(found);
-}
 
 //-----------------------------------------------------------------------------------
 // Decision Heuristics

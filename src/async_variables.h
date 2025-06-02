@@ -44,9 +44,10 @@ public:
         }
     };
 
-    Variables(SST::Interfaces::StandardMem* mem, uint64_t var_base_addr, coro_t::push_type** yield_ptr = nullptr)
+    Variables(int verbose, SST::Interfaces::StandardMem* mem, uint64_t var_base_addr, 
+        coro_t::push_type** yield_ptr = nullptr)
         : memory(mem), var_base_addr(var_base_addr), busy(false), yield_ptr(yield_ptr) {
-        output.init("VAR-> ", 0, 7, SST::Output::STDOUT);
+        output.init("VAR-> ", verbose, 0, SST::Output::STDOUT);
     }
 
     uint64_t varAddr(int var_idx) const { return var_base_addr + var_idx * sizeof(Variable); }
@@ -80,7 +81,7 @@ public:
     }
 
     void handleMem(SST::Interfaces::StandardMem::Request* req) {
-        output.verbose(CALL_INFO, 7, 0, "handleMem\n");
+        output.verbose(CALL_INFO, 8, 0, "handleMem\n");
         busy = false;
         if (auto* resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
             size_t var_count = resp->data.size() / sizeof(Variable);

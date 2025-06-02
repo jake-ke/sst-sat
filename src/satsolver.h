@@ -4,7 +4,6 @@
 #include <sst/core/component.h>
 #include <sst/core/output.h>
 #include <sst/core/interfaces/stdMem.h>
-#include <map>
 #include <vector>
 #include <string>
 #include <fstream>    // For reading decision file
@@ -12,6 +11,7 @@
 #include "structs.h"
 #include "async_heap.h"
 #include "async_variables.h"
+#include "async_watches.h"
 
 //-----------------------------------------------------------------------------------
 // Type Definitions and Constants
@@ -30,41 +30,6 @@ enum SolverState {
     RESTART,
     DONE 
 };
-
-// Helper functions for literals
-inline Lit mkLit(Var var, bool sign = false) { Lit p; p.x = var + var + (int)sign; return p; }
-inline Lit operator ~(Lit p) { Lit q; q.x = p.x ^ 1; return q; }
-inline bool sign(Lit p) { return p.x & 1; }
-inline int var(Lit p) { return p.x >> 1; }
-inline Lit toLit(int dimacs_lit) { 
-    int var = abs(dimacs_lit);
-    return dimacs_lit > 0 ? mkLit(var, false) : mkLit(var, true);
-}
-inline int toInt(Lit p) { return sign(p) ? -var(p) : var(p); }
-
-//-----------------------------------------------------------------------------------
-// Data Structures
-//-----------------------------------------------------------------------------------
-
-struct Clause {
-    std::vector<Lit> literals;
-    double activity;  // Activity score for this clause
-
-    Clause() : activity(0) {}
-    Clause(const std::vector<Lit>& lits) 
-        : literals(lits), activity(0) {}
-    int size() const { return literals.size(); }
-};
-
-// Watcher structure for 2WL scheme
-struct Watcher {
-    int clause_idx;  // Index of the clause in the clauses vector
-    Lit blocker;        // Blocker literal (optimization to avoid accessing clause memory)
-    
-    Watcher() : clause_idx(ClauseRef_Undef), blocker(lit_Undef) {} // Default constructor
-    Watcher(int ci, Lit b) : clause_idx(ci), blocker(b) {}
-};
-
 
 //-----------------------------------------------------------------------------------
 // Component Class
@@ -164,11 +129,8 @@ public:
     int current_level() { return trail_lim.size(); }
 
     // Two-Watched Literals
-    inline int toWatchIndex(Lit p) { return p.x; }
     void attachClause(int clause_idx);
     void detachClause(int clause_idx);
-    void insert_watch(Lit p, Watcher w);
-    void remove_watch(std::vector<Watcher>& ws, int clause_idx);
     
     // Decision Heuristics
     Lit chooseBranchVariable();
@@ -248,7 +210,9 @@ private:
     std::vector<Lit> analyze_toclear;           // Literals to clear after analysis
 
     // Two Watched Literals implementation
-    std::vector<std::vector<Watcher>> watches;  // Indexed by literal encoding
+    Watches watches;  // Replaces std::vector<std::vector<Watcher>> watches
+    uint64_t watches_base_addr;      // Base address for watches array
+    uint64_t watch_nodes_base_addr;  // Base address for watch nodes
     
     // Variable activity for VSIDS
     std::vector<double> activity;       // Activity score for each variable
