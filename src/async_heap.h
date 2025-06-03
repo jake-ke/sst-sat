@@ -11,7 +11,7 @@
 // Events for heap operations
 class HeapReqEvent : public SST::Event {
 public:
-    enum OpType { INSERT, REMOVE_MIN, DECREASE, IN_HEAP, READ };
+    enum OpType { INIT, INSERT, REMOVE_MIN, DECREASE, IN_HEAP, READ };
     OpType op;
     int arg;
     HeapReqEvent() : op(HeapReqEvent::READ), arg(0) {}
@@ -65,6 +65,9 @@ public:
     Heap(SST::ComponentId_t id, SST::Params& params, const VarOrderLt& c, 
          SST::Interfaces::StandardMem* mem, uint64_t heap_base_addr, uint64_t indices_base_addr);
     
+    size_t heap_size;
+    std::vector<bool> decision;         // Whether variable is eligible for decisions
+
     bool tick(SST::Cycle_t cycle);
     void handleMem(SST::Interfaces::StandardMem::Request* req);
     void handleRequest(HeapReqEvent* req);
@@ -80,7 +83,6 @@ private:
     SST::Interfaces::StandardMem* memory;
     VarOrderLt lt;
     uint64_t heap_addr, indices_addr;
-    size_t heap_size;
     State state;
     HeapReqEvent::OpType current_op;
     coro_t::pull_type* heap_source;
@@ -100,6 +102,7 @@ private:
     void percolateUp(int i, coro_t::push_type &heap_sink);
     void percolateDown(int i, coro_t::push_type &heap_sink);
 
+    void initHeap(coro_t::push_type &heap_sink);
     void readHeap(coro_t::push_type &heap_sink);
     void inHeap(coro_t::push_type &heap_sink);
     void insert(coro_t::push_type &heap_sink);

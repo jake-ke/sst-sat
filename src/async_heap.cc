@@ -21,6 +21,10 @@ bool Heap::tick(SST::Cycle_t cycle) {
         output.verbose(CALL_INFO, 7, 0, "Tick %lu: state %d, OP: %d\n", cycle, state, current_op);
         case START:
             switch(current_op) {
+                case HeapReqEvent::INIT:
+                    heap_source = new coro_t::pull_type(
+                        [this](coro_t::push_type &heap_sink) { initHeap(heap_sink); });
+                    break;
                 case HeapReqEvent::INSERT:
                     heap_source = new coro_t::pull_type(
                         [this](coro_t::push_type &heap_sink) { insert(heap_sink); });
@@ -263,3 +267,37 @@ void Heap::removeMin(coro_t::push_type &heap_sink) {
     complete(min_var);
 }
 
+void Heap::initHeap(coro_t::push_type &heap_sink) {
+    output.verbose(CALL_INFO, 1, 0, "Initializing heap with %ld decision variables\n", heap_size);
+    // Count decision variables and prepare data in one pass
+    std::vector<uint8_t> heap_data;
+    std::vector<int> pos_map(heap_size + 1, -1);  // All indices start as -1 (not in heap)
+    
+    int heap_idx = 0;
+    for (Var v = 1; v <= (Var)heap_size; v++) {
+        if (!decision[v]) continue;
+        
+        // Append to heap array
+        heap_data.resize((heap_idx + 1) * sizeof(Var));
+        memcpy(heap_data.data() + heap_idx * sizeof(Var), &v, sizeof(Var));
+       
+        pos_map[v] = heap_idx++;   // Mark position in indices map
+    }
+
+    // Convert positions map to byte array
+    std::vector<uint8_t> indices_data((heap_size + 1) * sizeof(Var));
+    memcpy(indices_data.data(), pos_map.data(), indices_data.size());
+    
+    // Send bulk writes
+    memory->send(new SST::Interfaces::StandardMem::Write(heap_addr, heap_data.size(), heap_data));
+    outstanding_mem_requests++;
+    state = WAIT;
+    heap_sink();
+    
+    memory->send(new SST::Interfaces::StandardMem::Write(indices_addr, indices_data.size(), indices_data));
+    outstanding_mem_requests++;
+    state = WAIT;
+    heap_sink();
+    
+    complete(true);
+}

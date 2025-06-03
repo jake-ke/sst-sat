@@ -447,14 +447,11 @@ void SATSolver::initialize() {
         trailEnqueue(initial_units[i]); 
     }
     
-    // Insert variables into the heap
-    for(Var v = 1; v <= (Var)num_vars; v++) {
-        if (!decision[v]) continue;
-        output.verbose(CALL_INFO, 6, 0, "Inserting var %d into order heap\n", v);
-        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INSERT, v));
-        (*yield_ptr)();
-        output.verbose(CALL_INFO, 6, 0, "Inserted var %d into order heap\n", v);
-    }
+    // Use the bulk heap initialization with decision vector
+    order_heap->decision = decision;
+    order_heap->heap_size = num_vars;
+    order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INIT));
+    (*yield_ptr)();
 
     output.verbose(CALL_INFO, 1, 0, "Initialization complete\n");
     state = PROPAGATE;
