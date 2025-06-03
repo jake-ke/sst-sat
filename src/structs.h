@@ -32,6 +32,7 @@ struct Clause {
     Clause() {}
     Clause(const std::vector<Lit>& lits) : literals(lits) {}
     int size() const { return literals.size(); }
+    Lit operator[] (size_t i) const { return literals[i]; }
 };
 
 // Comparator for the variable activity heap

@@ -30,7 +30,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     conflictC(0),
     yield_ptr(nullptr),
     variables(0, nullptr, 0, nullptr),
-    watches(0, nullptr, 0, 0, nullptr) {
+    watches(0, nullptr, 0, 0, nullptr),
+    clauses(0, nullptr, 0, nullptr) {
     
     // Initialize output
     int verbose = params.find<int>("verbose", 0);
@@ -59,6 +60,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     variables_base_addr = std::stoull(params.find<std::string>("variables_base_addr", "0x20000000"), nullptr, 0);
     watches_base_addr = std::stoull(params.find<std::string>("watches_base_addr", "0x30000000"), nullptr, 0);
     watch_nodes_base_addr = std::stoull(params.find<std::string>("watch_nodes_base_addr", "0x40000000"), nullptr, 0);
+    clauses_base_addr = std::stoull(params.find<std::string>("clauses_base_addr", "0x50000000"), nullptr, 0);
     
     // Load decision sequence if provided
     std::string decision_file = params.find<std::string>("decision_file", "");
@@ -104,6 +106,9 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     
     // Create Watches object
     watches = Watches(verbose, global_memory, watches_base_addr, watch_nodes_base_addr, &yield_ptr);
+    
+    // Create Clauses object
+    clauses = AsyncClauses(verbose, global_memory, clauses_base_addr, &yield_ptr);
 
     // Configure the link to the heap subcomponent
     heap_link = configureLink("heap_port", 
@@ -203,7 +208,7 @@ void SATSolver::parseDIMACS(const std::string& content) {
     
     num_vars = 0;
     num_clauses = 0;
-    clauses.clear();
+    parsed_clauses.clear();
     activity.clear();
     polarity.clear();
     decision.clear();
@@ -260,25 +265,25 @@ void SATSolver::parseDIMACS(const std::string& content) {
                         // Sort literals in the clause
                         std::sort(clause.literals.begin(), clause.literals.end());
                     }
-                    clauses.push_back(clause);
+                    parsed_clauses.push_back(clause);
 
                     // debugging outputs
                     output.verbose(CALL_INFO, 6, 0, "Added clause %lu: %s\n",
-                                   clauses.size() - 1, printClause(clause).c_str());
+                                   parsed_clauses.size() - 1, printClause(clause).c_str());
                 }
                 break;
             }
         }
     }
     
-    sst_assert(clauses.size() == num_clauses, CALL_INFO, -1,
+    sst_assert(parsed_clauses.size() == num_clauses, CALL_INFO, -1,
         "Parsing error: Expected %u clauses but got %zu\n", 
-        num_clauses, clauses.size());
+        num_clauses, parsed_clauses.size());
     
     // Initialize learnt clause adjustment parameters
     learnt_adjust_confl = learnt_adjust_start_confl;
     learnt_adjust_cnt = (int)learnt_adjust_confl;
-    max_learnts = clauses.size() * learntsize_factor;
+    max_learnts = parsed_clauses.size() * learntsize_factor;
     output.verbose(CALL_INFO, 3, 0, "learnt_adjust_confl %f\n", learnt_adjust_confl);
     output.verbose(CALL_INFO, 3, 0, "max_learnts %.0f\n", max_learnts);
 }
@@ -318,7 +323,10 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
     }
     
     // Route the request to the appropriate handler based on address range
-    if (addr >= watches_base_addr) {  // Watches request
+    if (addr >= clauses_base_addr) {  // Clauses request
+        clauses.handleMem(req);
+        state = STEP;
+    } else if (addr >= watches_base_addr) {  // Watches request
         watches.handleMem(req);
         state = STEP;
     } else if (addr >= variables_base_addr) {  // Variables request
@@ -435,12 +443,14 @@ void SATSolver::initialize() {
     var_assigned.resize(num_vars + 1, false);
     var_value.resize(num_vars + 1);
 
-    // Initialize reasons to ClauseRef_Undef
-    // but level not needed, wasting bw
+    // Initialize variables
     variables.write(0, std::vector<Variable>(num_vars + 1, Variable()));
 
     // Initialize watches with a single memory operation for efficiency
-    watches.initWatches(2 * (num_vars + 1), clauses);
+    watches.initWatches(2 * (num_vars + 1), parsed_clauses);
+    
+    // Initialize clauses
+    clauses.initialize(parsed_clauses, num_clauses);
 
     // Enqueue unit clauses from the input DIMACS
     for (int i = 0; i < initial_units.size(); i++) {
@@ -494,7 +504,7 @@ void SATSolver::execBacktrack() {
         // Add the learned clause
         Clause new_clause(learnt_clause);
         int clause_idx = clauses.size();
-        clauses.push_back(new_clause);
+        clauses.addClause(new_clause);
         cla_activity.push_back(0.0);
         attachClause(clause_idx);  
         trailEnqueue(learnt_clause[0], clause_idx);
@@ -664,7 +674,7 @@ int SATSolver::unitPropagate() {
             
             // Make sure the false literal (~p) is at position 1
             if (c.literals[0] == not_p) {
-                std::swap(c.literals[0], c.literals[1]);
+                clauses.swapLiterals(clause_idx, 0, 1);
                 output.verbose(CALL_INFO, 4, 0, "    Swapped literals 0 and 1\n");
             }
             assert(c.literals[1] == not_p);
@@ -689,7 +699,7 @@ int SATSolver::unitPropagate() {
                 Lit lit = c.literals[k];
                 if (!var_assigned[var(lit)] || value(lit) == true) {
                     // Swap to position 1 and update watcher
-                    std::swap(c.literals[1], c.literals[k]);
+                    clauses.swapLiterals(clause_idx, 1, k);
                     output.verbose(CALL_INFO, 4, 0, 
                         "    Found new watch: literal %d at position %zu\n", 
                         toInt(c.literals[1]), k);
@@ -782,7 +792,7 @@ void SATSolver::analyze() {
     // Add literals from conflict clause to learnt clause
     do {
         assert(conflict != ClauseRef_Undef); // (otherwise should be UIP)
-        Clause& c = clauses[conflict];
+        const Clause& c = clauses[conflict];
         
         // Bump activity for learnt clauses
         if (isLearnt(conflict))
@@ -870,7 +880,7 @@ void SATSolver::analyze() {
                 if (var_data.reason == ClauseRef_Undef)
                     learnt_clause[j++] = learnt_clause[i];
                 else {
-                    Clause& c = clauses[var_data.reason];
+                    const Clause& c = clauses[var_data.reason];
                     for (size_t k = 1; k < c.size(); k++) {
                         Var l = var(c.literals[k]);
                         if (!seen[l] && var_data.level > 0) {
@@ -988,7 +998,7 @@ void SATSolver::reduceDB() {
     
     for (size_t i = 0; i < learnts.size(); i++) {
         int idx = learnts[i];
-        Clause& c = clauses[idx];
+        const Clause& c = clauses[idx];
         
         // Only remove non-binary, unlocked clauses
         if (c.size() > 2 && !locked(idx) && 
@@ -1069,14 +1079,13 @@ void SATSolver::reduceDB() {
     for (size_t read_pos = num_clauses; read_pos < clauses.size(); read_pos++) {
         if (!to_remove[read_pos]) {
             if (write_pos != read_pos) {
-                clauses[write_pos] = std::move(clauses[read_pos]);
-                cla_activity[write_pos - num_clauses] = std::move(cla_activity[read_pos - num_clauses]);
+                cla_activity[write_pos - num_clauses] = cla_activity[read_pos - num_clauses];
             }
             write_pos++;
         }
     }
     cla_activity.resize(write_pos - num_clauses);
-    clauses.resize(write_pos);
+    clauses.reduceDB(to_remove);
     
     output.verbose(CALL_INFO, 3, 0, 
         "REDUCEDB: Removed %d learnt clauses, new clause count: %zu\n", 
@@ -1117,14 +1126,14 @@ void SATSolver::unassignVariable(Var v) {
 //-----------------------------------------------------------------------------------
 
 void SATSolver::attachClause(int clause_idx) {
-    Clause& c = clauses[clause_idx];
+    const Clause& c = clauses[clause_idx];
     // Watch the first two literals in the clause, use each other as a blocker
     watches[toWatchIndex(~c.literals[0])].insert(clause_idx, c.literals[1]);
     watches[toWatchIndex(~c.literals[1])].insert(clause_idx, c.literals[0]);
 }
 
 void SATSolver::detachClause(int clause_idx) {
-    Clause& c = clauses[clause_idx];
+    const Clause& c = clauses[clause_idx];
     output.verbose(CALL_INFO, 6, 0, "DETACH: clause %d from watcher %d and %d\n",
         clause_idx, toInt(~c.literals[0]), toInt(~c.literals[1]));
     watches[toWatchIndex(~c.literals[0])].remove(clause_idx);

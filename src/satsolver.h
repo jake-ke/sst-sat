@@ -12,6 +12,7 @@
 #include "async_heap.h"
 #include "async_variables.h"
 #include "async_watches.h"
+#include "async_clauses.h"
 
 //-----------------------------------------------------------------------------------
 // Type Definitions and Constants
@@ -189,9 +190,10 @@ private:
     uint32_t num_clauses;
     bool sort_clauses;
     std::vector<Lit> initial_units;     // Initial unit clauses from DIMACS
+    std::vector<Clause> parsed_clauses;  // Temporary storage during parsing
     
     // SAT solver state
-    std::vector<Clause> clauses;
+    AsyncClauses clauses;               // Replaces std::vector<Clause> clauses
     std::vector<bool> var_assigned;     // Whether each variable is assigned
     std::vector<bool> var_value;        // Value of each variable
     
@@ -235,6 +237,9 @@ private:
     std::vector<double> cla_activity; 
     double clause_decay;
     double cla_inc;
+
+    // Memory addresses
+    uint64_t clauses_base_addr; // Base address for clauses
 
     // DB reduction parameters
     double learntsize_factor;
