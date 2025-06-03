@@ -159,7 +159,7 @@ public:
     uint64_t getStatCount(Statistic<uint64_t>* stat);
     inline int nAssigns() const { return trail.size(); }
     inline int nLearnts() const { return clauses.size() - num_clauses; }
-    inline bool isLearnt(int clause_idx) const { return clause_idx >= nLearnts(); }
+    inline bool isLearnt(int clause_idx) const { return clause_idx >= num_clauses; }
     std::string printClause(const Clause& c);
     void loadDecisionSequence(const std::string& filename);  // user-defined decision sequence
     void dumpDecision(Lit lit);
@@ -232,6 +232,7 @@ private:
     uint64_t variables_base_addr;
     
     // Clause activity
+    std::vector<double> cla_activity; 
     double clause_decay;
     double cla_inc;
 

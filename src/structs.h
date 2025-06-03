@@ -28,11 +28,9 @@ struct Variable {
 
 struct Clause {
     std::vector<Lit> literals;
-    double activity;  // Activity score for this clause
 
-    Clause() : activity(0) {}
-    Clause(const std::vector<Lit>& lits) 
-        : literals(lits), activity(0) {}
+    Clause() {}
+    Clause(const std::vector<Lit>& lits) : literals(lits) {}
     int size() const { return literals.size(); }
 };
 

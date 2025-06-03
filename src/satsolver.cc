@@ -498,6 +498,7 @@ void SATSolver::execBacktrack() {
         Clause new_clause(learnt_clause);
         int clause_idx = clauses.size();
         clauses.push_back(new_clause);
+        cla_activity.push_back(0.0);
         attachClause(clause_idx);  
         trailEnqueue(learnt_clause[0], clause_idx);
         claBumpActivity(clause_idx);
@@ -965,17 +966,16 @@ void SATSolver::reduceDB() {
     output.verbose(CALL_INFO, 3, 0, "REDUCEDB: Starting clause database reduction\n");
     
     // 1. Collect learnt clauses indices
-    std::vector<int> learnts;
-    learnts.reserve(clauses.size() - num_clauses);
+    std::vector<int> learnts(nLearnts());
     for (int i = num_clauses; i < clauses.size(); i++) {
-        learnts.push_back(i);
+        learnts[i - num_clauses] = i;  // Store indices of learnt clauses
     }
     
     // 2. Sort learnt clauses by activity
     std::sort(learnts.begin(), learnts.end(), [&](int i, int j) {
         return clauses[i].size() > 2 && 
               (clauses[j].size() == 2 ||
-              clauses[i].activity < clauses[j].activity);
+              cla_activity[i - num_clauses] < cla_activity[j - num_clauses]);
     });
     
     // 3. Extra activity limit for removal
@@ -995,10 +995,10 @@ void SATSolver::reduceDB() {
         
         // Only remove non-binary, unlocked clauses
         if (c.size() > 2 && !locked(idx) && 
-            (i < learnts.size() / 2 || c.activity < extra_lim)) {
+            (i < learnts.size() / 2 || cla_activity[idx - num_clauses] < extra_lim)) {
             output.verbose(CALL_INFO, 4, 0, 
                 "REDUCEDB: Marking clause %d for removal (size=%d, activity=%.2e)\n", 
-                idx, c.size(), c.activity);
+                idx, c.size(), cla_activity[i - num_clauses]);
                 
             // Mark for removal and detach from watch lists
             sst_assert(idx >= num_clauses, CALL_INFO, -1, 
@@ -1067,17 +1067,19 @@ void SATSolver::reduceDB() {
         }
     }
     
-    // 8. Finally, compact the clauses vector
-    std::vector<Clause> new_clauses;
-    new_clauses.reserve(clauses.size() - removed);
-    
-    for (size_t i = 0; i < clauses.size(); i++) {
-        if (!to_remove[i]) {
-            new_clauses.push_back(clauses[i]);
+    // 8. Compact clauses by moving non-removed learnt clauses forward
+    size_t write_pos = num_clauses; // Start writing after original clauses
+    for (size_t read_pos = num_clauses; read_pos < clauses.size(); read_pos++) {
+        if (!to_remove[read_pos]) {
+            if (write_pos != read_pos) {
+                clauses[write_pos] = std::move(clauses[read_pos]);
+                cla_activity[write_pos - num_clauses] = std::move(cla_activity[read_pos - num_clauses]);
+            }
+            write_pos++;
         }
     }
-    
-    clauses.swap(new_clauses);
+    cla_activity.resize(write_pos - num_clauses);
+    clauses.resize(write_pos);
     
     output.verbose(CALL_INFO, 3, 0, 
         "REDUCEDB: Removed %d learnt clauses, new clause count: %zu\n", 
@@ -1212,19 +1214,17 @@ void SATSolver::claDecayActivity() {
 
 // Bump activity for a specific clause
 void SATSolver::claBumpActivity(int clause_idx) {
-    Clause& c = clauses[clause_idx];
-    
-    if ((c.activity += cla_inc) > 1e20) {
+    if ((cla_activity[clause_idx - num_clauses] += cla_inc) > 1e20) {
         // Rescale all clause activities if they get too large
         output.verbose(CALL_INFO, 3, 0, "ACTIVITY: Rescaling all clause activities\n");
-        for (size_t i = nLearnts(); i < clauses.size(); i++) {
-            clauses[i].activity *= 1e-20;
+        for (size_t i = 0; i < nLearnts(); i++) {
+            cla_activity[i] *= 1e-20;
         }
         cla_inc *= 1e-20;
     }
     
     output.verbose(CALL_INFO, 4, 0, "ACTIVITY: Bumped clause %d to %f\n", 
-        clause_idx, c.activity);
+        clause_idx, cla_activity[clause_idx - num_clauses]);
 }
 
 // Check if a clause is "locked" -- cannot be removed
