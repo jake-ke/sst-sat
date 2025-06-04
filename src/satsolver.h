@@ -189,11 +189,11 @@ private:
     uint32_t num_vars;
     uint32_t num_clauses;
     bool sort_clauses;
-    std::vector<Lit> initial_units;     // Initial unit clauses from DIMACS
-    std::vector<Clause> parsed_clauses;  // Temporary storage during parsing
+    std::vector<Lit> initial_units;             // Initial unit clauses from DIMACS
+    std::vector<Clause> parsed_clauses;         // Temporary storage during parsing
     
     // SAT solver state
-    AsyncClauses clauses;               // Replaces std::vector<Clause> clauses
+    Clauses clauses;                    // Replaces std::vector<Clause> clauses
     std::vector<bool> var_assigned;     // Whether each variable is assigned
     std::vector<bool> var_value;        // Value of each variable
     
@@ -239,7 +239,8 @@ private:
     double cla_inc;
 
     // Memory addresses
-    uint64_t clauses_base_addr; // Base address for clauses
+    uint64_t clauses_base_addr;         // Base address for clauses
+    uint64_t clauses_cmd_base_addr;  // Base address for clause offsets
 
     // DB reduction parameters
     double learntsize_factor;

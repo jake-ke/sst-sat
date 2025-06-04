@@ -35,6 +35,15 @@ struct Clause {
     Lit operator[] (size_t i) const { return literals[i]; }
 };
 
+// New struct for efficient clause metadata storage
+struct ClauseMetaData {
+    size_t offset;  // Offset to start of clause data
+    size_t size;    // Number of literals in the clause
+    
+    ClauseMetaData() : offset(0), size(0) {}
+    ClauseMetaData(size_t o, size_t s) : offset(o), size(s) {}
+};
+
 // Comparator for the variable activity heap
 struct VarOrderLt {
     const std::vector<double>& activity;

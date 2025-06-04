@@ -42,42 +42,26 @@ public:
         output.init("WATCH-> ", verbose, 0, SST::Output::STDOUT);
     }
 
-    // Get watch list by index
     WatchListProxy operator[](int idx) { return WatchListProxy(this, idx); }
-        
-    // Memory address calculations
-    uint64_t watchesAddr(int idx) const { return watches_base_addr + idx * sizeof(uint64_t); }
-    
-    uint64_t allocateNode();
-    
-    // Read head pointer for a literal
-    void readHeadPointer(int lit_idx);
-    
-    // Write head pointers (for initialization)
-    void writeHeadPointers(int start_idx, const std::vector<uint64_t>& ptrs);
-    
-    // Read a watcher node from memory
-    void readNode(uint64_t addr);
-    
-    // Write a watcher node to memory
-    void writeNode(uint64_t addr, const WatcherNode& node);
-
-    void initWatches(size_t watch_count, std::vector<Clause>& clauses);
-    
-    // Insert a new watcher for a literal
-    void insertWatcher(int lit_idx, int clause_idx, Lit blocker);
-    
-    // Remove a watcher with given clause index
-    void removeWatcher(int lit_idx, int clause_idx);
-
-    // Handle memory response
-    void handleMem(SST::Interfaces::StandardMem::Request* req);
-    
     size_t size() const { return num_watches; }
     void freeNode(uint64_t addr) { free_nodes.push(addr); }
     uint64_t getLastHeadPointer() const { return last_head_ptr; }
     WatcherNode getLastReadNode() const { return last_node; }
     bool isBusy() const { return busy; }
+        
+    // Memory address calculations
+    uint64_t watchesAddr(int idx) const { return watches_base_addr + idx * sizeof(uint64_t); }
+    uint64_t allocateNode();
+    
+    void readHeadPointer(int lit_idx);
+    void writeHeadPointers(int start_idx, const std::vector<uint64_t>& ptrs);
+    void readNode(uint64_t addr);
+    void writeNode(uint64_t addr, const WatcherNode& node);
+
+    void initWatches(size_t watch_count, std::vector<Clause>& clauses);
+    void insertWatcher(int lit_idx, int clause_idx, Lit blocker);
+    void removeWatcher(int lit_idx, int clause_idx);
+    void handleMem(SST::Interfaces::StandardMem::Request* req);
 
 private:
     SST::Output output;

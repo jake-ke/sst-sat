@@ -74,7 +74,8 @@ indices_base_addr = 0x10000000
 variables_base_addr = 0x20000000
 watches_base_addr = 0x30000000
 watch_nodes_base_addr = 0x40000000
-clauses_base_addr = 0x50000000
+clauses_cmd_base_addr = 0x50000000
+clauses_base_addr = 0x60000000
 
 # Get file size and pass it to solver
 file_size = os.path.getsize(args.cnf_path)
@@ -88,6 +89,7 @@ params = {
     "variables_base_addr" : hex(variables_base_addr),
     "watches_base_addr" : hex(watches_base_addr),
     "watch_nodes_base_addr" : hex(watch_nodes_base_addr),
+    "clauses_cmd_base_addr" : hex(clauses_cmd_base_addr),
     "clauses_base_addr" : hex(clauses_base_addr),
     "random_var_freq": str(args.random_var_freq),
     "var_decay": str(args.var_decay),

@@ -31,7 +31,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     yield_ptr(nullptr),
     variables(0, nullptr, 0, nullptr),
     watches(0, nullptr, 0, 0, nullptr),
-    clauses(0, nullptr, 0, nullptr) {
+    clauses(0, nullptr, 0, 0, nullptr) {
     
     // Initialize output
     int verbose = params.find<int>("verbose", 0);
@@ -60,7 +60,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     variables_base_addr = std::stoull(params.find<std::string>("variables_base_addr", "0x20000000"), nullptr, 0);
     watches_base_addr = std::stoull(params.find<std::string>("watches_base_addr", "0x30000000"), nullptr, 0);
     watch_nodes_base_addr = std::stoull(params.find<std::string>("watch_nodes_base_addr", "0x40000000"), nullptr, 0);
-    clauses_base_addr = std::stoull(params.find<std::string>("clauses_base_addr", "0x50000000"), nullptr, 0);
+    clauses_cmd_base_addr = std::stoull(params.find<std::string>("clauses_cmd_base_addr", "0x50000000"), nullptr, 0);
+    clauses_base_addr = std::stoull(params.find<std::string>("clauses_base_addr", "0x60000000"), nullptr, 0);
     
     // Load decision sequence if provided
     std::string decision_file = params.find<std::string>("decision_file", "");
@@ -108,7 +109,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     watches = Watches(verbose, global_memory, watches_base_addr, watch_nodes_base_addr, &yield_ptr);
     
     // Create Clauses object
-    clauses = AsyncClauses(verbose, global_memory, clauses_base_addr, &yield_ptr);
+    clauses = Clauses(verbose, global_memory, clauses_cmd_base_addr, clauses_base_addr, &yield_ptr);
 
     // Configure the link to the heap subcomponent
     heap_link = configureLink("heap_port", 
@@ -323,7 +324,7 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
     }
     
     // Route the request to the appropriate handler based on address range
-    if (addr >= clauses_base_addr) {  // Clauses request
+    if (addr >= clauses_cmd_base_addr) {  // Clauses request
         clauses.handleMem(req);
         state = STEP;
     } else if (addr >= watches_base_addr) {  // Watches request
@@ -450,7 +451,7 @@ void SATSolver::initialize() {
     watches.initWatches(2 * (num_vars + 1), parsed_clauses);
     
     // Initialize clauses
-    clauses.initialize(parsed_clauses, num_clauses);
+    clauses.initialize(parsed_clauses);
 
     // Enqueue unit clauses from the input DIMACS
     for (int i = 0; i < initial_units.size(); i++) {
@@ -673,14 +674,14 @@ int SATSolver::unitPropagate() {
             output.verbose(CALL_INFO, 4, 0, "    Clause: %s\n", printClause(c).c_str());
             
             // Make sure the false literal (~p) is at position 1
-            if (c.literals[0] == not_p) {
+            if (c[0] == not_p) {
                 clauses.swapLiterals(clause_idx, 0, 1);
                 output.verbose(CALL_INFO, 4, 0, "    Swapped literals 0 and 1\n");
             }
-            assert(c.literals[1] == not_p);
+            assert(c[1] == not_p);
             
             // If first literal is already true, just update the blocker and continue
-            Lit first = c.literals[0];
+            Lit first = c[0];
             if (var_assigned[var(first)] && value(first) == true) {
                 output.verbose(CALL_INFO, 4, 0,
                     "    First literal %d is true\n", toInt(first));
@@ -696,16 +697,16 @@ int SATSolver::unitPropagate() {
             // Look for a new literal to watch
             // can be a true literal for faster termination
             for (size_t k = 2; k < c.size(); k++) {
-                Lit lit = c.literals[k];
+                Lit lit = c[k];
                 if (!var_assigned[var(lit)] || value(lit) == true) {
                     // Swap to position 1 and update watcher
                     clauses.swapLiterals(clause_idx, 1, k);
                     output.verbose(CALL_INFO, 4, 0, 
                         "    Found new watch: literal %d at position %zu\n", 
-                        toInt(c.literals[1]), k);
+                        toInt(c[1]), k);
                     
                     output.verbose(CALL_INFO, 4, 0, "    Start watchlist insertion\n");
-                    watches.insertWatcher(toWatchIndex(~c.literals[1]), clause_idx, first);
+                    watches.insertWatcher(toWatchIndex(~c[1]), clause_idx, first);
                     
                     output.verbose(CALL_INFO, 4, 0, "    Start watchlist deletion for Lit %d\n", 
                         toInt(p));
@@ -804,7 +805,7 @@ void SATSolver::analyze() {
 
         // For each literal in the clause
         for (size_t i = (p == lit_Undef) ? 0 : 1; i < c.size(); i++) {
-            Lit q = c.literals[i];
+            Lit q = c[i];
             Var v = var(q);
             output.verbose(CALL_INFO, 5, 0,
                 "ANALYZE: Processing literal %d\n", toInt(q));
@@ -882,7 +883,7 @@ void SATSolver::analyze() {
                 else {
                     const Clause& c = clauses[var_data.reason];
                     for (size_t k = 1; k < c.size(); k++) {
-                        Var l = var(c.literals[k]);
+                        Var l = var(c[k]);
                         if (!seen[l] && var_data.level > 0) {
                             learnt_clause[j++] = learnt_clause[i];
                             break; }
@@ -998,14 +999,14 @@ void SATSolver::reduceDB() {
     
     for (size_t i = 0; i < learnts.size(); i++) {
         int idx = learnts[i];
-        const Clause& c = clauses[idx];
+        size_t cls_size = clauses[idx].size();
         
         // Only remove non-binary, unlocked clauses
-        if (c.size() > 2 && !locked(idx) && 
+        if (cls_size > 2 && !locked(idx) && 
             (i < learnts.size() / 2 || cla_activity[idx - num_clauses] < extra_lim)) {
             output.verbose(CALL_INFO, 4, 0, 
-                "REDUCEDB: Marking clause %d for removal (size=%d, activity=%.2e)\n", 
-                idx, c.size(), cla_activity[i - num_clauses]);
+                "REDUCEDB: Marking clause %d for removal (size=%ld, activity=%.2e)\n", 
+                idx, cls_size, cla_activity[i - num_clauses]);
                 
             // Mark for removal and detach from watch lists
             sst_assert(idx >= num_clauses, CALL_INFO, -1, 
@@ -1236,12 +1237,12 @@ void SATSolver::claBumpActivity(int clause_idx) {
 // Check if a clause is "locked" -- cannot be removed
 bool SATSolver::locked(int clause_idx) {
     const Clause& c = clauses[clause_idx];
-    Var v = var(c.literals[0]);
+    Var v = var(c[0]);
     if (c.size() == 0) return false;
     int reason = variables(v).reason();
     
     return var_assigned[v] && 
-           value(c.literals[0]) == true &&      // First literal is true
+           value(c[0]) == true &&      // First literal is true
            reason == clause_idx;                // This clause is the reason
 }
 
@@ -1264,7 +1265,7 @@ bool SATSolver::litRedundant(Lit p) {
     for (size_t i = 1; ; i++) {
         if (i < c.size()) {
             // Examining the literals in the reason clause
-            Lit l = c.literals[i];
+            Lit l = c[i];
             Var v = var(l);
             Variable v_data = variables(v);
             
