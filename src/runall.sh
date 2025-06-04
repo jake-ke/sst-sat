@@ -181,7 +181,7 @@ run_single_test() {
 
 # Function to clean up all child processes
 cleanup() {
-    log_message "Received interrupt signal. Cleaning up..."
+    log_message "Cleaning up..."
     
     # First try to kill processes we're tracking
     for pid in ${ALL_PIDS[@]}; do

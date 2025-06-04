@@ -13,6 +13,7 @@
 #include "async_variables.h"
 #include "async_watches.h"
 #include "async_clauses.h"
+#include "async_activity.h"
 
 //-----------------------------------------------------------------------------------
 // Type Definitions and Constants
@@ -64,6 +65,8 @@ public:
         {"heap_base_addr", "Base address for heap memory", "0x00000000"},
         {"indices_base_addr", "Base address for indices memory", "0x10000000"},
         {"variables_base_addr", "Base address for variables memory", "0x20000000"},
+        {"var_act_base_addr", "Base address for variable activity memory", "0x70000000"},
+        {"clause_act_base_addr", "Base address for clause activity memory", "0x80000000"},
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -216,8 +219,7 @@ private:
     uint64_t watches_base_addr;      // Base address for watches array
     uint64_t watch_nodes_base_addr;  // Base address for watch nodes
     
-    // Variable activity for VSIDS
-    std::vector<double> activity;       // Activity score for each variable
+    // Variable related
     std::vector<bool> polarity;         // Saved phase (polarity) for each variable
     std::vector<bool> decision;         // Whether variable is eligible for decisions
     Heap* order_heap;                   // Heap of variables ordered by activity
@@ -228,13 +230,15 @@ private:
     SST::Link* heap_link;               // Link to async heap
     uint64_t heap_base_addr;            // Base address for heap memory
     uint64_t indices_base_addr;         // Base address for indices memory
+    uint64_t var_act_base_addr;         // Base address for variable activity array
 
-    // Variables instance for asynchronous memory access to variable data
-    Variables variables;
-    uint64_t variables_base_addr;
+    // external memory controller for struct Variable
+    Variables variables;                // Replaces std::vector<Variable> variables
+    uint64_t variables_base_addr;       // Base address for variables memory
     
     // Clause activity
-    std::vector<double> cla_activity; 
+    Activity cla_activity;              // Replace std::vector<double> cla_activity
+    uint64_t clause_act_base_addr;      // Base address for clause activity
     double clause_decay;
     double cla_inc;
 

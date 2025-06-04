@@ -31,7 +31,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     yield_ptr(nullptr),
     variables(0, nullptr, 0, nullptr),
     watches(0, nullptr, 0, 0, nullptr),
-    clauses(0, nullptr, 0, 0, nullptr) {
+    clauses(0, nullptr, 0, 0, nullptr),
+    cla_activity(0, nullptr, 0, nullptr) {
     
     // Initialize output
     int verbose = params.find<int>("verbose", 0);
@@ -62,6 +63,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     watch_nodes_base_addr = std::stoull(params.find<std::string>("watch_nodes_base_addr", "0x40000000"), nullptr, 0);
     clauses_cmd_base_addr = std::stoull(params.find<std::string>("clauses_cmd_base_addr", "0x50000000"), nullptr, 0);
     clauses_base_addr = std::stoull(params.find<std::string>("clauses_base_addr", "0x60000000"), nullptr, 0);
+    var_act_base_addr = std::stoull(params.find<std::string>("var_act_base_addr", "0x70000000"), nullptr, 0);
+    clause_act_base_addr = std::stoull(params.find<std::string>("clause_act_base_addr", "0x80000000"), nullptr, 0);
     
     // Load decision sequence if provided
     std::string decision_file = params.find<std::string>("decision_file", "");
@@ -95,13 +98,6 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
         output.fatal(CALL_INFO, -1, "Unable to load StandardMem SubComponent for global memory\n");
     }
 
-    // Load the heap subcomponent
-    order_heap = loadUserSubComponent<Heap>("order_heap",
-        SST::ComponentInfo::SHARE_PORTS | SST::ComponentInfo::SHARE_STATS,
-        VarOrderLt(activity), global_memory, heap_base_addr, indices_base_addr
-    );
-    sst_assert(order_heap != nullptr, CALL_INFO, -1, "Unable to load Heap subcomponent\n");
-
     // Create Variables object by passing point of yield_ptr
     variables = Variables(verbose, global_memory, variables_base_addr, &yield_ptr);
     
@@ -110,6 +106,16 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     
     // Create Clauses object
     clauses = Clauses(verbose, global_memory, clauses_cmd_base_addr, clauses_base_addr, &yield_ptr);
+    
+    // Create Activity objects
+    cla_activity = Activity(verbose, global_memory, clause_act_base_addr, &yield_ptr);
+    
+    // Load the heap subcomponent
+    order_heap = loadUserSubComponent<Heap>("order_heap",
+        SST::ComponentInfo::SHARE_PORTS | SST::ComponentInfo::SHARE_STATS,
+        global_memory, heap_base_addr, indices_base_addr
+    );
+    sst_assert(order_heap != nullptr, CALL_INFO, -1, "Unable to load Heap subcomponent\n");
 
     // Configure the link to the heap subcomponent
     heap_link = configureLink("heap_port", 
@@ -206,14 +212,7 @@ void SATSolver::parseDIMACS(const std::string& content) {
     output.output("Starting DIMACS parsing\n");
     std::istringstream iss(content);
     std::string line;
-    
-    num_vars = 0;
-    num_clauses = 0;
-    parsed_clauses.clear();
-    activity.clear();
-    polarity.clear();
-    decision.clear();
-    
+
     while (std::getline(iss, line)) {
         // Skip empty lines
         if (line.empty()) continue;
@@ -324,7 +323,12 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
     }
     
     // Route the request to the appropriate handler based on address range
-    if (addr >= clauses_cmd_base_addr) {  // Clauses request
+    if (addr >= clause_act_base_addr) {
+        cla_activity.handleMem(req);
+        state = STEP;
+    } else if (addr >= var_act_base_addr) {
+        order_heap->handleMem(req);
+    } else if (addr >= clauses_cmd_base_addr) {  // Clauses request
         clauses.handleMem(req);
         state = STEP;
     } else if (addr >= watches_base_addr) {  // Watches request
@@ -438,12 +442,11 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
 void SATSolver::initialize() {
     qhead = 0;
     seen.resize(num_vars + 1, 0);
-    activity.resize(num_vars + 1, 0.0);
     polarity.resize(num_vars + 1, false); // Default phase is false
     decision.resize(num_vars + 1, true);  // All variables are decision variables
     var_assigned.resize(num_vars + 1, false);
     var_value.resize(num_vars + 1);
-
+    
     // Initialize variables
     variables.write(0, std::vector<Variable>(num_vars + 1, Variable()));
 
@@ -452,13 +455,13 @@ void SATSolver::initialize() {
     
     // Initialize clauses
     clauses.initialize(parsed_clauses);
-
+    
     // Enqueue unit clauses from the input DIMACS
     for (int i = 0; i < initial_units.size(); i++) {
         trailEnqueue(initial_units[i]); 
     }
     
-    // Use the bulk heap initialization with decision vector
+    // intialize order_heap and var_activity
     order_heap->decision = decision;
     order_heap->heap_size = num_vars;
     order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INIT));
@@ -506,7 +509,7 @@ void SATSolver::execBacktrack() {
         Clause new_clause(learnt_clause);
         int clause_idx = clauses.size();
         clauses.addClause(new_clause);
-        cla_activity.push_back(0.0);
+        cla_activity.push(0.0);
         attachClause(clause_idx);  
         trailEnqueue(learnt_clause[0], clause_idx);
         claBumpActivity(clause_idx);
@@ -814,7 +817,9 @@ void SATSolver::analyze() {
             Variable v_data = variables(v);
 
             if (!seen[v] && v_data.level > 0) {
-                varBumpActivity(v);
+                order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::BUMP, v, var_inc));
+                (*yield_ptr)();
+                if (heap_resp) var_inc *= 1e-100;  // heap_resp is true if rescaled
                 
                 seen[v] = 1;
                 output.verbose(CALL_INFO, 5, 0,
@@ -973,17 +978,19 @@ void SATSolver::backtrack(int backtrack_level) {
 void SATSolver::reduceDB() {
     output.verbose(CALL_INFO, 3, 0, "REDUCEDB: Starting clause database reduction\n");
     
-    // 1. Collect learnt clauses indices
-    std::vector<int> learnts(nLearnts());
-    for (int i = num_clauses; i < clauses.size(); i++) {
-        learnts[i - num_clauses] = i;  // Store indices of learnt clauses
+    size_t nl = nLearnts();
+    std::vector<double> activities = cla_activity.readBulk(0, nl);
+    
+    // Create pairs of (idx, activity) for sorting
+    std::vector<std::pair<int, double>> learnts(nl);
+    for (size_t i = 0; i < nl; i++) {
+        learnts[i] = std::make_pair(i + num_clauses, activities[i]);
     }
     
     // 2. Sort learnt clauses by activity
-    std::sort(learnts.begin(), learnts.end(), [&](int i, int j) {
-        return clauses[i].size() > 2 && 
-              (clauses[j].size() == 2 ||
-              cla_activity[i - num_clauses] < cla_activity[j - num_clauses]);
+    std::sort(learnts.begin(), learnts.end(), [&](const auto& a, const auto& b) {
+        int i = a.first, j = b.first;
+        return clauses[i].size() > 2 && (clauses[j].size() == 2 || a.second < b.second);
     });
     
     // 3. Extra activity limit for removal
@@ -998,15 +1005,14 @@ void SATSolver::reduceDB() {
     int removed = 0;
     
     for (size_t i = 0; i < learnts.size(); i++) {
-        int idx = learnts[i];
+        int idx = learnts[i].first;
         size_t cls_size = clauses[idx].size();
         
         // Only remove non-binary, unlocked clauses
         if (cls_size > 2 && !locked(idx) && 
             (i < learnts.size() / 2 || cla_activity[idx - num_clauses] < extra_lim)) {
             output.verbose(CALL_INFO, 4, 0, 
-                "REDUCEDB: Marking clause %d for removal (size=%ld, activity=%.2e)\n", 
-                idx, cls_size, cla_activity[i - num_clauses]);
+                "REDUCEDB: Marking clause %d for removal\n", idx);
                 
             // Mark for removal and detach from watch lists
             sst_assert(idx >= num_clauses, CALL_INFO, -1, 
@@ -1076,17 +1082,8 @@ void SATSolver::reduceDB() {
     }
     
     // 8. Compact clauses by moving non-removed learnt clauses forward
-    size_t write_pos = num_clauses; // Start writing after original clauses
-    for (size_t read_pos = num_clauses; read_pos < clauses.size(); read_pos++) {
-        if (!to_remove[read_pos]) {
-            if (write_pos != read_pos) {
-                cla_activity[write_pos - num_clauses] = cla_activity[read_pos - num_clauses];
-            }
-            write_pos++;
-        }
-    }
-    cla_activity.resize(write_pos - num_clauses);
     clauses.reduceDB(to_remove);
+    cla_activity.reduceDB(to_remove, num_clauses);
     
     output.verbose(CALL_INFO, 3, 0, 
         "REDUCEDB: Removed %d learnt clauses, new clause count: %zu\n", 
@@ -1170,8 +1167,7 @@ Lit SATSolver::chooseBranchVariable() {
         next = heap_resp;
     }
 
-    output.verbose(CALL_INFO, 5, 0, "DECISION: Selected var %d (activity=%f)\n",
-        next, activity[next]);
+    output.verbose(CALL_INFO, 5, 0, "DECISION: Selected var %d \n", next);
     if (next == var_Undef) return lit_Undef;
     return mkLit(next, polarity[next]);
 }
@@ -1190,22 +1186,7 @@ void SATSolver::insertVarOrder(Var v) {
 void SATSolver::varDecayActivity() {
     var_inc *= 1.0 / var_decay;
     output.verbose(CALL_INFO, 4, 0,
-        "ACTIVITY: Decayed activity increment to %f\n", var_inc);
-}
-
-void SATSolver::varBumpActivity(Var v) {
-    if ((activity[v] += var_inc) > 1e100) {
-        output.verbose(CALL_INFO, 3, 0, "ACTIVITY: Rescaling all activities\n");
-        for (size_t i = 0; i < activity.size(); i++) {
-            activity[i] *= 1e-100;
-        }
-        var_inc *= 1e-100;
-    }
-    
-    order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::DECREASE, v));
-    (*yield_ptr)();
-    
-    output.verbose(CALL_INFO, 4, 0, "ACTIVITY: Bumped var %d to %f\n", v, activity[v]);
+        "ACTIVITY: Decayed var activity increment to %f\n", var_inc);
 }
 
 //-----------------------------------------------------------------------------------
@@ -1221,17 +1202,18 @@ void SATSolver::claDecayActivity() {
 
 // Bump activity for a specific clause
 void SATSolver::claBumpActivity(int clause_idx) {
-    if ((cla_activity[clause_idx - num_clauses] += cla_inc) > 1e20) {
+    double act = cla_activity[clause_idx - num_clauses];
+
+    cla_activity[clause_idx - num_clauses] = act + cla_inc;
+
+    if ((act + cla_inc) > 1e20) {
         // Rescale all clause activities if they get too large
         output.verbose(CALL_INFO, 3, 0, "ACTIVITY: Rescaling all clause activities\n");
-        for (size_t i = 0; i < nLearnts(); i++) {
-            cla_activity[i] *= 1e-20;
-        }
+        cla_activity.rescaleAll(1e-20);
         cla_inc *= 1e-20;
     }
     
-    output.verbose(CALL_INFO, 4, 0, "ACTIVITY: Bumped clause %d to %f\n", 
-        clause_idx, cla_activity[clause_idx - num_clauses]);
+    output.verbose(CALL_INFO, 4, 0, "ACTIVITY: Bumped clause %d\n", clause_idx);
 }
 
 // Check if a clause is "locked" -- cannot be removed

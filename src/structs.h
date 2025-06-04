@@ -1,6 +1,10 @@
 #ifndef structs_h
 #define structs_h
 
+#include <boost/coroutine2/all.hpp>
+#include <vector>
+#include <cstddef>
+
 using coro_t = boost::coroutines2::coroutine<void>;
 
 // Define types for variables and literals
@@ -44,16 +48,6 @@ struct ClauseMetaData {
     ClauseMetaData(size_t o, size_t s) : offset(o), size(s) {}
 };
 
-// Comparator for the variable activity heap
-struct VarOrderLt {
-    const std::vector<double>& activity;
-    
-    VarOrderLt(const std::vector<double>& act) : activity(act) {}
-    
-    bool operator()(int x, int y) const {
-        return activity[x] > activity[y];  // Higher activity first
-    }
-};
 
 // Helper functions for literals
 inline Lit mkLit(Var var, bool sign = false) { Lit p; p.x = var + var + (int)sign; return p; }

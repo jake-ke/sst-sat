@@ -1,9 +1,12 @@
 #include "async_heap.h"
 
-Heap::Heap(SST::ComponentId_t id, SST::Params& params, const VarOrderLt& c, 
+Heap::Heap(SST::ComponentId_t id, SST::Params& params,
            SST::Interfaces::StandardMem* mem, uint64_t heap_base_addr, uint64_t indices_base_addr) 
-    : SST::SubComponent(id), lt(c), memory(mem), state(IDLE), heap_size(0),
-      outstanding_mem_requests(0), heap_addr(heap_base_addr), indices_addr(indices_base_addr) {
+    : SST::SubComponent(id), memory(mem), state(IDLE), heap_size(0),
+      outstanding_mem_requests(0), heap_addr(heap_base_addr), indices_addr(indices_base_addr),
+      heap_sink_ptr(nullptr),
+      var_activity(params.find<int>("verbose", 0), mem, 
+                   params.find<uint64_t>("var_act_base_addr", 0x70000000), this) {
     
     output.init("HEAP-> ", params.find<int>("verbose", 0), 0, SST::Output::STDOUT);
 
@@ -12,6 +15,15 @@ Heap::Heap(SST::ComponentId_t id, SST::Params& params, const VarOrderLt& c,
     
     response_port = configureLink("response");
     sst_assert( response_port != nullptr, CALL_INFO, -1, "Error: 'response_port' is not connected to a link\n");
+
+    var_act_base_addr = params.find<uint64_t>("var_act_base_addr", 0x70000000);
+    
+    // Set up VarActivity to use our heap_sink_ptr
+    var_activity.setHeapSinkPtr(&heap_sink_ptr);
+}
+
+bool Heap::lt(Var x, Var y) {
+    return var_activity[x] > var_activity[y];
 }
 
 bool Heap::tick(SST::Cycle_t cycle) {
@@ -23,27 +35,45 @@ bool Heap::tick(SST::Cycle_t cycle) {
             switch(current_op) {
                 case HeapReqEvent::INIT:
                     heap_source = new coro_t::pull_type(
-                        [this](coro_t::push_type &heap_sink) { initHeap(heap_sink); });
+                        [this](coro_t::push_type &heap_sink) { 
+                            heap_sink_ptr = &heap_sink; 
+                            initHeap(); 
+                        });
                     break;
                 case HeapReqEvent::INSERT:
                     heap_source = new coro_t::pull_type(
-                        [this](coro_t::push_type &heap_sink) { insert(heap_sink); });
+                        [this](coro_t::push_type &heap_sink) { 
+                            heap_sink_ptr = &heap_sink; 
+                            insert(); 
+                        });
                     break;
                 case HeapReqEvent::REMOVE_MIN:
                     heap_source = new coro_t::pull_type(
-                        [this](coro_t::push_type &heap_sink) { removeMin(heap_sink); });
-                    break;
-                case HeapReqEvent::DECREASE:
-                    heap_source = new coro_t::pull_type(
-                        [this](coro_t::push_type &heap_sink) { decrease(heap_sink); });
+                        [this](coro_t::push_type &heap_sink) { 
+                            heap_sink_ptr = &heap_sink; 
+                            removeMin(); 
+                        });
                     break;
                 case HeapReqEvent::IN_HEAP:
                     heap_source = new coro_t::pull_type(
-                        [this](coro_t::push_type &heap_sink) { inHeap(heap_sink); });
+                        [this](coro_t::push_type &heap_sink) { 
+                            heap_sink_ptr = &heap_sink; 
+                            inHeap(); 
+                        });
                     break;
                 case HeapReqEvent::READ:
                     heap_source = new coro_t::pull_type(
-                        [this](coro_t::push_type &heap_sink) { readHeap(heap_sink); });
+                        [this](coro_t::push_type &heap_sink) { 
+                            heap_sink_ptr = &heap_sink; 
+                            readHeap(); 
+                        });
+                    break;
+                case HeapReqEvent::BUMP:
+                    heap_source = new coro_t::pull_type(
+                        [this](coro_t::push_type &heap_sink) { 
+                            heap_sink_ptr = &heap_sink; 
+                            varBump(); 
+                        });
                     break;
                 default:
                     output.fatal(CALL_INFO, -1, "Unknown operation: %d\n", current_op);
@@ -56,7 +86,8 @@ bool Heap::tick(SST::Cycle_t cycle) {
             else {
                 delete heap_source;
                 heap_source = nullptr;
-                state = IDLE;  // Operation completed
+                heap_sink_ptr = nullptr;  // Clear the sink pointer
+                state = IDLE;             // Operation completed
             }
             break;
         default:
@@ -66,11 +97,23 @@ bool Heap::tick(SST::Cycle_t cycle) {
 }
 
 void Heap::handleMem(SST::Interfaces::StandardMem::Request* req) {
-    if (auto resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req))
-        memcpy(&read_data, resp->data.data(), sizeof(Var));
+    uint64_t addr = 0;
+    if (auto* read_req = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req))
+        addr = read_req->pAddr;
+    else if (auto* write_req = dynamic_cast<SST::Interfaces::StandardMem::WriteResp*>(req))
+        addr = write_req->pAddr;
+    
+    // Check if this response is for VarActivity
+    if (addr >= var_act_base_addr) {
+        var_activity.handleMem(req);
+    } else {
+        // This is a heap or indices memory response
+        if (auto resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req))
+            memcpy(&read_data, resp->data.data(), sizeof(Var));
+    }
+    
     outstanding_mem_requests--;
-    state = STEP;  // Continue heap_source
-    // Note: req is deleted by the caller (SATSolver::handleHeapMemEvent)
+    state = STEP;
 }
 
 void Heap::handleRequest(HeapReqEvent* req) {
@@ -81,14 +124,18 @@ void Heap::handleRequest(HeapReqEvent* req) {
     current_op = req->op;
     // request arg can be key or idx depending on operation
     key = req->arg;
+    var_inc = req->var_inc;
     idx = key;
     state = START;
 }
 
-void Heap::read(uint64_t addr) { 
+Var Heap::read(uint64_t addr) { 
     memory->send(new SST::Interfaces::StandardMem::Read(addr, sizeof(Var)));
     outstanding_mem_requests++;
     state = WAIT;  // Wait for response
+    (*heap_sink_ptr)();
+
+    return read_data;
 }
 
 void Heap::write(uint64_t addr, Var val) { 
@@ -97,6 +144,7 @@ void Heap::write(uint64_t addr, Var val) {
     memory->send(new SST::Interfaces::StandardMem::Write(addr, sizeof(Var), data));
     outstanding_mem_requests++;
     state = WAIT;  // Wait for response 
+    (*heap_sink_ptr)();
 }
 
 void Heap::complete(int res) {
@@ -107,58 +155,44 @@ void Heap::complete(int res) {
     state = IDLE;
 }
 
-void Heap::percolateUp(int i, coro_t::push_type &heap_sink) {
+void Heap::percolateUp(int i) {
     output.verbose(CALL_INFO, 7, 0, "PercolateUp: idx %d\n", i);
-    read(heapAddr(i));
-    heap_sink();
-    Var x = read_data;
+    Var x = read(heapAddr(i));
 
     int p = parent(i);
-    read(heapAddr(p));
-    heap_sink();
-    Var heap_p = read_data;
+    Var heap_p = read(heapAddr(p));
 
     while (i > 0 && lt(x, heap_p)) {
         write(heapAddr(i), heap_p);
-        heap_sink();
 
         write(indexAddr(heap_p), i);
-        heap_sink();
 
         i = p;
         if (i == 0) break;  // reached root
         
         p = parent(p);
-        read(heapAddr(p));
-        heap_sink();
-        heap_p = read_data;
+        heap_p = read(heapAddr(p));
+
         output.verbose(CALL_INFO, 7, 0, 
             "PercolateUp: new idx %d, parent idx %d, parent Var %d\n", i, p, heap_p);
     }
 
     output.verbose(CALL_INFO, 7, 0, "PercolateUp: final idx %d\n", i);
     write(heapAddr(i), x);
-    heap_sink();
 
     write(indexAddr(x), i);
-    heap_sink();
     output.verbose(CALL_INFO, 7, 0, "PercolateUp: completed for idx %d\n", i);
 }
 
-void Heap::percolateDown(int i, coro_t::push_type &heap_sink) {
-    read(heapAddr(i));
-    heap_sink();
-    Var x = read_data;
+void Heap::percolateDown(int i) {
+    Var x = read(heapAddr(i));
 
     while (i < (int)(heap_size / 2)) {
         int child = left(i);
-        read(heapAddr(child));
-        heap_sink();
-        Var heap_child = read_data;
+        Var heap_child = read(heapAddr(child));
 
         if (child + 1 < (int)heap_size) {
             read(heapAddr(child + 1));
-            heap_sink();
             if (lt(read_data, heap_child)) {
                 child++;
                 heap_child = read_data;
@@ -168,82 +202,68 @@ void Heap::percolateDown(int i, coro_t::push_type &heap_sink) {
         if (!lt(heap_child, x)) break;
 
         write(heapAddr(i), heap_child);
-        heap_sink();
 
         write(indexAddr(heap_child), i);
-        heap_sink();
 
         i = child;
     }
 
     write(heapAddr(i), x);
-    heap_sink();
 
     write(indexAddr(x), i);
-    heap_sink();
 }
 
-void Heap::inHeap(coro_t::push_type &heap_sink) {
+void Heap::inHeap() {
     output.verbose(CALL_INFO, 7, 0, "InHeap: key %d\n", key);
     read(indexAddr(key));
-    heap_sink();
     complete(read_data >= 0);
 }
 
-void Heap::readHeap(coro_t::push_type &heap_sink) {
+void Heap::readHeap() {
     output.verbose(CALL_INFO, 7, 0, "Read: idx %d\n", idx);
     if (idx < 0 || idx >= heap_size) {
         complete(var_Undef);
         return;
     }
-
     read(heapAddr(idx));
-    heap_sink();
+
     complete(read_data);
 }
 
-void Heap::decrease(coro_t::push_type &heap_sink) {
+void Heap::decrease() {
     output.verbose(CALL_INFO, 7, 0, "Decrease: key %d\n", key);
-    read(indexAddr(key));
-    heap_sink();
-    idx = read_data;
+    idx = read(indexAddr(key));
     
     // key not in heap or already at root
     if (idx <= 0) {
         complete(1);
         return;
     }
-    percolateUp(idx, heap_sink);
-    complete(true);
+    percolateUp(idx);
 }
 
-void Heap::insert(coro_t::push_type &heap_sink) {
+void Heap::insert() {
     output.verbose(CALL_INFO, 7, 0, "Insert: key %d, heap size %ld\n", key, heap_size);
     write(indexAddr(key), heap_size);
-    heap_sink();
     
     write(heapAddr(heap_size), key);
-    heap_sink();
 
     heap_size++;
     if (heap_size == 1) {
         complete(true);
         return;
     }
-    percolateUp(heap_size - 1, heap_sink);
+    percolateUp(heap_size - 1);
     complete(true);
 }
 
-void Heap::removeMin(coro_t::push_type &heap_sink) {
+void Heap::removeMin() {
     output.verbose(CALL_INFO, 7, 0, "RemoveMin, heap size %ld\n", heap_size);
     sst_assert(heap_size > 0, CALL_INFO, -1, "Heap is empty, cannot remove min\n");
     
-    read(heapAddr(0));
-    heap_sink();
-    Var min_var = read_data;
+    Var min_var = read(heapAddr(0));
 
     write(indexAddr(min_var), -1);
-    heap_sink();
     
     if (heap_size == 1) {
         heap_size--;
@@ -251,23 +271,19 @@ void Heap::removeMin(coro_t::push_type &heap_sink) {
         return;
     }
 
-    read(heapAddr(heap_size - 1));
-    heap_sink();
-    Var last_var = read_data;
+    Var last_var = read(heapAddr(heap_size - 1));
 
     write(indexAddr(last_var), 0);
-    heap_sink();
 
     write(heapAddr(0), last_var);
-    heap_sink();
     
     heap_size--;
     if (heap_size > 1)
-        percolateDown(0, heap_sink);
+        percolateDown(0);
     complete(min_var);
 }
 
-void Heap::initHeap(coro_t::push_type &heap_sink) {
+void Heap::initHeap() {
     output.verbose(CALL_INFO, 1, 0, "Initializing heap with %ld decision variables\n", heap_size);
     // Count decision variables and prepare data in one pass
     std::vector<uint8_t> heap_data;
@@ -292,12 +308,34 @@ void Heap::initHeap(coro_t::push_type &heap_sink) {
     memory->send(new SST::Interfaces::StandardMem::Write(heap_addr, heap_data.size(), heap_data));
     outstanding_mem_requests++;
     state = WAIT;
-    heap_sink();
+    (*heap_sink_ptr)();
     
     memory->send(new SST::Interfaces::StandardMem::Write(indices_addr, indices_data.size(), indices_data));
     outstanding_mem_requests++;
     state = WAIT;
-    heap_sink();
+    (*heap_sink_ptr)();
+
+    // initialize var_activity
+    var_activity.initialize(heap_size + 1, 0.0);
     
     complete(true);
+}
+
+void Heap::varBump() {
+    output.verbose(CALL_INFO, 7, 0, "bumped activity for var %d\n", key);
+
+    double act = var_activity[key];
+
+    var_activity[key] = act + var_inc;
+
+    bool rescale = false;
+    if ((act + var_inc) > 1e100) {
+        output.verbose(CALL_INFO, 7, 0, "Rescaling variable activity\n");
+        var_activity.rescaleAll(1e-100);
+        rescale = true;
+    }
+
+    decrease();
+    
+    complete(rescale);
 }

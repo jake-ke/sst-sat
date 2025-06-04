@@ -4,7 +4,7 @@ LDFLAGS=$(shell sst-config --ELEMENT_LDFLAGS)
 
 all: libsatsolver.so install
 
-libsatsolver.so: async_heap.cc async_watches.cc async_clauses.cc satsolver.cc 
+libsatsolver.so: async_heap.cc async_watches.cc async_clauses.cc async_activity.cc async_var_activity.cc satsolver.cc
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^ -lboost_context -lboost_coroutine
 
 install:
