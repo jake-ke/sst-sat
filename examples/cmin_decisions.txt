@@ -1,0 +1,6 @@
+# Decision sequence for cmin_eg.dimacs
+# Format: <var> <value>  (where value is 0 for false, 1 for true)
+3 1
+6 1
+10 1
+12 1

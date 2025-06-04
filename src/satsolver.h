@@ -4,86 +4,33 @@
 #include <sst/core/component.h>
 #include <sst/core/output.h>
 #include <sst/core/interfaces/stdMem.h>
-#include <map>
 #include <vector>
 #include <string>
-#include "heap.h"  // Include the heap class
+#include <fstream>    // For reading decision file
+#include <boost/coroutine2/all.hpp>
+#include "structs.h"
+#include "async_heap.h"
+#include "async_variables.h"
+#include "async_watches.h"
+#include "async_clauses.h"
+#include "async_activity.h"
 
 //-----------------------------------------------------------------------------------
 // Type Definitions and Constants
 //-----------------------------------------------------------------------------------
 
-enum State { INIT, PARSING, SOLVING, DONE };
-
-// Define types for variables and literals
-typedef int Var;
-const Var var_Undef = 0;
-
-// Define a constant for undefined clause reference
-const int ClauseRef_Undef = -1;
-
-struct Lit {
-    int x;
-    
-    bool operator == (const Lit& other) const { return x == other.x; }
-    bool operator != (const Lit& other) const { return x != other.x; }
-    bool operator <  (const Lit& other) const { return x < other.x; }
-};
-
-// Helper functions for literals
-inline Lit mkLit(Var var, bool sign = false) { Lit p; p.x = var + var + (int)sign; return p; }
-inline Lit operator ~(Lit p) { Lit q; q.x = p.x ^ 1; return q; }
-inline bool sign(Lit p) { return p.x & 1; }
-inline int var(Lit p) { return p.x >> 1; }
-inline Lit toLit(int dimacs_lit) { 
-    int var = abs(dimacs_lit);
-    return dimacs_lit > 0 ? mkLit(var, false) : mkLit(var, true);
-}
-inline int toInt(Lit p) { return sign(p) ? -var(p) : var(p); }
-
-const Lit lit_Undef = { 0 }; // Special undefined literal
-
-//-----------------------------------------------------------------------------------
-// Data Structures
-//-----------------------------------------------------------------------------------
-
-struct Clause {
-    std::vector<Lit> literals;
-    double activity;  // Activity score for this clause
-
-    Clause() : activity(0) {}
-    Clause(const std::vector<Lit>& lits) 
-        : literals(lits), activity(0) {}
-    int size() const { return literals.size(); }
-};
-
-struct Variable {
-    bool assigned;
-    bool value;
-    size_t level;                // Decision level when variable was assigned
-    int reason;                  // Index of clause that caused this assignment, or ClauseRef_Undef
-    
-    Variable() : assigned(false), value(false), level(0), reason(ClauseRef_Undef) {}
-};
-
-// Watcher structure for 2WL scheme
-struct Watcher {
-    int clause_idx;  // Index of the clause in the clauses vector
-    Lit blocker;        // Blocker literal (optimization to avoid accessing clause memory)
-    
-    Watcher() : clause_idx(ClauseRef_Undef), blocker(lit_Undef) {} // Default constructor
-    Watcher(int ci, Lit b) : clause_idx(ci), blocker(b) {}
-};
-
-// Comparator for the variable activity heap
-struct VarOrderLt {
-    const std::vector<double>& activity;
-    
-    VarOrderLt(const std::vector<double>& act) : activity(act) {}
-    
-    bool operator()(int x, int y) const {
-        return activity[x] > activity[y];  // Higher activity first
-    }
+// Unified state machine combining high-level states and detailed operations
+enum SolverState { 
+    IDLE,
+    INIT,
+    STEP,
+    PROPAGATE,
+    DECIDE,
+    ANALYZE,
+    BACKTRACK,
+    REDUCE,
+    RESTART,
+    DONE 
 };
 
 //-----------------------------------------------------------------------------------
@@ -111,9 +58,15 @@ public:
         {"clause_decay", "Clause activity decay factor", "0.999"},
         {"random_var_freq", "Frequency of random decisions", "0.02"},
         {"decision_file", "Path to a file containing decision sequence", ""},
+        {"decision_output_file", "Path to output decision sequence", ""},
         {"luby_restart", "Use Luby restart sequence", "true"},
         {"restart_first", "Initial restart limit", "100"},
         {"restart_inc", "Restart limit increase factor", "2.0"},
+        {"heap_base_addr", "Base address for heap memory", "0x00000000"},
+        {"indices_base_addr", "Base address for indices memory", "0x10000000"},
+        {"variables_base_addr", "Base address for variables memory", "0x20000000"},
+        {"var_act_base_addr", "Base address for variable activity memory", "0x70000000"},
+        {"clause_act_base_addr", "Base address for clause activity memory", "0x80000000"},
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -130,7 +83,15 @@ public:
     )
 
     SST_ELI_DOCUMENT_PORTS(
-        {"mem_link", "Connection to HBM", {"memHierarchy.MemEventBase"}}
+        {"cnf_mem_link", "Connection to CNF memory", {"memHierarchy.MemEventBase"}},
+        {"global_mem_link", "Connection to global memory", {"memHierarchy.MemEventBase"}},
+        {"heap_port", "Link to external heap subcomponent", {"sst.Event"}}
+    )
+    
+    SST_ELI_DOCUMENT_SUBCOMPONENT_SLOTS(
+        {"cnf_memory", "Memory interface for CNF data", "SST::Interfaces::StandardMem"},
+        {"global_memory", "Memory interface for Heap and Variables", "SST::Interfaces::StandardMem"},
+        {"order_heap", "ordered heap for VSIDS", "Heap"}
     )
 
     // Component Lifecycle Methods
@@ -143,61 +104,69 @@ public:
     virtual void finish() override;
 
     // Event Handling Methods
+    void handleCnfMemEvent(SST::Interfaces::StandardMem::Request* req);
+    void handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req);
+    void handleHeapResponse(SST::Event* ev);
+
+    // Top level FSM
     bool clockTick(SST::Cycle_t currentCycle);
-    void handleMemEvent(SST::Interfaces::StandardMem::Request* req);
+    void execPropagate();
+    void execAnalyze();
+    void execBacktrack();
+    void execReduce();
+    void execRestart();
+    void execDecide();
     
     // Input Processing
     void parseDIMACS(const std::string& content);
     
     // Core CDCL Algorithm
-    bool solveCDCL();  // Renamed from solveDPLL to solveCDCL
+    void initialize();
     bool decide();
-    int unitPropagate();  // returns conflict clause index or ClauseRef_Undef if no conflict
-    void analyze(int conflict, std::vector<Lit>& learnt_clause, int& backtrack_level);
+    int unitPropagate();
+    void analyze();
     void backtrack(int backtrack_level);
     
     // Trail Management
     void trailEnqueue(Lit literal, int reason = ClauseRef_Undef);
     void unassignVariable(Var var);
-    int current_level() { return trail_lim.size(); }  // Changed to use trail_lim
-    
+    int current_level() { return trail_lim.size(); }
+
     // Two-Watched Literals
-    inline int toWatchIndex(Lit p) { return p.x; }
     void attachClause(int clause_idx);
     void detachClause(int clause_idx);
-    void insert_watch(Lit p, Watcher w);
-    void remove_watch(std::vector<Watcher>& ws, int clause_idx);
     
     // Decision Heuristics
     Lit chooseBranchVariable();
-    void insertVarOrder(Var v);                    // Insert variable into order heap
-    void varDecayActivity();                       // Decay all variable activities
-    void varBumpActivity(Var v);                   // Bump a variable's activity
-    void loadDecisionSequence(const std::string& filename);  // user-defined decision sequence
+    void insertVarOrder(Var v);   // Insert variable into order heap
+    void varDecayActivity();       // Decay all variable activities
+    void varBumpActivity(Var v);   // Bump a variable's activity
     
     // Clause Activity
     void claDecayActivity();
     void claBumpActivity(int clause_idx);
-    void reduceDB();
-    bool locked(int clause_idx);  // Check if clause is locked (reason for assignment)
+    void reduceDB();               // Reduce the learnt clause database
+    bool locked(int clause_idx);   // Check if clause is locked (reason for assignment)
 
     // Clause Minimization
     bool litRedundant(Lit p);
 
     // Restart helpers
-    double luby(double y, int x);                 // Calculate Luby sequence value
+    double luby(double y, int x);  // Calculate Luby sequence value
 
     // Utility Functions
-    inline bool value(Var v) { return variables[v].value; }
-    inline bool value(Lit p) { return variables[var(p)].value ^ sign(p); }
+    inline bool value(Var v) { return var_value[v]; }
+    inline bool value(Lit p) { return var_value[var(p)] ^ sign(p); }
     void ensureVarCapacity(Var v);
     double drand(uint64_t& seed);                  // Random number generator
     int irand(uint64_t& seed, int size);           // Integer random in range [0,size-1]
     uint64_t getStatCount(Statistic<uint64_t>* stat);
     inline int nAssigns() const { return trail.size(); }
     inline int nLearnts() const { return clauses.size() - num_clauses; }
-    inline bool isLearnt(int clause_idx) const { return clause_idx >= nLearnts(); }
+    inline bool isLearnt(int clause_idx) const { return clause_idx >= num_clauses; }
     std::string printClause(const Clause& c);
+    void loadDecisionSequence(const std::string& filename);  // user-defined decision sequence
+    void dumpDecision(Lit lit);
 
 private:
     // Structure for clause minimization
@@ -208,51 +177,74 @@ private:
     };
   
     // State Variables
-    State state;
+    SolverState state, next_state;
     SST::Output output;
-    SST::Interfaces::StandardMem* memory;
+    SST::Interfaces::StandardMem* cnf_memory;    // For CNF data
+    SST::Interfaces::StandardMem* global_memory; // For heap and variables operations
     std::string dimacs_content;
-    bool requestPending;
     SST::Cycle_t currentCycle;
+    coro_t::pull_type* coroutine; // Coroutine for async operations
+    coro_t::push_type* yield_ptr; // Pointer to current yield object
+    int heap_resp;
 
     // Parsing state
     size_t filesize;
     uint32_t num_vars;
     uint32_t num_clauses;
     bool sort_clauses;
+    std::vector<Lit> initial_units;             // Initial unit clauses from DIMACS
+    std::vector<Clause> parsed_clauses;         // Temporary storage during parsing
     
     // SAT solver state
-    std::vector<Clause> clauses;
-    std::vector<Variable> variables;  // Indexed by variable number
+    Clauses clauses;                    // Replaces std::vector<Clause> clauses
+    std::vector<bool> var_assigned;     // Whether each variable is assigned
+    std::vector<bool> var_value;        // Value of each variable
     
-    // Trail for recording assignment order
+    // Implication graph
     uint qhead;
-    std::vector<Lit> trail;           // Sequence of assignments in chronological order
+    std::vector<Lit> trail;            // Sequence of assignments in chronological order
     std::vector<uint> trail_lim;       // Indices in trail for the first literal at each decision level
     
     // Clause learning
-    std::vector<char> seen;  // Temporary array for conflict analysis
-    int ccmin_mode;  // Conflict clause minimization mode
-    std::vector<ShrinkStackElem> analyze_stack;  // Stack for clause minimization
-    std::vector<Lit> analyze_toclear;  // Literals to clear after analysis
+    int conflict;                               // Conflict clause index from propagation
+    std::vector<Lit> learnt_clause;             // Learnt clause from conflict analysis
+    int bt_level;                               // Backtrack level from conflict analysis
+    std::vector<char> seen;                     // Temporary array for conflict analysis
+    int ccmin_mode;                             // Conflict clause minimization mode
+    std::vector<ShrinkStackElem> analyze_stack; // Stack for clause minimization
+    std::vector<Lit> analyze_toclear;           // Literals to clear after analysis
 
     // Two Watched Literals implementation
-    std::vector<std::vector<Watcher>> watches;  // Indexed by literal encoding
+    Watches watches;  // Replaces std::vector<std::vector<Watcher>> watches
+    uint64_t watches_base_addr;      // Base address for watches array
+    uint64_t watch_nodes_base_addr;  // Base address for watch nodes
     
-    // Variable activity for VSIDS
-    std::vector<double> activity;     // Activity score for each variable
-    std::vector<bool> polarity;       // Saved phase (polarity) for each variable
-    std::vector<bool> decision;       // Whether variable is eligible for decisions
-    Heap<Var, VarOrderLt> order_heap; // Heap of variables ordered by activity
-    double var_inc;                   // Amount to bump variable activity by
-    double var_decay;                 // Variable activity decay factor
-    double random_var_freq;           // Frequency of random decisions
-    uint64_t random_seed;             // Seed for random number generation
+    // Variable related
+    std::vector<bool> polarity;         // Saved phase (polarity) for each variable
+    std::vector<bool> decision;         // Whether variable is eligible for decisions
+    Heap* order_heap;                   // Heap of variables ordered by activity
+    double var_inc;                     // Amount to bump variable activity by
+    double var_decay;                   // Variable activity decay factor
+    double random_var_freq;             // Frequency of random decisions
+    uint64_t random_seed;               // Seed for random number generation
+    SST::Link* heap_link;               // Link to async heap
+    uint64_t heap_base_addr;            // Base address for heap memory
+    uint64_t indices_base_addr;         // Base address for indices memory
+    uint64_t var_act_base_addr;         // Base address for variable activity array
+
+    // external memory controller for struct Variable
+    Variables variables;                // Replaces std::vector<Variable> variables
+    uint64_t variables_base_addr;       // Base address for variables memory
     
     // Clause activity
-    std::vector<double> cls_activity;
+    Activity cla_activity;              // Replace std::vector<double> cla_activity
+    uint64_t clause_act_base_addr;      // Base address for clause activity
     double clause_decay;
     double cla_inc;
+
+    // Memory addresses
+    uint64_t clauses_base_addr;         // Base address for clauses
+    uint64_t clauses_cmd_base_addr;  // Base address for clause offsets
 
     // DB reduction parameters
     double learntsize_factor;
@@ -287,6 +279,9 @@ private:
     std::vector<std::pair<Var, bool>> decision_sequence; // (variable, sign) pairs
     size_t decision_seq_idx;                             // Current position in sequence
     bool has_decision_sequence;                          // Whether a decision sequence was provided
+    // Decision output
+    std::string decision_output_file;
+    std::ofstream decision_output_stream;
 };
 
 #endif // SATSOLVER_H

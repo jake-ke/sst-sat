@@ -9,7 +9,7 @@ template<class K, class Comp>
 class Heap {
 private:
     std::vector<K> heap;     // Heap of keys
-    std::vector<K> indices;  // Map elements to their heap positions
+    std::vector<int> indices;  // Map elements to their heap positions
     Comp lt;                   // The heap comparator
 
     // Sift element at position i up/down in the heap
