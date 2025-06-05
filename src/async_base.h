@@ -25,7 +25,7 @@ public:
     void readBurst(uint64_t start_addr, size_t element_size, size_t count);
     void writeBurst(uint64_t start_addr, size_t element_size, const std::vector<uint8_t>& data);
     
-    // Memory response handling (should delete request in implementation)
+    // Memory response handling
     virtual void handleMem(SST::Interfaces::StandardMem::Request* req);
     
     // Configuration
@@ -42,11 +42,6 @@ protected:
     };
     std::vector<CacheChunk> calculateCacheChunks(uint64_t start_addr, size_t total_size);
     
-    // Common functionality to calculate element address
-    uint64_t calcAddr(size_t idx, size_t elem_size) const { 
-        return base_addr + idx * elem_size; 
-    }
-    
     // Member variables
     SST::Output output;
     SST::Interfaces::StandardMem* memory;
@@ -54,7 +49,6 @@ protected:
     size_t line_size;
     std::vector<uint8_t> read_buffer;  // Stores the last read data
     std::vector<uint8_t> burst_buffer;  // Stores accumulated data for burst operations
-    uint64_t base_addr;
     size_t size_;
 };
 

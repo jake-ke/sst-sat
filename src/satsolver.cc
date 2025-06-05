@@ -846,7 +846,7 @@ void SATSolver::analyze() {
                 "ANALYZE: Processing literal %d\n", toInt(q));
             
             // Read variable data individually for each variable in the conflict clause
-            Variable v_data = variables(v);
+            Variable v_data = variables[v];
 
             if (!seen[v] && v_data.level > 0) {
                 order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::BUMP, v));
@@ -873,7 +873,7 @@ void SATSolver::analyze() {
         // Select next literal to expand from the trail
         while (!seen[var(trail[index--])]);
         p = trail[index+1];
-        conflict = variables(var(p)).reason();
+        conflict = variables[var(p)].reason();
 
         seen[var(p)] = 0;
         pathC--;
@@ -900,7 +900,7 @@ void SATSolver::analyze() {
         if (ccmin_mode == 2) {
             // Deep minimization (more thorough)
             for (i = j = 1; i < learnt_clause.size(); i++) {
-                int reason = variables(var(learnt_clause[i])).reason();
+                int reason = variables[var(learnt_clause[i])].reason();
 
                 if (reason == ClauseRef_Undef) {
                     learnt_clause[j++] = learnt_clause[i];
@@ -912,7 +912,7 @@ void SATSolver::analyze() {
         } else if (ccmin_mode == 1) {
             // Basic minimization (faster but less thorough)
             for (i = j = 1; i < learnt_clause.size(); i++) {
-                Variable var_data = variables(var(learnt_clause[i]));
+                Variable var_data = variables[var(learnt_clause[i])];
                 
                 if (var_data.reason == ClauseRef_Undef)
                     learnt_clause[j++] = learnt_clause[i];
@@ -946,10 +946,10 @@ void SATSolver::analyze() {
     } else {
         // Find the second highest level in the clause
         int max_i = 1;
-        int max_level = variables(var(learnt_clause[1])).level();
+        int max_level = variables[var(learnt_clause[1])].level();
 
         for (int i = 2; i < learnt_clause.size(); i++) {
-            int level_i = variables(var(learnt_clause[i])).level();
+            int level_i = variables[var(learnt_clause[i])].level();
             
             if (level_i > max_level) {
                 max_i = i;
@@ -961,7 +961,7 @@ void SATSolver::analyze() {
         Lit p = learnt_clause[max_i];
         learnt_clause[max_i] = learnt_clause[1];
         learnt_clause[1] = p;
-        bt_level = variables(var(p)).level();
+        bt_level = variables[var(p)].level();
     }
 
     // Clear seen vector for next analysis
@@ -1068,7 +1068,7 @@ void SATSolver::reduceDB() {
     // 6. Update reasons for assigned variables in trail
     for (int i = 0; i < trail.size(); i++) {
         Var v = var(trail[i]);
-        Variable var_data = variables(v);
+        Variable var_data = variables[v];
         
         int old_reason = var_data.reason;
         // skip original clauses and decision variables
@@ -1077,7 +1077,7 @@ void SATSolver::reduceDB() {
             assert(!to_remove[old_reason]);
             // Update the reason, but also wasted bw to update level
             var_data.reason = clause_map[old_reason];
-            variables(v) = {var_data};
+            variables[v] = {var_data};
             
             output.verbose(CALL_INFO, 5, 0, 
                 "REDUCEDB: Updated var %d reason from %d to %d\n", 
@@ -1136,7 +1136,7 @@ void SATSolver::trailEnqueue(Lit literal, int reason) {
     Variable var_data;
     var_data.level = current_level();
     var_data.reason = reason;
-    variables(v) = var_data;
+    variables[v] = var_data;
     
     // Add to trail
     trail.push_back(literal);
@@ -1252,7 +1252,7 @@ bool SATSolver::locked(int clause_idx) {
     const Clause& c = clauses[clause_idx];
     Var v = var(c[0]);
     if (c.size() == 0) return false;
-    int reason = variables(v).reason();
+    int reason = variables[v].reason();
     
     return var_assigned[v] && 
            value(c[0]) == true &&      // First literal is true
@@ -1267,7 +1267,7 @@ bool SATSolver::locked(int clause_idx) {
 bool SATSolver::litRedundant(Lit p) {
     output.verbose(CALL_INFO, 6, 0, "MIN: Checking if %d is redundant\n", toInt(p));
     enum { seen_undef = 0, seen_source = 1, seen_removable = 2, seen_failed = 3 };
-    int reason = variables(var(p)).reason();
+    int reason = variables[var(p)].reason();
     
     assert(seen[var(p)] == seen_undef || seen[var(p)] == seen_source);
     assert(reason != ClauseRef_Undef);
@@ -1280,7 +1280,7 @@ bool SATSolver::litRedundant(Lit p) {
             // Examining the literals in the reason clause
             Lit l = c[i];
             Var v = var(l);
-            Variable v_data = variables(v);
+            Variable v_data = variables[v];
             
             // If variable at level 0 or already marked as source/removable, skip it
             if (v_data.level == 0 || seen[v] == seen_source || seen[v] == seen_removable) {
@@ -1306,7 +1306,7 @@ bool SATSolver::litRedundant(Lit p) {
             analyze_stack.push_back(ShrinkStackElem(i, p));
             i = 0;
             p = l;
-            c = clauses[variables(var(p)).reason()];
+            c = clauses[variables[var(p)].reason()];
         } else {
             // Finished examining current reason clause
             if (seen[var(p)] == seen_undef) {
@@ -1326,7 +1326,7 @@ bool SATSolver::litRedundant(Lit p) {
             analyze_stack.pop_back();
             i = e.i;
             p = e.l;
-            c = clauses[variables(var(p)).reason()];
+            c = clauses[variables[var(p)].reason()];
         }
     }
 }

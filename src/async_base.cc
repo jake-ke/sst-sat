@@ -3,7 +3,7 @@
 
 AsyncBase::AsyncBase(const std::string& prefix, int verbose, SST::Interfaces::StandardMem* mem, 
                      coro_t::push_type** yield_ptr)
-    : memory(mem), yield_ptr(yield_ptr), line_size(64), base_addr(0), size_(0) {
+    : memory(mem), yield_ptr(yield_ptr), line_size(64), size_(0) {
     output.init(prefix.c_str(), verbose, 0, SST::Output::STDOUT);
 }
 
