@@ -6,6 +6,7 @@
 #include <boost/coroutine2/all.hpp>
 #include <vector>
 #include <string>
+#include <algorithm>
 #include "structs.h"
 
 class Clauses {
@@ -48,8 +49,8 @@ public:
     // Basic accessors
     size_t size() const { return offsets_length; } // Return cached size directly
     bool empty() const { return offsets_length == 0; }
-    bool isBusy() const { return busy; }
     Clause& getLastRead() { return last_read; }
+    void setLineSize(size_t size) { line_size = size; }
     
     // Core operations
     void initialize(const std::vector<Clause>& clauses);
@@ -64,8 +65,8 @@ private:
     coro_t::push_type** yield_ptr;
     uint64_t clauses_cmd_base_addr;
     uint64_t clauses_base_addr;
+    size_t line_size;
 
-    bool busy;
     size_t num_orig_clauses;
     size_t offsets_length;              // Number of all clauses
     size_t next_free_offset;            // Next offset for insertion
@@ -79,27 +80,91 @@ private:
         // First, read metadata (size and offset)
         getMetaData(idx);
 
-        // Then read the actual clause literals
-        memory->send(new SST::Interfaces::StandardMem::Read(
-            clauses_base_addr + last_metadata.offset,
-            last_metadata.size * sizeof(Lit)));
-        busy = true;
-        (**yield_ptr)();
+        // Then read the actual clause literals, respecting cache line boundaries
+        size_t litSize = sizeof(Lit);
+        size_t totalBytes = last_metadata.size * litSize;
+        uint64_t baseAddr = clauses_base_addr + last_metadata.offset;
         
-        // Set up last_read clause from the buffer
+        // Clear and resize the last_read clause
+        last_read.literals.clear();
         last_read.literals.resize(last_metadata.size);
-        memcpy(last_read.literals.data(), last_buffer.data(), last_metadata.size * sizeof(Lit));
+        
+        // Read literals in chunks that don't cross cache lines
+        size_t bytesRead = 0;
+        size_t literalsRead = 0;
+        
+        while (bytesRead < totalBytes) {
+            uint64_t currentAddr = baseAddr + bytesRead;
+            uint64_t lineOffset = currentAddr % line_size;
+            size_t bytesRemaining = totalBytes - bytesRead;
+            size_t bytesInLine = line_size - lineOffset;
+            size_t bytesToRead = std::min(bytesRemaining, bytesInLine);
+            
+            // Make sure we read complete literals
+            bytesToRead = (bytesToRead / litSize) * litSize;
+            if (bytesToRead == 0 && bytesRemaining > 0) {
+                // Literal spans a cache line boundary
+                bytesToRead = litSize;
+            }
+            
+            if (bytesToRead == 0) break;
+            
+            // Perform the read
+            memory->send(new SST::Interfaces::StandardMem::Read(currentAddr, bytesToRead));
+            (**yield_ptr)();
+            
+            // Copy data to the clause
+            size_t literalsInChunk = bytesToRead / litSize;
+            memcpy(&last_read.literals[literalsRead], 
+                   last_buffer.data(), 
+                   literalsInChunk * litSize);
+            
+            bytesRead += bytesToRead;
+            literalsRead += literalsInChunk;
+        }
     }
 
     // New function to write clause literals to memory
     void writeClause(uint64_t offset, const Clause& c) {
-        std::vector<uint8_t> buffer(c.size() * sizeof(Lit));
-        memcpy(buffer.data(), c.literals.data(), buffer.size());
+        size_t litSize = sizeof(Lit);
+        size_t totalBytes = c.size() * litSize;
+        uint64_t baseAddr = clauses_base_addr + offset;
         
-        memory->send(new SST::Interfaces::StandardMem::Write(
-            clauses_base_addr + offset, buffer.size(), buffer));
-        busy = true;
-        (**yield_ptr)();
+        // Write literals in chunks that don't cross cache lines
+        size_t bytesWritten = 0;
+        size_t literalsWritten = 0;
+        
+        while (bytesWritten < totalBytes) {
+            uint64_t currentAddr = baseAddr + bytesWritten;
+            uint64_t lineOffset = currentAddr % line_size;
+            size_t bytesRemaining = totalBytes - bytesWritten;
+            size_t bytesInLine = line_size - lineOffset;
+            size_t bytesToWrite = std::min(bytesRemaining, bytesInLine);
+            
+            // Make sure we write complete literals
+            bytesToWrite = (bytesToWrite / litSize) * litSize;
+            if (bytesToWrite == 0 && bytesRemaining > 0) {
+                // Literal spans a cache line boundary
+                bytesToWrite = litSize;
+            }
+            
+            if (bytesToWrite == 0) break;
+            
+            // Create buffer for this chunk
+            std::vector<uint8_t> buffer(bytesToWrite);
+            size_t literalsInChunk = bytesToWrite / litSize;
+            memcpy(buffer.data(), 
+                   &c.literals[literalsWritten], 
+                   literalsInChunk * litSize);
+            
+            // Perform the write
+            memory->send(new SST::Interfaces::StandardMem::Write(
+                currentAddr, bytesToWrite, buffer));
+            (**yield_ptr)();
+            
+            bytesWritten += bytesToWrite;
+            literalsWritten += literalsInChunk;
+        }
     }
 
     uint64_t cmdAddr(int idx) const {
@@ -109,7 +174,6 @@ private:
     void getMetaData(int idx) {
         memory->send(new SST::Interfaces::StandardMem::Read(
             cmdAddr(idx), sizeof(ClauseMetaData)));
-        busy = true;
         (**yield_ptr)();
         
         memcpy(&last_metadata, last_buffer.data(), sizeof(ClauseMetaData));
@@ -121,7 +185,6 @@ private:
         
         memory->send(new SST::Interfaces::StandardMem::Write(
             cmdAddr(idx), buffer.size(), buffer));
-        busy = true;
         (**yield_ptr)();
     }
     

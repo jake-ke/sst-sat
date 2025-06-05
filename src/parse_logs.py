@@ -42,8 +42,9 @@ def extract_metrics_from_log(log_path):
 
 def main():
     # Define directories
-    current_logs_dir = 'logs'
-    reference_logs_dir = os.path.expanduser('~/minisat/logs/')
+    current_logs_dir = 'logs_vars'
+    # reference_logs_dir = os.path.expanduser('~/minisat/logs/')
+    reference_logs_dir = os.path.expanduser('~/minisat/logs_no_pre/')
     
     # Check if directories exist
     for directory in [current_logs_dir, reference_logs_dir]:
@@ -52,6 +53,7 @@ def main():
             return
     
     # Get all log files (excluding summary)
+    # current_log_files = [f for f in glob.glob(f"{current_logs_dir}/*_20250511_195018.log") if os.path.isfile(f) and 'summary' not in os.path.basename(f).lower()]
     current_log_files = [f for f in glob.glob(f"{current_logs_dir}/*") if os.path.isfile(f) and 'summary' not in os.path.basename(f).lower()]
     reference_log_files = [f for f in glob.glob(f"{reference_logs_dir}/*") if os.path.isfile(f) and 'summary' not in os.path.basename(f).lower()]
     

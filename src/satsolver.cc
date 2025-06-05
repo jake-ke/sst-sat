@@ -4,6 +4,7 @@
 #include "sst/core/statapi/stataccumulator.h"
 #include <algorithm>  // For std::sort
 #include <cmath>      // For pow function
+#include <fstream>    // For file reading
 
 //-----------------------------------------------------------------------------------
 // Component Lifecycle Methods
@@ -46,6 +47,12 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     filesize = params.find<size_t>("filesize", 0);
     if (filesize == 0) {
         output.fatal(CALL_INFO, -1, "File size parameter not provided\n");
+    }
+
+    // Get CNF file path
+    cnf_file_path = params.find<std::string>("cnf_file", "");
+    if (cnf_file_path.empty()) {
+        output.fatal(CALL_INFO, -1, "CNF file path not provided\n");
     }
 
     sort_clauses = params.find<bool>("sort_clauses", true);
@@ -156,17 +163,58 @@ SATSolver::~SATSolver() {}
 void SATSolver::init(unsigned int phase) {
     cnf_memory->init(phase);
     global_memory->init(phase);
+
+    // Only parse the file in phase 0
+    if (phase == 0) {
+        output.output("Reading CNF file: %s\n", cnf_file_path.c_str());
+        // Read the CNF file directly
+        std::ifstream file(cnf_file_path);
+        if (!file.is_open()) {
+            output.fatal(CALL_INFO, -1, "Failed to open CNF file: %s\n", cnf_file_path.c_str());
+        }
+
+        // Read file content into string
+        std::string content((std::istreambuf_iterator<char>(file)),
+                            (std::istreambuf_iterator<char>()));
+
+        parseDIMACS(content);  // setting num_vars and num_clauses
+        output.verbose(CALL_INFO, 1, 0, "Parsed %u variables, %u clauses\n", num_vars, num_clauses);
+        
+        state = INIT;
+
+        qhead = 0;
+        seen.resize(num_vars + 1, 0);
+        polarity.resize(num_vars + 1, false); // Default phase is false
+        decision.resize(num_vars + 1, true);  // All variables are decision variables
+        var_assigned.resize(num_vars + 1, false);
+        var_value.resize(num_vars + 1);
+
+        // Untimed data structure initialization
+        variables.init(num_vars);
+        watches.initWatches(2 * (num_vars + 1), parsed_clauses);
+        clauses.initialize(parsed_clauses);
+
+        order_heap->decision = decision;
+        order_heap->heap_size = num_vars;
+        order_heap->var_inc_ptr = &var_inc;
+        order_heap->initHeap();
+    }
+    output.verbose(CALL_INFO, 3, 0, "SATSolver initialized in phase %u\n", phase);
 }
 
 void SATSolver::setup() {
     cnf_memory->setup();
     global_memory->setup();
     
-    // Initial memory read moved here from constructor
-    SST::Interfaces::StandardMem::Request* req;
-    req = new SST::Interfaces::StandardMem::Read(0, filesize);  
-    cnf_memory->send(req);
-    output.verbose(CALL_INFO, 1, 0, "Sent CNF memory read request for %zu bytes\n", filesize);
+    // Get cache line size from memory interface
+    size_t line_size = global_memory->getLineSize();
+    output.verbose(CALL_INFO, 1, 0, "Cache line size: %zu bytes\n", line_size);
+    
+    // Propagate cache line size to all memory-using components
+    watches.setLineSize(line_size);
+    clauses.setLineSize(line_size);
+    cla_activity.setLineSize(line_size);
+    order_heap->setLineSize(line_size);
 }
 
 void SATSolver::complete(unsigned int phase) {
@@ -360,7 +408,12 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
                     yield_ptr = &yield; 
                     initialize(); 
                 });
-            state = IDLE;
+            if (!(*coroutine)) {
+                output.verbose(CALL_INFO, 8, 0, "Coroutine never paused but completed\n");
+                delete coroutine;
+                coroutine = nullptr;
+                yield_ptr = nullptr;
+            } else state = IDLE;
             break;
         case STEP:
             (*coroutine)();
@@ -435,38 +488,17 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
         case DONE: primaryComponentOKToEndSim(); return true;
         default: output.fatal(CALL_INFO, -1, "Invalid state: %d\n", state);
     }
-    output.verbose(CALL_INFO, 2, 0, "=== Clock Tick %ld === State: %d\n", cycle, state);
+    output.verbose(CALL_INFO, 7, 0, "=== Clock Tick %ld === State: %d\n", cycle, state);
     return false;
 }
 
 void SATSolver::initialize() {
-    qhead = 0;
-    seen.resize(num_vars + 1, 0);
-    polarity.resize(num_vars + 1, false); // Default phase is false
-    decision.resize(num_vars + 1, true);  // All variables are decision variables
-    var_assigned.resize(num_vars + 1, false);
-    var_value.resize(num_vars + 1);
-    
-    // Initialize variables
-    variables.write(0, std::vector<Variable>(num_vars + 1, Variable()));
-
-    // Initialize watches with a single memory operation for efficiency
-    watches.initWatches(2 * (num_vars + 1), parsed_clauses);
-    
-    // Initialize clauses
-    clauses.initialize(parsed_clauses);
-    
     // Enqueue unit clauses from the input DIMACS
+    output.verbose(CALL_INFO, 3, 0, "Enqueuing initial unit clauses\n");
     for (int i = 0; i < initial_units.size(); i++) {
         trailEnqueue(initial_units[i]); 
     }
     
-    // intialize order_heap and var_activity
-    order_heap->decision = decision;
-    order_heap->heap_size = num_vars;
-    order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INIT));
-    (*yield_ptr)();
-
     output.verbose(CALL_INFO, 1, 0, "Initialization complete\n");
     state = PROPAGATE;
 }
@@ -715,7 +747,7 @@ int SATSolver::unitPropagate() {
                         toInt(p));
                     if (prev_addr == 0) {
                         // Current node is head of the list - update head pointer directly
-                        watches.writeHeadPointers(watch_idx, {next_addr});
+                        watches.writeHeadPointer(watch_idx, {next_addr});
                     } else {
                         // Update previous node's next pointer to skip current node
                         prev_watcher.next = next_addr;
@@ -817,9 +849,8 @@ void SATSolver::analyze() {
             Variable v_data = variables(v);
 
             if (!seen[v] && v_data.level > 0) {
-                order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::BUMP, v, var_inc));
+                order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::BUMP, v));
                 (*yield_ptr)();
-                if (heap_resp) var_inc *= 1e-100;  // heap_resp is true if rescaled
                 
                 seen[v] = 1;
                 output.verbose(CALL_INFO, 5, 0,

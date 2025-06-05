@@ -54,6 +54,7 @@ public:
         {"clock", "Clock frequency", "1GHz"},
         {"verbose", "Verbosity level", "0"},
         {"filesize", "Size of CNF file to read", "0"},
+        {"cnf_file", "Path to the CNF file to solve", ""},
         {"var_decay", "Variable activity decay factor", "0.95"},
         {"clause_decay", "Clause activity decay factor", "0.999"},
         {"random_var_freq", "Frequency of random decisions", "0.02"},
@@ -188,6 +189,7 @@ private:
     int heap_resp;
 
     // Parsing state
+    std::string cnf_file_path;         // Path to CNF file
     size_t filesize;
     uint32_t num_vars;
     uint32_t num_clauses;

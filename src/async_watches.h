@@ -38,7 +38,7 @@ public:
             uint64_t nodes_base_addr, coro_t::push_type** yield_ptr = nullptr)
         : memory(mem), watches_base_addr(watches_base_addr), 
           nodes_base_addr(nodes_base_addr), num_watches(0),
-          next_free_node(nodes_base_addr), busy(false), yield_ptr(yield_ptr) {
+          next_free_node(nodes_base_addr), yield_ptr(yield_ptr) {
         output.init("WATCH-> ", verbose, 0, SST::Output::STDOUT);
     }
 
@@ -47,14 +47,14 @@ public:
     void freeNode(uint64_t addr) { free_nodes.push(addr); }
     uint64_t getLastHeadPointer() const { return last_head_ptr; }
     WatcherNode getLastReadNode() const { return last_node; }
-    bool isBusy() const { return busy; }
+    void setLineSize(size_t size) { line_size = size; }
         
     // Memory address calculations
     uint64_t watchesAddr(int idx) const { return watches_base_addr + idx * sizeof(uint64_t); }
     uint64_t allocateNode();
     
     void readHeadPointer(int lit_idx);
-    void writeHeadPointers(int start_idx, const std::vector<uint64_t>& ptrs);
+    void writeHeadPointer(int start_idx, const uint64_t headptr);
     void readNode(uint64_t addr);
     void writeNode(uint64_t addr, const WatcherNode& node);
 
@@ -70,8 +70,8 @@ private:
     uint64_t nodes_base_addr;      // Base address for watcher nodes
     size_t num_watches;            // Number of watch lists
     uint64_t next_free_node;       // Next free address for node allocation
-    bool busy;                     // Flag for ongoing memory operations
     coro_t::push_type** yield_ptr; // Pointer to the yield_ptr in SATSolver
+    size_t line_size;              // Added cache line size
     
     // Free list for recycling nodes
     std::queue<uint64_t> free_nodes;

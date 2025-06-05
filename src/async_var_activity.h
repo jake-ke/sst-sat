@@ -17,6 +17,7 @@ public:
     std::vector<double> readBulk(size_t start, size_t count) override;
     void writeBulk(size_t start, const std::vector<double>& values) override;
 
+    void initialize(size_t size, double initial_value = 0.0);
     void setHeapSinkPtr(coro_t::push_type** sink_ptr) { heap_sink_ptr = sink_ptr; }
     
 private:

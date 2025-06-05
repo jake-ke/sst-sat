@@ -40,7 +40,7 @@ public:
     
     // Accessors
     size_t size() const { return size_; }
-    bool isBusy() const { return busy; }
+    void setLineSize(size_t size) { line_size = size; }
 
     // Core operations
     virtual double read(size_t idx);
@@ -49,7 +49,6 @@ public:
     virtual void writeBulk(size_t start, const std::vector<double>& values);
     virtual void handleMem(SST::Interfaces::StandardMem::Request* req);
     
-    void initialize(size_t count, double init_value = 0.0);
     void push(double value);
     void rescaleAll(double factor);
     void reduceDB(const std::vector<bool>& to_remove, size_t num_orig);
@@ -60,8 +59,8 @@ protected:
     SST::Interfaces::StandardMem* memory;
     coro_t::push_type** yield_ptr;
     uint64_t base_addr;
+    size_t line_size;
     size_t size_;
-    bool busy;
     double last_value;
     std::vector<uint8_t> last_buffer;
     

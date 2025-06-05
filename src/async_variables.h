@@ -46,14 +46,13 @@ public:
 
     Variables(int verbose, SST::Interfaces::StandardMem* mem, uint64_t var_base_addr, 
         coro_t::push_type** yield_ptr = nullptr)
-        : memory(mem), var_base_addr(var_base_addr), busy(false), yield_ptr(yield_ptr) {
+        : memory(mem), var_base_addr(var_base_addr), yield_ptr(yield_ptr) {
         output.init("VAR-> ", verbose, 0, SST::Output::STDOUT);
     }
 
     uint64_t varAddr(int var_idx) const { return var_base_addr + var_idx * sizeof(Variable); }
     Variable getLastRead() const { return last_read.empty() ? Variable() : last_read[0]; }
     std::vector<Variable> getLastReadVec() const { return last_read; }
-    bool isBusy() const { return busy; }
     
     // Array-style access with yield - no longer needs yield parameter
     VariableProxy operator()(int idx) {
@@ -64,7 +63,6 @@ public:
         output.verbose(CALL_INFO, 7, 0, "Read variable %d\n", var_idx);
         memory->send(new SST::Interfaces::StandardMem::Read(
             varAddr(var_idx), count * sizeof(Variable)));
-        busy = true;
         (**yield_ptr)();
     }
 
@@ -76,18 +74,24 @@ public:
         output.verbose(CALL_INFO, 7, 0, "Write variables[%d], count %d\n", start_idx, count);
         memory->send(new SST::Interfaces::StandardMem::Write(
             varAddr(start_idx), count * sizeof(Variable), data));
-        busy = true;
         (**yield_ptr)();
     }
 
     void handleMem(SST::Interfaces::StandardMem::Request* req) {
         output.verbose(CALL_INFO, 8, 0, "handleMem\n");
-        busy = false;
         if (auto* resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
             size_t var_count = resp->data.size() / sizeof(Variable);
             last_read.resize(var_count);
             memcpy(&last_read[0], resp->data.data(), resp->data.size());
         }
+    }
+
+    void init(int num_vars) {
+        output.verbose(CALL_INFO, 7, 0, "Initializing %d variables\n", num_vars);
+        std::vector<uint8_t> init_data((num_vars + 1) * sizeof(Variable), 0);
+        // not posted, and not cacheable
+        memory->sendUntimedData(new SST::Interfaces::StandardMem::Write(
+            var_base_addr, init_data.size(), init_data, false, 0x1));
     }
     
 private:
@@ -95,7 +99,6 @@ private:
     SST::Interfaces::StandardMem* memory;
     uint64_t var_base_addr;
     std::vector<Variable> last_read;
-    bool busy;
     coro_t::push_type** yield_ptr; // Store pointer to the yield_ptr in SATSolver
 };
 

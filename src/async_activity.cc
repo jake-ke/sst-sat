@@ -3,8 +3,7 @@
 
 Activity::Activity(int verbose, SST::Interfaces::StandardMem* mem, 
                    uint64_t base_addr, coro_t::push_type** yield_ptr)
-    : memory(mem), yield_ptr(yield_ptr), base_addr(base_addr),
-      size_(0), busy(false) {
+    : memory(mem), yield_ptr(yield_ptr), base_addr(base_addr), size_(0) {
     output.init("ACTIVITY-> ", verbose, 0, SST::Output::STDOUT);
 }
 
@@ -14,7 +13,6 @@ double Activity::read(size_t idx) {
     }
     
     memory->send(new SST::Interfaces::StandardMem::Read(calcAddr(idx), sizeof(double)));
-    busy = true;
     (**yield_ptr)();
     
     memcpy(&last_value, last_buffer.data(), sizeof(double));
@@ -27,7 +25,6 @@ void Activity::write(size_t idx, double value) {
     
     memory->send(new SST::Interfaces::StandardMem::Write(
         calcAddr(idx), sizeof(double), buffer));
-    busy = true;
     (**yield_ptr)();
 }
 
@@ -37,13 +34,41 @@ std::vector<double> Activity::readBulk(size_t start, size_t count) {
                      start, count, size_);
     }
     
-    memory->send(new SST::Interfaces::StandardMem::Read(
-        calcAddr(start), count * sizeof(double)));
-    busy = true;
-    (**yield_ptr)();
-    
     std::vector<double> result(count);
-    memcpy(result.data(), last_buffer.data(), count * sizeof(double));
+    
+    // Process the read in chunks that don't cross cache lines
+    size_t remaining = count;
+    size_t current_idx = start;
+    size_t result_offset = 0;
+    
+    while (remaining > 0) {
+        // Calculate address and alignment
+        uint64_t addr = calcAddr(current_idx);
+        uint64_t line_offset = addr % line_size;
+        
+        // Calculate max elements we can read without crossing a cache line
+        size_t elem_per_line = line_size / sizeof(double);
+        size_t line_remaining = (line_size - line_offset) / sizeof(double);
+        size_t chunk_size = std::min(remaining, line_remaining);
+        
+        output.verbose(CALL_INFO, 8, 0, 
+            "ReadBulk chunk: addr=0x%lx, elements=%zu, bytes=%zu, line_offset=%zu\n", 
+            addr, chunk_size, chunk_size * sizeof(double), line_offset);
+        
+        // Read this chunk
+        memory->send(new SST::Interfaces::StandardMem::Read(
+            addr, chunk_size * sizeof(double)));
+        (**yield_ptr)();
+        
+        // Copy to result
+        memcpy(&result[result_offset], last_buffer.data(), chunk_size * sizeof(double));
+        
+        // Update counters
+        remaining -= chunk_size;
+        current_idx += chunk_size;
+        result_offset += chunk_size;
+    }
+    
     return result;
 }
 
@@ -54,21 +79,39 @@ void Activity::writeBulk(size_t start, const std::vector<double>& values) {
                      start, count, size_);
     }
     
-    std::vector<uint8_t> buffer(count * sizeof(double));
-    memcpy(buffer.data(), values.data(), buffer.size());
+    // Process the write in chunks that don't cross cache lines
+    size_t remaining = count;
+    size_t current_idx = start;
+    size_t values_offset = 0;
     
-    memory->send(new SST::Interfaces::StandardMem::Write(
-        calcAddr(start), buffer.size(), buffer));
-    busy = true;
-    (**yield_ptr)();
-}
-
-void Activity::initialize(size_t count, double init_value) {
-    size_ = count;
-    if (count == 0) return;
-    
-    std::vector<double> values(count, init_value);
-    writeBulk(0, values);
+    while (remaining > 0) {
+        // Calculate address and alignment
+        uint64_t addr = calcAddr(current_idx);
+        uint64_t line_offset = addr % line_size;
+        
+        // Calculate max elements we can write without crossing a cache line
+        size_t elem_per_line = line_size / sizeof(double);
+        size_t line_remaining = (line_size - line_offset) / sizeof(double);
+        size_t chunk_size = std::min(remaining, line_remaining);
+        
+        output.verbose(CALL_INFO, 8, 0, 
+            "WriteBulk chunk: addr=0x%lx, elements=%zu, bytes=%zu, line_offset=%zu\n", 
+            addr, chunk_size, chunk_size * sizeof(double), line_offset);
+        
+        // Prepare buffer for this chunk
+        std::vector<uint8_t> buffer(chunk_size * sizeof(double));
+        memcpy(buffer.data(), &values[values_offset], chunk_size * sizeof(double));
+        
+        // Write this chunk
+        memory->send(new SST::Interfaces::StandardMem::Write(
+            addr, chunk_size * sizeof(double), buffer));
+        (**yield_ptr)();
+        
+        // Update counters
+        remaining -= chunk_size;
+        current_idx += chunk_size;
+        values_offset += chunk_size;
+    }
 }
 
 void Activity::push(double value) {
@@ -106,8 +149,6 @@ void Activity::reduceDB(const std::vector<bool>& to_remove, size_t num_orig) {
 }
 
 void Activity::handleMem(SST::Interfaces::StandardMem::Request* req) {
-    busy = false;
-    
     if (auto* resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
         last_buffer = resp->data;
     }

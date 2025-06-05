@@ -12,19 +12,17 @@
 // Events for heap operations
 class HeapReqEvent : public SST::Event {
 public:
-    enum OpType { INIT, INSERT, REMOVE_MIN, IN_HEAP, READ, BUMP };
+    enum OpType { INSERT, REMOVE_MIN, IN_HEAP, READ, BUMP };
     OpType op;
     int arg;
-    double var_inc;
     HeapReqEvent() : op(HeapReqEvent::READ), arg(0) {}
-    HeapReqEvent(OpType o, int a = 0, double b = 0.0)
-        : op(o), arg(a), var_inc(b) {}
+    HeapReqEvent(OpType o, int a = 0)
+        : op(o), arg(a) {}
     
     void serialize_order(SST::Core::Serialization::serializer& ser) override {
         Event::serialize_order(ser);
         ser & op;
         ser & arg;
-        ser & var_inc;
     }
     ImplementSerializable(HeapReqEvent);
 };
@@ -72,14 +70,15 @@ public:
     
     size_t heap_size;
     std::vector<bool> decision;         // Whether variable is eligible for decisions
+    double* var_inc_ptr;
 
     bool tick(SST::Cycle_t cycle);
     void handleMem(SST::Interfaces::StandardMem::Request* req);
     void handleRequest(HeapReqEvent* req);
+    void initHeap();
 
     size_t size() const { return heap_size; }
     bool empty() const { return heap_size == 0; }
-    bool busy() const { return state != IDLE; }
     
     enum State { IDLE, WAIT, START, STEP };
     State state;
@@ -95,7 +94,7 @@ private:
     coro_t::push_type* heap_sink_ptr;  // Pointer to current coroutine sink
     Var key;
     int idx, read_data;
-    double var_inc;
+    size_t line_size;
     
     VarActivity var_activity;
     uint64_t var_act_base_addr;  // Base address for variable activity array
@@ -114,13 +113,15 @@ private:
 
     void percolateUp(int i);
     void percolateDown(int i);
-    void initHeap();
     void readHeap();
     void inHeap();
     void insert();
     void decrease();
     void removeMin();
     void varBump();
+
+public:
+    void setLineSize(size_t size) { line_size = size; var_activity.setLineSize(size); }
 };
 
 #endif

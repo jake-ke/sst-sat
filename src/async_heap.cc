@@ -33,13 +33,6 @@ bool Heap::tick(SST::Cycle_t cycle) {
         output.verbose(CALL_INFO, 7, 0, "Tick %lu: state %d, OP: %d\n", cycle, state, current_op);
         case START:
             switch(current_op) {
-                case HeapReqEvent::INIT:
-                    heap_source = new coro_t::pull_type(
-                        [this](coro_t::push_type &heap_sink) { 
-                            heap_sink_ptr = &heap_sink; 
-                            initHeap(); 
-                        });
-                    break;
                 case HeapReqEvent::INSERT:
                     heap_source = new coro_t::pull_type(
                         [this](coro_t::push_type &heap_sink) { 
@@ -97,19 +90,18 @@ bool Heap::tick(SST::Cycle_t cycle) {
 }
 
 void Heap::handleMem(SST::Interfaces::StandardMem::Request* req) {
+    output.verbose(CALL_INFO, 8, 0, "handleMem for Heap\n");
     uint64_t addr = 0;
-    if (auto* read_req = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req))
+    if (auto* read_req = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
         addr = read_req->pAddr;
-    else if (auto* write_req = dynamic_cast<SST::Interfaces::StandardMem::WriteResp*>(req))
-        addr = write_req->pAddr;
-    
-    // Check if this response is for VarActivity
-    if (addr >= var_act_base_addr) {
-        var_activity.handleMem(req);
-    } else {
-        // This is a heap or indices memory response
-        if (auto resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req))
-            memcpy(&read_data, resp->data.data(), sizeof(Var));
+        // Check if this response is for VarActivity
+        if (addr >= var_act_base_addr) {
+            var_activity.handleMem(req);
+        } else {
+            // Store data from read response
+            memcpy(&read_data, read_req->data.data(), 
+                   std::min(sizeof(Var), read_req->data.size()));
+        }
     }
     
     outstanding_mem_requests--;
@@ -124,21 +116,20 @@ void Heap::handleRequest(HeapReqEvent* req) {
     current_op = req->op;
     // request arg can be key or idx depending on operation
     key = req->arg;
-    var_inc = req->var_inc;
     idx = key;
     state = START;
 }
 
-Var Heap::read(uint64_t addr) { 
+Var Heap::read(uint64_t addr) {
     memory->send(new SST::Interfaces::StandardMem::Read(addr, sizeof(Var)));
     outstanding_mem_requests++;
-    state = WAIT;  // Wait for response
+    state = WAIT;
     (*heap_sink_ptr)();
-
+    
     return read_data;
 }
 
-void Heap::write(uint64_t addr, Var val) { 
+void Heap::write(uint64_t addr, Var val) {
     std::vector<uint8_t> data(sizeof(Var));
     memcpy(data.data(), &val, sizeof(Var));
     memory->send(new SST::Interfaces::StandardMem::Write(addr, sizeof(Var), data));
@@ -284,7 +275,7 @@ void Heap::removeMin() {
 }
 
 void Heap::initHeap() {
-    output.verbose(CALL_INFO, 1, 0, "Initializing heap with %ld decision variables\n", heap_size);
+    output.verbose(CALL_INFO, 7, 0, "Initializing heap with %ld decision variables\n", heap_size);
     // Count decision variables and prepare data in one pass
     std::vector<uint8_t> heap_data;
     std::vector<int> pos_map(heap_size + 1, -1);  // All indices start as -1 (not in heap)
@@ -305,37 +296,34 @@ void Heap::initHeap() {
     memcpy(indices_data.data(), pos_map.data(), indices_data.size());
     
     // Send bulk writes
-    memory->send(new SST::Interfaces::StandardMem::Write(heap_addr, heap_data.size(), heap_data));
-    outstanding_mem_requests++;
-    state = WAIT;
-    (*heap_sink_ptr)();
+    memory->sendUntimedData(new SST::Interfaces::StandardMem::Write(
+        heap_addr, heap_data.size(), heap_data,
+        false, 0x1));  // not posted, and not cacheable
     
-    memory->send(new SST::Interfaces::StandardMem::Write(indices_addr, indices_data.size(), indices_data));
-    outstanding_mem_requests++;
-    state = WAIT;
-    (*heap_sink_ptr)();
+    memory->sendUntimedData(new SST::Interfaces::StandardMem::Write(
+        indices_addr, indices_data.size(), indices_data,
+        false, 0x1));  // not posted, and not cacheable
 
-    // initialize var_activity
+    // Initialize var_activity
+    output.verbose(CALL_INFO, 7, 0, "Intializing var_activity\n");
     var_activity.initialize(heap_size + 1, 0.0);
-    
-    complete(true);
 }
 
 void Heap::varBump() {
     output.verbose(CALL_INFO, 7, 0, "bumped activity for var %d\n", key);
 
     double act = var_activity[key];
+    double new_act = act + *(var_inc_ptr);
 
-    var_activity[key] = act + var_inc;
+    var_activity[key] = new_act;
 
-    bool rescale = false;
-    if ((act + var_inc) > 1e100) {
+    if (new_act > 1e100) {
         output.verbose(CALL_INFO, 7, 0, "Rescaling variable activity\n");
         var_activity.rescaleAll(1e-100);
-        rescale = true;
+        *var_inc_ptr = 1e-100;
     }
 
     decrease();
     
-    complete(rescale);
+    complete(true);
 }
