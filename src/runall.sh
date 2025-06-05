@@ -132,7 +132,7 @@ run_single_test() {
     append_to_file_safely "$progress_file" "START|$filename|$start_time"
     
     # Build command based on whether decision file exists
-    local command="timeout 3600 sst ../tests/test_basic.py -- --cnf \"$file\""
+    local command="timeout 5400 sst ../tests/test_basic.py -- --cnf \"$file\""
     if [[ -n "$DECISION_DIR" ]]; then
         local decision_file="${DECISION_DIR}/${filename}.dec"
         if [[ -f "$decision_file" ]]; then
