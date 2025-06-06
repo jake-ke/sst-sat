@@ -29,11 +29,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     curr_restarts(0),
     conflicts_until_restart(restart_first),
     conflictC(0),
-    yield_ptr(nullptr),
-    variables(0, nullptr, 0, nullptr),
-    watches(0, nullptr, 0, 0, nullptr),
-    clauses(0, nullptr, 0, 0, nullptr),
-    cla_activity(0, nullptr, 0, nullptr) {
+    yield_ptr(nullptr) {
     
     // Initialize output
     int verbose = params.find<int>("verbose", 0);
@@ -115,7 +111,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     clauses = Clauses(verbose, global_memory, clauses_cmd_base_addr, clauses_base_addr, &yield_ptr);
     
     // Create Activity objects
-    cla_activity = Activity(verbose, global_memory, clause_act_base_addr, &yield_ptr);
+    cla_activity = Activity("CLA_ACT->", verbose, global_memory, clause_act_base_addr, &yield_ptr);
     
     // Load the heap subcomponent
     order_heap = loadUserSubComponent<Heap>("order_heap",
@@ -1010,7 +1006,7 @@ void SATSolver::reduceDB() {
     output.verbose(CALL_INFO, 3, 0, "REDUCEDB: Starting clause database reduction\n");
     
     size_t nl = nLearnts();
-    std::vector<double> activities = cla_activity.readBulk(0, nl);
+    std::vector<double> activities = cla_activity.readBurstAct(0, nl);
     
     // Create pairs of (idx, activity) for sorting
     std::vector<std::pair<int, double>> learnts(nl);
@@ -1114,7 +1110,8 @@ void SATSolver::reduceDB() {
     
     // 8. Compact clauses by moving non-removed learnt clauses forward
     clauses.reduceDB(to_remove);
-    cla_activity.reduceDB(to_remove, num_clauses);
+    std::vector<bool> to_remove_learned = std::vector<bool>(to_remove.begin() + num_clauses, to_remove.end());
+    cla_activity.reduceDB(activities, to_remove_learned);
     
     output.verbose(CALL_INFO, 3, 0, 
         "REDUCEDB: Removed %d learnt clauses, new clause count: %zu\n", 

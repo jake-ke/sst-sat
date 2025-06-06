@@ -35,14 +35,15 @@ public:
         void insert(int clause_idx, Lit blocker) { parent->insertWatcher(lit_idx, clause_idx, blocker); }
     };
 
-    Watches(int verbose, SST::Interfaces::StandardMem* mem, uint64_t watches_base_addr, 
-            uint64_t nodes_base_addr, coro_t::push_type** yield_ptr = nullptr)
+    Watches(int verbose = 0, SST::Interfaces::StandardMem* mem = nullptr,
+            uint64_t watches_base_addr = 0, uint64_t nodes_base_addr = 0,
+            coro_t::push_type** yield_ptr = nullptr)
         : AsyncBase("WATCH-> ", verbose, mem, yield_ptr), 
           watches_base_addr(watches_base_addr), 
           nodes_base_addr(nodes_base_addr), 
           next_free_node(nodes_base_addr) {
         output.verbose(CALL_INFO, 1, 0, 
-            "Watches base address: 0x%lx, nodes base: 0x%lx\n", 
+            "base addresses: watchlist=0x%lx, nodes=0x%lx\n", 
             watches_base_addr, nodes_base_addr);
     }
 

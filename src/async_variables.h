@@ -39,10 +39,10 @@ public:
         }
     };
 
-    Variables(int verbose, SST::Interfaces::StandardMem* mem, uint64_t var_base_addr, 
-        coro_t::push_type** yield_ptr = nullptr)
+    Variables(int verbose = 0, SST::Interfaces::StandardMem* mem = nullptr,
+              uint64_t var_base_addr = 0, coro_t::push_type** yield_ptr = nullptr)
         : AsyncBase("VAR-> ", verbose, mem, yield_ptr), var_base_addr(var_base_addr) {
-        output.verbose(CALL_INFO, 1, 0, "Variables base address: 0x%lx\n", var_base_addr);
+        output.verbose(CALL_INFO, 1, 0, "base address: 0x%lx\n", var_base_addr);
     }
 
     uint64_t varAddr(int var_idx) const { return var_base_addr + var_idx * sizeof(Variable); }

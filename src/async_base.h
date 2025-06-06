@@ -6,12 +6,16 @@
 #include <boost/coroutine2/all.hpp>
 #include <vector>
 #include <cstring>
+#include <functional>
 #include "structs.h"
 
 using coro_t = boost::coroutines2::coroutine<void>;
 
 class AsyncBase {
 public:
+    // Function type for pre-yield callbacks
+    using PreYieldCallback = std::function<void()>;
+    
     AsyncBase(const std::string& prefix, int verbose, SST::Interfaces::StandardMem* mem, 
               coro_t::push_type** yield_ptr = nullptr);
     virtual ~AsyncBase() = default;
@@ -30,10 +34,17 @@ public:
     
     // Configuration
     void setLineSize(size_t size) { line_size = size; }
+    void setPreYieldCallback(PreYieldCallback cb) { pre_yield_callback = cb; }
     size_t size() const { return size_; }
     bool empty() const { return size_ == 0; }
 
 protected:
+    // Helper method to perform the yield operation
+    void doYield() {
+        if (pre_yield_callback) pre_yield_callback();
+        (**yield_ptr)();
+    }
+
     // Cache line alignment helpers
     struct CacheChunk {
         uint64_t addr;
@@ -46,6 +57,7 @@ protected:
     SST::Output output;
     SST::Interfaces::StandardMem* memory;
     coro_t::push_type** yield_ptr;
+    PreYieldCallback pre_yield_callback;
     size_t line_size;
     std::vector<uint8_t> read_buffer;  // Stores the last read data
     std::vector<uint8_t> burst_buffer;  // Stores accumulated data for burst operations

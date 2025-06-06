@@ -3,20 +3,20 @@
 
 AsyncBase::AsyncBase(const std::string& prefix, int verbose, SST::Interfaces::StandardMem* mem, 
                      coro_t::push_type** yield_ptr)
-    : memory(mem), yield_ptr(yield_ptr), line_size(64), size_(0) {
+    : memory(mem), yield_ptr(yield_ptr), pre_yield_callback(nullptr), line_size(64), size_(0) {
     output.init(prefix.c_str(), verbose, 0, SST::Output::STDOUT);
 }
 
 void AsyncBase::read(uint64_t addr, size_t size) {
     output.verbose(CALL_INFO, 8, 0, "Read at 0x%lx, size %zu\n", addr, size);
     memory->send(new SST::Interfaces::StandardMem::Read(addr, size));
-    (**yield_ptr)();
+    doYield();
 }
 
 void AsyncBase::write(uint64_t addr, size_t size, const std::vector<uint8_t>& data) {
     output.verbose(CALL_INFO, 8, 0, "Write at 0x%lx, size %zu\n", addr, size);
     memory->send(new SST::Interfaces::StandardMem::Write(addr, size, data, false));
-    (**yield_ptr)();
+    doYield();
 }
 
 void AsyncBase::writeUntimed(uint64_t addr, size_t size, const std::vector<uint8_t>& data) {
@@ -66,7 +66,7 @@ void AsyncBase::readBurst(uint64_t start_addr, size_t element_size, size_t count
         
         // Perform the read operation - this updates read_buffer
         memory->send(new SST::Interfaces::StandardMem::Read(chunk.addr, aligned_size));
-        (**yield_ptr)();
+        doYield();
         
         // Copy data from read_buffer to the correct position in burst_buffer
         memcpy(burst_buffer.data() + chunk.offset_in_data, 
@@ -96,7 +96,7 @@ void AsyncBase::writeBurst(uint64_t start_addr, size_t element_size, const std::
         
         memory->send(new SST::Interfaces::StandardMem::Write(
             chunk.addr, aligned_size, chunk_data, false));
-        (**yield_ptr)();
+        doYield();
     }
 }
 

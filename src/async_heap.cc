@@ -9,6 +9,8 @@ Heap::Heap(SST::ComponentId_t id, SST::Params& params,
                    params.find<uint64_t>("var_act_base_addr", 0x70000000), this) {
     
     output.init("HEAP-> ", params.find<int>("verbose", 0), 0, SST::Output::STDOUT);
+    output.verbose(CALL_INFO, 1, 0, "base addresses: heap=0x%lx, indices=0x%lx\n", 
+                   heap_base_addr, indices_base_addr);
 
     registerClock(params.find<std::string>("clock", "1GHz"),
         new SST::Clock::Handler<Heap>(this, &Heap::tick));
@@ -20,10 +22,6 @@ Heap::Heap(SST::ComponentId_t id, SST::Params& params,
     
     // Set up VarActivity to use our heap_sink_ptr
     var_activity.setHeapSinkPtr(&heap_sink_ptr);
-}
-
-bool Heap::lt(Var x, Var y) {
-    return var_activity[x] > var_activity[y];
 }
 
 bool Heap::tick(SST::Cycle_t cycle) {
@@ -307,6 +305,10 @@ void Heap::initHeap() {
     // Initialize var_activity
     output.verbose(CALL_INFO, 7, 0, "Intializing var_activity\n");
     var_activity.initialize(heap_size + 1, 0.0);
+}
+
+bool Heap::lt(Var x, Var y) {
+    return var_activity[x] > var_activity[y];
 }
 
 void Heap::varBump() {
