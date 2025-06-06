@@ -9,6 +9,7 @@
 #include <vector>
 #include <queue>
 #include "structs.h"
+#include "async_base.h"
 
 // Node in the linked list of watchers
 struct WatcherNode {
@@ -20,7 +21,7 @@ struct WatcherNode {
     WatcherNode(int ci, Lit b, uint64_t n = 0) : clause_idx(ci), blocker(b), next(n) {}
 };
 
-class Watches {
+class Watches : public AsyncBase {
 public:
     // Proxy class for watch list access using []
     class WatchListProxy {
@@ -36,18 +37,19 @@ public:
 
     Watches(int verbose, SST::Interfaces::StandardMem* mem, uint64_t watches_base_addr, 
             uint64_t nodes_base_addr, coro_t::push_type** yield_ptr = nullptr)
-        : memory(mem), watches_base_addr(watches_base_addr), 
-          nodes_base_addr(nodes_base_addr), num_watches(0),
-          next_free_node(nodes_base_addr), yield_ptr(yield_ptr) {
-        output.init("WATCH-> ", verbose, 0, SST::Output::STDOUT);
+        : AsyncBase("WATCH-> ", verbose, mem, yield_ptr), 
+          watches_base_addr(watches_base_addr), 
+          nodes_base_addr(nodes_base_addr), 
+          next_free_node(nodes_base_addr) {
+        output.verbose(CALL_INFO, 1, 0, 
+            "Watches base address: 0x%lx, nodes base: 0x%lx\n", 
+            watches_base_addr, nodes_base_addr);
     }
 
     WatchListProxy operator[](int idx) { return WatchListProxy(this, idx); }
-    size_t size() const { return num_watches; }
     void freeNode(uint64_t addr) { free_nodes.push(addr); }
     uint64_t getLastHeadPointer() const { return last_head_ptr; }
     WatcherNode getLastReadNode() const { return last_node; }
-    void setLineSize(size_t size) { line_size = size; }
         
     // Memory address calculations
     uint64_t watchesAddr(int idx) const { return watches_base_addr + idx * sizeof(uint64_t); }
@@ -61,17 +63,12 @@ public:
     void initWatches(size_t watch_count, std::vector<Clause>& clauses);
     void insertWatcher(int lit_idx, int clause_idx, Lit blocker);
     void removeWatcher(int lit_idx, int clause_idx);
-    void handleMem(SST::Interfaces::StandardMem::Request* req);
+    void handleMem(SST::Interfaces::StandardMem::Request* req) override;
 
 private:
-    SST::Output output;
-    SST::Interfaces::StandardMem* memory;
     uint64_t watches_base_addr;    // Base address of the watches array (head pointers)
     uint64_t nodes_base_addr;      // Base address for watcher nodes
-    size_t num_watches;            // Number of watch lists
     uint64_t next_free_node;       // Next free address for node allocation
-    coro_t::push_type** yield_ptr; // Pointer to the yield_ptr in SATSolver
-    size_t line_size;              // Added cache line size
     
     // Free list for recycling nodes
     std::queue<uint64_t> free_nodes;

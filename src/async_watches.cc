@@ -16,75 +16,29 @@ uint64_t Watches::allocateNode() {
     return addr;
 }
 
-// Read head pointer for a literal
 void Watches::readHeadPointer(int lit_idx) {
     output.verbose(CALL_INFO, 7, 0, "Read head pointer for var %d\n", lit_idx/2);
-    memory->send(new SST::Interfaces::StandardMem::Read(
-        watchesAddr(lit_idx), sizeof(uint64_t)));
-    (**yield_ptr)();
+    read(watchesAddr(lit_idx), sizeof(uint64_t));
 }
 
-// Write head pointers (for initialization)
 void Watches::writeHeadPointer(int start_idx, const uint64_t headptr) {
     std::vector<uint8_t> data(sizeof(uint64_t));
     memcpy(data.data(), &headptr, sizeof(uint64_t));
-    
+    write(watchesAddr(start_idx), sizeof(uint64_t), data);
     output.verbose(CALL_INFO, 7, 0, 
         "Write head pointers[%d], 0x%lx\n", start_idx, headptr);
-    memory->send(new SST::Interfaces::StandardMem::Write(
-        watchesAddr(start_idx), sizeof(uint64_t), data));
-    (**yield_ptr)();
 }
 
-// Read a watcher node from memory
 void Watches::readNode(uint64_t addr) {
     output.verbose(CALL_INFO, 7, 0, "Read watcher node at 0x%lx\n", addr);
-    memory->send(new SST::Interfaces::StandardMem::Read(
-        addr, sizeof(WatcherNode)));
-    (**yield_ptr)();
+    read(addr, sizeof(WatcherNode));
 }
 
-// Write a watcher node to memory
 void Watches::writeNode(uint64_t addr, const WatcherNode& node) {
-    // Check if node spans a cache line boundary
-    uint64_t end_addr = addr + sizeof(WatcherNode) - 1;
-    uint64_t start_line = addr / line_size;
-    uint64_t end_line = end_addr / line_size;
-    
-    if (start_line == end_line) {
-        // Node doesn't cross a cache line boundary
-        std::vector<uint8_t> data(sizeof(WatcherNode));
-        memcpy(data.data(), &node, sizeof(WatcherNode));
-        
-        output.verbose(CALL_INFO, 7, 0, "Write watcher node at 0x%lx\n", addr);
-        memory->send(new SST::Interfaces::StandardMem::Write(
-            addr, sizeof(WatcherNode), data));
-        (**yield_ptr)();
-    } else {
-        // Node crosses a cache line boundary, split the write
-        size_t bytes_in_first_line = line_size - (addr % line_size);
-        
-        // First write up to the cache line boundary
-        std::vector<uint8_t> data1(bytes_in_first_line);
-        memcpy(data1.data(), &node, bytes_in_first_line);
-        
-        output.verbose(CALL_INFO, 7, 0, "Write watcher node part 1 at 0x%lx, %zu bytes\n", 
-                      addr, bytes_in_first_line);
-        memory->send(new SST::Interfaces::StandardMem::Write(
-            addr, bytes_in_first_line, data1));
-        (**yield_ptr)();
-        
-        // Second write for the remainder
-        size_t remaining_bytes = sizeof(WatcherNode) - bytes_in_first_line;
-        std::vector<uint8_t> data2(remaining_bytes);
-        memcpy(data2.data(), reinterpret_cast<const uint8_t*>(&node) + bytes_in_first_line, remaining_bytes);
-        
-        output.verbose(CALL_INFO, 7, 0, "Write watcher node part 2 at 0x%lx, %zu bytes\n", 
-                      addr + bytes_in_first_line, remaining_bytes);
-        memory->send(new SST::Interfaces::StandardMem::Write(
-            addr + bytes_in_first_line, remaining_bytes, data2));
-        (**yield_ptr)();
-    }
+    output.verbose(CALL_INFO, 7, 0, "Write watcher node at 0x%lx\n", addr);
+    std::vector<uint8_t> data(sizeof(WatcherNode));
+    memcpy(data.data(), &node, sizeof(WatcherNode));
+    write(addr, sizeof(WatcherNode), data);
 }
 
 void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
@@ -92,7 +46,7 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
     
     // First, allocate and initialize head pointers to null
     std::vector<uint64_t> head_ptrs(watch_count, 0);
-    num_watches = watch_count;
+    size_ = watch_count;
     
     // Create temporary data structure to build the linked lists
     std::vector<std::vector<std::pair<int, Lit>>> tmp_watches(watch_count);
@@ -117,15 +71,6 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
         total_nodes += watch_list.size();
     }
     output.verbose(CALL_INFO, 3, 0, "Creating %zu watcher nodes\n", total_nodes);
-    
-    if (total_nodes == 0) {
-        // If no nodes, just write empty head pointers
-        memory->sendUntimedData(new SST::Interfaces::StandardMem::Write(
-            watches_base_addr, watch_count * sizeof(uint64_t), 
-            std::vector<uint8_t>(watch_count * sizeof(uint64_t), 0),
-            false, 0x1));  // not posted, and not cacheable
-        return;
-    }
     
     // Allocate memory for all nodes at once
     std::vector<WatcherNode> all_nodes(total_nodes);
@@ -158,9 +103,7 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
     // Write all nodes to memory in one operation
     std::vector<uint8_t> node_data(total_nodes * sizeof(WatcherNode));
     memcpy(node_data.data(), all_nodes.data(), node_data.size());
-    
-    memory->sendUntimedData(new SST::Interfaces::StandardMem::Write(
-        nodes_base_addr, node_data.size(), node_data, false, 0x1));  // not posted, and not cacheable
+    writeUntimed(nodes_base_addr, node_data.size(), node_data);
     
     // Update next_free_node to point after our allocated nodes
     next_free_node = nodes_base_addr + total_nodes * sizeof(WatcherNode);
@@ -168,11 +111,9 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
     // Write all head pointers in one operation
     std::vector<uint8_t> ptr_data(watch_count * sizeof(uint64_t));
     memcpy(ptr_data.data(), head_ptrs.data(), ptr_data.size());
+    writeUntimed(watches_base_addr, ptr_data.size(), ptr_data);
     
-    memory->sendUntimedData(new SST::Interfaces::StandardMem::Write(
-        watches_base_addr, ptr_data.size(), ptr_data, false, 0x1));  // not posted, and not cacheable
-    
-    output.verbose(CALL_INFO, 3, 0, 
+    output.verbose(CALL_INFO, 7, 0, 
         "Watch initialization complete: wrote %zu nodes, next free at 0x%lx\n", 
         total_nodes, next_free_node);
 }
@@ -236,13 +177,10 @@ void Watches::removeWatcher(int lit_idx, int clause_idx) {
 
 // Handle memory response
 void Watches::handleMem(SST::Interfaces::StandardMem::Request* req) {
-    output.verbose(CALL_INFO, 8, 0, "handleMem\n");
-    
     if (auto* resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
         uint64_t addr = resp->pAddr;
-        
         // Determine if this is a head pointer read or a node read based on address range
-        if (addr >= watches_base_addr && addr < watches_base_addr + num_watches * sizeof(uint64_t)) {
+        if (addr >= watches_base_addr && addr < watches_base_addr + size_ * sizeof(uint64_t)) {
             // Head pointer read
             memcpy(&last_head_ptr, resp->data.data(), sizeof(uint64_t));
             output.verbose(CALL_INFO, 7, 0, 
@@ -253,9 +191,6 @@ void Watches::handleMem(SST::Interfaces::StandardMem::Request* req) {
             output.verbose(CALL_INFO, 7, 0, 
                 "Node read response: clause=%d, blocker=%d, next=0x%lx for address 0x%lx\n", 
                 last_node.clause_idx, toInt(last_node.blocker), last_node.next, addr);
-        } else {
-            output.fatal(CALL_INFO, -1, 
-                "Memory response for unknown address range: 0x%lx\n", addr);
         }
     }
 }
