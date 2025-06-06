@@ -142,25 +142,63 @@ global_iface = solver.setSubComponent("global_memory", "memHierarchy.standardInt
 global_cache = sst.Component("global_l1cache", "memHierarchy.Cache")
 global_cache.addParams({
     "cache_frequency"    : "1GHz",
-    "cache_size"         : "2KiB",
+    "cache_size"         : "32KiB",
     "cache_line_size"    : "64",
-    "associativity"      : "4",
-    "access_latency_cycles" : "2",
+    "associativity"      : "8",
+    "access_latency_cycles" : "1",
     "L1"                 : "1",
     "replacement_policy" : "lru",
     "coherence_protocol" : "MSI",
-    "verbose"            : "2",
-    "debug" : "1",
+    "verbose"            : "0",
+    "debug" : "0",
     "debug_level" : "10",
+    "statistics" : "1",           # Enable statistics for cache
+    "collect_stats" : "1"         # Make sure stats are collected
+})
+
+# Create L2 cache
+global_l2cache = sst.Component("global_l2cache", "memHierarchy.Cache")
+global_l2cache.addParams({
+    "cache_frequency"    : "1GHz",
+    "cache_size"         : "2MiB",
+    "cache_line_size"    : "64",
+    "associativity"      : "16",
+    "access_latency_cycles" : "5",
+    "L1"                 : "0",
+    "replacement_policy" : "lru",
+    "coherence_protocol" : "MSI",
+    "verbose"            : "0",
+    "debug" : "0",
+    "debug_level" : "10",
+    "statistics" : "1",
+    "collect_stats" : "1"
+})
+
+# Create L3 cache
+global_l3cache = sst.Component("global_l3cache", "memHierarchy.Cache")
+global_l3cache.addParams({
+    "cache_frequency"    : "1GHz",
+    "cache_size"         : "36MiB",
+    "cache_line_size"    : "64",
+    "associativity"      : "12",
+    "access_latency_cycles" : "10",
+    "L1"                 : "0",
+    "replacement_policy" : "lru",
+    "coherence_protocol" : "MSI",
+    "verbose"            : "0",
+    "debug" : "0",
+    "debug_level" : "10",
+    "statistics" : "1",
+    "collect_stats" : "1"
 })
 
 # Create memory controller for global operations
 global_memctrl = sst.Component("global_memory", "memHierarchy.MemController")
 global_memctrl.addParams({
     "clock" : "1GHz",
-    "debug" : "1",
+    "debug" : "0",
     "debug_level" : "10",
-    "verbose" : "2",
+    "verbose" : "0",
     "addr_range_start" : "0",
     "addr_range_end" : "0xFFFFFFFF",
     "mem_size" : "4GiB",
@@ -185,9 +223,17 @@ cnf_mem_link.connect((cnf_iface, "lowlink", "1ns"), (cnf_memctrl, "highlink", "1
 cpu_to_cache_link = sst.Link("cpu_to_cache_link")
 cpu_to_cache_link.connect((global_iface, "lowlink", "1ns"), (global_cache, "highlink", "1ns"))
 
-# Connect L1 cache to global memory controller
-cache_to_mem_link = sst.Link("cache_to_mem_link")
-cache_to_mem_link.connect((global_cache, "lowlink", "50ps"), (global_memctrl, "highlink", "50ps"))
+# Connect L1 cache to L2 cache
+l1_to_l2_link = sst.Link("l1_to_l2_link")
+l1_to_l2_link.connect((global_cache, "lowlink", "50ps"), (global_l2cache, "highlink", "50ps"))
+
+# Connect L2 cache to L3 cache
+l2_to_l3_link = sst.Link("l2_to_l3_link")
+l2_to_l3_link.connect((global_l2cache, "lowlink", "50ps"), (global_l3cache, "highlink", "50ps"))
+
+# Connect L3 cache to global memory controller (replacing the previous direct L1-to-memory connection)
+l3_to_mem_link = sst.Link("l3_to_mem_link")
+l3_to_mem_link.connect((global_l3cache, "lowlink", "50ps"), (global_memctrl, "highlink", "50ps"))
 
 # Enable statistics - different types for different stats
 sst.setStatisticLoadLevel(7)
@@ -209,5 +255,34 @@ sst.enableStatisticsForComponentName("solver", [
     "rate": "1ms"
 })
 
+# Enable cache statistics for the L1 cache
+sst.enableStatisticsForComponentName("global_l1cache", [
+    "CacheHits", 
+    "CacheMisses",
+], {
+    "type": "sst.AccumulatorStatistic",
+    "rate": "1ms"
+})
+
+# Enable cache statistics for the L2 cache
+sst.enableStatisticsForComponentName("global_l2cache", [
+    "CacheHits", 
+    "CacheMisses",
+], {
+    "type": "sst.AccumulatorStatistic",
+    "rate": "1ms"
+})
+
+# Enable cache statistics for the L3 cache
+sst.enableStatisticsForComponentName("global_l3cache", [
+    "CacheHits", 
+    "CacheMisses",
+], {
+    "type": "sst.AccumulatorStatistic",
+    "rate": "1ms"
+})
+
+# Set statistics output to CSV file
+sst.setStatisticLoadLevel(7)
 sst.setStatisticOutput("sst.statOutputCSV", 
-    {"filepath": args.stats_file, "separator": "," })
+    {"filepath": args.stats_file, "separator": ","})
