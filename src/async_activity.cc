@@ -11,7 +11,7 @@ void Activity::push(double value) {
 }
 
 void Activity::rescaleAll(double factor) {
-    std::vector<double> values = readBurstAct(calcAddr(0), size_);
+    std::vector<double> values = readBurstAct(0, size_);
     
     for (size_t i = 0; i < size_; i++) {
         values[i] *= factor;
