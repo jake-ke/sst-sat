@@ -130,10 +130,10 @@ Var Heap::read(uint64_t addr) {
 void Heap::write(uint64_t addr, Var val) {
     std::vector<uint8_t> data(sizeof(Var));
     memcpy(data.data(), &val, sizeof(Var));
-    memory->send(new SST::Interfaces::StandardMem::Write(addr, sizeof(Var), data));
-    outstanding_mem_requests++;
-    state = WAIT;  // Wait for response 
-    (*heap_sink_ptr)();
+    memory->send(new SST::Interfaces::StandardMem::Write(addr, sizeof(Var), data, false));
+    // outstanding_mem_requests++;
+    // state = WAIT;  // Wait for response 
+    // (*heap_sink_ptr)();
 }
 
 void Heap::complete(int res) {

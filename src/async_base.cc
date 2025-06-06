@@ -16,7 +16,7 @@ void AsyncBase::read(uint64_t addr, size_t size) {
 void AsyncBase::write(uint64_t addr, size_t size, const std::vector<uint8_t>& data) {
     output.verbose(CALL_INFO, 8, 0, "Write at 0x%lx, size %zu\n", addr, size);
     memory->send(new SST::Interfaces::StandardMem::Write(addr, size, data, false));
-    doYield();
+    // doYield();
 }
 
 void AsyncBase::writeUntimed(uint64_t addr, size_t size, const std::vector<uint8_t>& data) {
@@ -96,7 +96,7 @@ void AsyncBase::writeBurst(uint64_t start_addr, size_t element_size, const std::
         
         memory->send(new SST::Interfaces::StandardMem::Write(
             chunk.addr, aligned_size, chunk_data, false));
-        doYield();
+        // doYield();
     }
 }
 

@@ -356,34 +356,28 @@ void SATSolver::handleCnfMemEvent(SST::Interfaces::StandardMem::Request* req) {
 
 void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req) {
     sst_assert(req != nullptr, CALL_INFO, -1, "Received null request in handleGlobalMemEvent\n");
-    output.verbose(CALL_INFO, 8, 0, "handleGlobalMemEvent received\n");
-    
-    // Get the address from the request
-    uint64_t addr = 0;
     if (auto* read_req = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
-        addr = read_req->pAddr;
-    } else if (auto* write_req = dynamic_cast<SST::Interfaces::StandardMem::WriteResp*>(req)) {
-        addr = write_req->pAddr;
+        uint64_t addr = read_req->pAddr;
+        output.verbose(CALL_INFO, 8, 0, "handleGlobalMemEvent received for 0x%lx\n", addr);
+    
+        // Route the request to the appropriate handler based on address range
+        if (addr >= clause_act_base_addr) {
+            cla_activity.handleMem(req);
+            state = STEP;
+        } else if (addr >= var_act_base_addr) {
+            order_heap->handleMem(req);
+        } else if (addr >= clauses_cmd_base_addr) {  // Clauses request
+            clauses.handleMem(req);
+            state = STEP;
+        } else if (addr >= watches_base_addr) {  // Watches request
+            watches.handleMem(req);
+            state = STEP;
+        } else if (addr >= variables_base_addr) {  // Variables request
+            variables.handleMem(req);
+            state = STEP;
+        } else order_heap->handleMem(req);  // Heap request
     }
-    
-    // Route the request to the appropriate handler based on address range
-    if (addr >= clause_act_base_addr) {
-        cla_activity.handleMem(req);
-        state = STEP;
-    } else if (addr >= var_act_base_addr) {
-        order_heap->handleMem(req);
-    } else if (addr >= clauses_cmd_base_addr) {  // Clauses request
-        clauses.handleMem(req);
-        state = STEP;
-    } else if (addr >= watches_base_addr) {  // Watches request
-        watches.handleMem(req);
-        state = STEP;
-    } else if (addr >= variables_base_addr) {  // Variables request
-        variables.handleMem(req);
-        state = STEP;
-    } else order_heap->handleMem(req);  // Heap request
-    
-    delete req;
+    delete req;  // assuming no write responses are sent back
 }
 
 void SATSolver::handleHeapResponse(SST::Event* ev) {
