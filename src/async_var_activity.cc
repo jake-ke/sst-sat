@@ -12,6 +12,8 @@ VarActivity::VarActivity(int verbose, SST::Interfaces::StandardMem* mem,
 }
 
 void VarActivity::initialize(size_t count, double init_value) {
+    output.verbose(CALL_INFO, 1, 0, "Size: %zu var activities, %zu bytes\n",
+                   count, count * sizeof(double));
     size_ = count;
     std::vector<double> values(count, init_value);
     std::vector<uint8_t> buffer(count * sizeof(double));

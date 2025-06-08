@@ -71,9 +71,11 @@ public:
     }
 
     void init(int num_vars) {
-        output.verbose(CALL_INFO, 7, 0, "Initializing %d variables\n", num_vars);
-        std::vector<uint8_t> init_data((num_vars + 1) * sizeof(Variable), 0);
-        writeUntimed(var_base_addr, init_data.size(), init_data);
+        int total_bytes = (num_vars + 1) * sizeof(Variable);
+        output.verbose(CALL_INFO, 1, 0, "Size: %d variables, %d bytes\n", num_vars, total_bytes);
+        // unnecessary to initialize all variables to zero
+        // std::vector<uint8_t> init_data(total_bytes, 0);  // all zero initialization
+        // writeUntimed(var_base_addr, total_bytes, init_data);
     }
     
 private:

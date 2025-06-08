@@ -41,11 +41,11 @@ struct Clause {
 
 // New struct for efficient clause metadata storage
 struct ClauseMetaData {
-    size_t offset;  // Offset to start of clause data
-    size_t size;    // Number of literals in the clause
+    uint64_t offset;  // address of clause data
+    uint64_t size;    // Number of literals in the clause
     
     ClauseMetaData() : offset(0), size(0) {}
-    ClauseMetaData(size_t o, size_t s) : offset(o), size(s) {}
+    ClauseMetaData(uint64_t o, uint64_t s) : offset(o), size(s) {}
 };
 
 

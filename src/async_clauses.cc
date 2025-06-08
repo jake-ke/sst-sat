@@ -59,9 +59,10 @@ void Clauses::writeClause(uint64_t offset, const Clause& c) {
 }
 
 void Clauses::initialize(const std::vector<Clause>& clauses) {
-    output.verbose(CALL_INFO, 7, 0, "Initializing %zu clauses\n", clauses.size());
     num_orig_clauses = clauses.size();
     size_ = clauses.size();
+    output.verbose(CALL_INFO, 1, 0, "Size: %zu clause metadata, %ld bytes\n",
+                   size_, size_ * sizeof(ClauseMetaData));
     
     // Calculate memory needed for all clauses
     size_t total_memory = 0;
@@ -74,6 +75,8 @@ void Clauses::initialize(const std::vector<Clause>& clauses) {
     }
     
     next_free_offset = total_memory;  // Update next available offset
+    output.verbose(CALL_INFO, 1, 0, "Size: %zu clause literals, %ld bytes\n",
+                   total_memory / sizeof(Lit), total_memory);
     
     // Write all metadata in one large batch
     std::vector<uint8_t> metadata_buffer(clauses.size() * sizeof(ClauseMetaData));

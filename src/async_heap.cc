@@ -273,7 +273,10 @@ void Heap::removeMin() {
 }
 
 void Heap::initHeap() {
-    output.verbose(CALL_INFO, 7, 0, "Initializing heap with %ld decision variables\n", heap_size);
+    output.verbose(CALL_INFO, 1, 0, "Size: %ld decision variables, %lu bytes\n",
+                   (heap_size + 1), (heap_size + 1) * sizeof(Var));
+    output.verbose(CALL_INFO, 1, 0, "Size: %ld indices, %lu bytes\n",
+                   (heap_size + 1), (heap_size + 1) * sizeof(int));
     // Count decision variables and prepare data in one pass
     std::vector<uint8_t> heap_data;
     std::vector<int> pos_map(heap_size + 1, -1);  // All indices start as -1 (not in heap)

@@ -42,7 +42,10 @@ void Watches::writeNode(uint64_t addr, const WatcherNode& node) {
 }
 
 void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
-    output.verbose(CALL_INFO, 3, 0, "Initializing %zu watch lists\n", watch_count);
+    output.verbose(CALL_INFO, 1, 0, "Size: %zu watches, %ld bytes\n", 
+                   watch_count, watch_count * sizeof(uint64_t));
+    output.verbose(CALL_INFO, 1, 0, "Size: %zu watch nodes, %ld bytes\n", 
+                   clauses.size() * 2, clauses.size() * 2 * sizeof(WatcherNode));
     
     // First, allocate and initialize head pointers to null
     std::vector<uint64_t> head_ptrs(watch_count, 0);
@@ -65,14 +68,8 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
         }
     }
     
-    // Calculate total number of watcher nodes needed
-    size_t total_nodes = 0;
-    for (auto& watch_list : tmp_watches) {
-        total_nodes += watch_list.size();
-    }
-    output.verbose(CALL_INFO, 3, 0, "Creating %zu watcher nodes\n", total_nodes);
-    
     // Allocate memory for all nodes at once
+    size_t total_nodes = clauses.size() * 2;  // Each clause contributes two watchers
     std::vector<WatcherNode> all_nodes(total_nodes);
     std::vector<uint64_t> node_addrs(total_nodes);
     
