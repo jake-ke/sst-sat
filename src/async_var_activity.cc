@@ -6,7 +6,6 @@ VarActivity::VarActivity(int verbose, SST::Interfaces::StandardMem* mem,
     : Activity("VAR_ACT-> ", verbose, mem, base_addr), heap(heap_parent) {
     // Set the pre-yield callback to update heap state
     setPreYieldCallback([this]() {
-        heap->outstanding_mem_requests++;
         heap->state = Heap::WAIT;
     });
 }

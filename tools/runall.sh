@@ -34,6 +34,27 @@ DECISION_DIR="" # Default to empty
 # Default number of parallel jobs (use available CPU cores)
 MAX_JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
+# Color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
+
+# Function to colorize result text
+colorize_result() {
+    local result=$1
+    case "$result" in
+        "PASSED")
+            echo "${GREEN}${result}${NC}"
+            ;;
+        "FAILED"|"TIMEOUT")
+            echo "${RED}${result}${NC}"
+            ;;
+        *)
+            echo "$result"
+            ;;
+    esac
+}
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -63,6 +84,14 @@ echo "Running with $MAX_JOBS parallel jobs"
 log_message() {
     echo "$1"
     echo "$1" >> "$LOG_FILE"
+}
+
+# Function to log with color to console but plain text to file
+log_message_with_color() {
+    local message=$1
+    local colored_message=$2
+    echo -e "$colored_message"
+    echo "$message" >> "$LOG_FILE"
 }
 
 # Write header to log file
@@ -304,8 +333,11 @@ run_tests_for_directory() {
                         # Update counters
                         completed=$((completed + 1))
                         
-                        # Log the result to the main log
-                        log_message "[$dir_type] $filename: $result ($start_time-$end_time) ($completed/${#files})"
+                        # Log the result to the main log with color for console
+                        local colored_result=$(colorize_result "$result")
+                        local plain_message="[$dir_type] $filename: $result ($start_time-$end_time) ($completed/${#files})"
+                        local colored_message="[$dir_type] $filename: $colored_result ($start_time-$end_time) ($completed/${#files})"
+                        log_message_with_color "$plain_message" "$colored_message"
                     fi
                 fi
             fi

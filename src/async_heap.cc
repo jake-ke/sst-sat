@@ -92,17 +92,15 @@ void Heap::handleMem(SST::Interfaces::StandardMem::Request* req) {
     uint64_t addr = 0;
     if (auto* read_req = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
         addr = read_req->pAddr;
-        // Check if this response is for VarActivity
-        if (addr >= var_act_base_addr) {
+        if (addr >= var_act_base_addr) {  // VarActivity response
             var_activity.handleMem(req);
-        } else {
-            // Store data from read response
+        } else {  // Heap response
             memcpy(&read_data, read_req->data.data(), 
                    std::min(sizeof(Var), read_req->data.size()));
+            outstanding_mem_requests--;
         }
     }
     
-    outstanding_mem_requests--;
     state = STEP;
 }
 
@@ -130,7 +128,7 @@ Var Heap::read(uint64_t addr) {
 void Heap::write(uint64_t addr, Var val) {
     std::vector<uint8_t> data(sizeof(Var));
     memcpy(data.data(), &val, sizeof(Var));
-    memory->send(new SST::Interfaces::StandardMem::Write(addr, sizeof(Var), data, false));
+    memory->send(new SST::Interfaces::StandardMem::Write(addr, sizeof(Var), data));
     // outstanding_mem_requests++;
     // state = WAIT;  // Wait for response 
     // (*heap_sink_ptr)();
@@ -299,11 +297,11 @@ void Heap::initHeap() {
     // Send bulk writes
     memory->sendUntimedData(new SST::Interfaces::StandardMem::Write(
         heap_addr, heap_data.size(), heap_data,
-        false, 0x1));  // not posted, and not cacheable
+        true, 0x1));  // posted, and not cacheable
     
     memory->sendUntimedData(new SST::Interfaces::StandardMem::Write(
         indices_addr, indices_data.size(), indices_data,
-        false, 0x1));  // not posted, and not cacheable
+        true, 0x1));  // posted, and not cacheable
 
     // Initialize var_activity
     output.verbose(CALL_INFO, 7, 0, "Intializing var_activity\n");

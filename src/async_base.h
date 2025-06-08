@@ -62,6 +62,12 @@ protected:
     std::vector<uint8_t> read_buffer;  // Stores the last read data
     std::vector<uint8_t> burst_buffer;  // Stores accumulated data for burst operations
     size_t size_;
+    
+    // For bulk read operations
+    uint64_t burst_start_addr;     // Starting address of current burst read
+    size_t pending_read_count;     // Counter for pending read responses
+    bool all_reads_completed;      // Flag to indicate completion
+    bool in_burst_read;            // Flag to indicate if currently in burst read mode
 };
 
 #endif // ASYNC_BASE_H
