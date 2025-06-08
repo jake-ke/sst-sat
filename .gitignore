@@ -1,7 +1,19 @@
-*.so
-*.csv
-.vscode
-__pycache__
-log*
-*.png
+# Build artifacts
+build/
 *.o
+*.so
+*.a
+
+# Editor files
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs and statistics
+*.log
+*.csv
+logs*
+

@@ -1,8 +1,14 @@
 #!/bin/zsh
 
 # Create logs directory if it doesn't exist
-LOGS_DIR="./logs"
-# LOGS_DIR="./logs_dec"
+# Parse folder name argument (default to 'logs')
+FOLDER_NAME="logs"
+if [[ $# -gt 0 && "$1" != -* ]]; then
+    FOLDER_NAME="$1"
+    shift
+fi
+
+LOGS_DIR="./runs/$FOLDER_NAME"
 mkdir -p "$LOGS_DIR"
 
 # Create a timestamp for this run
@@ -126,23 +132,33 @@ run_single_test() {
     
     filename=$(basename "$file")
     local log_file="$LOGS_DIR/${filename}_${dir_type}_$TIMESTAMP.log"
+    local stats_file="$LOGS_DIR/${filename}_${dir_type}_$TIMESTAMP.stats.csv"
     local start_time=$(date +"%H:%M:%S")
     
     # Report test started - using safe file append
     append_to_file_safely "$progress_file" "START|$filename|$start_time"
     
-    # Build command based on whether decision file exists
-    local command="timeout 7200 sst ../tests/test_basic.py -- --cnf \"$file\""
+    # Build command with timeout and basic arguments
+    local command="timeout 7200 sst ./tests/test_basic.py -- --cnf \"$file\" --stats-file \"$stats_file\""
+    
+    # Add decision file if directory specified and file exists
     if [[ -n "$DECISION_DIR" ]]; then
         local decision_file="${DECISION_DIR}/${filename}.dec"
-        if [[ -f "$decision_file" ]]; then
-            command="timeout 1800 sst ../tests/test_basic.py -- --cnf \"$file\" --dec \"$decision_file\""
-        fi
+        [[ -f "$decision_file" ]] && command+=" --dec \"$decision_file\""
     fi
 
     # Run the test with proper command
     eval $command > "$log_file" 2>&1
     local exit_status=$?
+    
+    # Run the parse_stats.py script with the unique stats file
+    if [ -f "$stats_file" ]; then
+        echo -e "\nParsing statistics file: $stats_file" >> "$log_file"
+        python3 ./tools/parse_stats.py "$stats_file" >> "$log_file" 2>&1
+    else
+        echo -e "\nWarning: Statistics file not found at $stats_file" >> "$log_file"
+    fi
+    
     local end_time=$(date +"%H:%M:%S")
     local result=""
     
