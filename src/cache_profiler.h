@@ -10,6 +10,7 @@
 #include <sst/elements/memHierarchy/memEvent.h>
 #include <sst/elements/memHierarchy/cacheListener.h>
 #include <string>
+#include <unordered_set>
 
 using namespace SST;
 using namespace SST::MemHierarchy;
@@ -42,7 +43,8 @@ public:
         { "clauses_cmd_base_addr", "Base address for clauses command data", "0x50000000" },
         { "var_act_base_addr", "Base address for variable activity data", "0x70000000" },
         { "clause_act_base_addr", "Base address for clause activity data", "0x80000000" },
-        { "verbose", "Verbosity level", "0" }
+        { "verbose", "Verbosity level", "0" },
+        { "exclude_cold_misses", "Exclude cold misses when counting cache misses", "0" }
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -71,6 +73,12 @@ private:
     uint64_t clauses_cmd_base_addr;
     uint64_t var_act_base_addr;
     uint64_t clause_act_base_addr;
+    
+    // Flag for excluding cold misses
+    bool exclude_cold_misses;
+    
+    // Track accessed addresses to identify cold misses
+    std::unordered_set<Addr> accessed_addresses;
 
     // Statistics
     Statistic<uint64_t>* heap_hits;

@@ -1,6 +1,7 @@
 #include <sst/core/sst_config.h>
 #include "cache_profiler.h"
 #include <sst/core/statapi/stataccumulator.h>
+#include <unordered_set> // Add this for the unordered_set
 
 using namespace SST;
 using namespace SST::MemHierarchy;
@@ -14,6 +15,11 @@ CacheProfiler::CacheProfiler(ComponentId_t id, Params& params) : CacheListener(i
 
     cache_level = params.find<std::string>("cache_level", "unknown");
     output.output("testing output for level %s\n", cache_level.c_str());
+    
+    // Get parameter for excluding cold misses
+    exclude_cold_misses = params.find<bool>("exclude_cold_misses", false);
+    output.verbose(CALL_INFO, 2, 0, "Exclude cold misses: %s\n", 
+                   exclude_cold_misses ? "true" : "false");
 
     // Get base addresses for each data structure from the solver
     heap_base_addr = std::stoull(params.find<std::string>("heap_base_addr", "0x00000000"), nullptr, 0);
@@ -46,32 +52,54 @@ void CacheProfiler::notifyAccess(const CacheListenerNotification& notify) {
     if (notifyType != READ && notifyType != WRITE) {
         return; // Only handle read and write accesses
     }
+    
+    // Track if this is a cold miss (first access to this address)
+    bool is_cold_miss = false;
+    if (exclude_cold_misses && notifyResType == MISS && accessed_addresses.find(addr) == accessed_addresses.end()) {
+        is_cold_miss = true;
+        accessed_addresses.insert(addr); // Mark as accessed for future reference
+    } else if (exclude_cold_misses) {
+        // If we're excluding cold misses, make sure we mark any address we see
+        accessed_addresses.insert(addr);
+    }
 
     // Identify which data structure this access belongs to and update statistics
     if (addr >= clause_act_base_addr) {
         // Clause activity
-        if (notifyResType == HIT) cla_activity_hits->addData(1);
-        else cla_activity_misses->addData(1);
+        if (notifyResType == HIT) 
+            cla_activity_hits->addData(1);
+        else if (!exclude_cold_misses || !is_cold_miss)
+            cla_activity_misses->addData(1);
     } else if (addr >= var_act_base_addr) {
         // Variable activity
-        if (notifyResType == HIT) var_activity_hits->addData(1);
-        else var_activity_misses->addData(1);
+        if (notifyResType == HIT) 
+            var_activity_hits->addData(1);
+        else if (!exclude_cold_misses || !is_cold_miss)
+            var_activity_misses->addData(1);
     } else if (addr >= clauses_cmd_base_addr) {
         // Clauses
-        if (notifyResType == HIT) clauses_hits->addData(1);
-        else clauses_misses->addData(1);
+        if (notifyResType == HIT) 
+            clauses_hits->addData(1);
+        else if (!exclude_cold_misses || !is_cold_miss)
+            clauses_misses->addData(1);
     } else if (addr >= watches_base_addr) {
         // Watches
-        if (notifyResType == HIT) watches_hits->addData(1);
-        else watches_misses->addData(1);
+        if (notifyResType == HIT) 
+            watches_hits->addData(1);
+        else if (!exclude_cold_misses || !is_cold_miss)
+            watches_misses->addData(1);
     } else if (addr >= variables_base_addr) {
         // Variables
-        if (notifyResType == HIT) variables_hits->addData(1);
-        else variables_misses->addData(1);
+        if (notifyResType == HIT) 
+            variables_hits->addData(1);
+        else if (!exclude_cold_misses || !is_cold_miss)
+            variables_misses->addData(1);
     } else if (addr >= heap_base_addr) {
         // Heap
-        if (notifyResType == HIT) heap_hits->addData(1);
-        else heap_misses->addData(1);
+        if (notifyResType == HIT) 
+            heap_hits->addData(1);
+        else if (!exclude_cold_misses || !is_cold_miss)
+            heap_misses->addData(1);
     } else output.fatal(CALL_INFO, -1, "Unknown address 0x%lx\n", addr);
 }
 

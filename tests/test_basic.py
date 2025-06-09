@@ -167,7 +167,8 @@ global_cache_profiler.addParams({
     "clauses_cmd_base_addr": hex(clauses_cmd_base_addr),
     "var_act_base_addr": hex(var_act_base_addr),
     "clause_act_base_addr": hex(clause_act_base_addr),
-    "verbose": str(args.verbose)
+    "verbose": str(args.verbose),
+    "exclude_cold_misses": "1"
 })
 
 # Create L2 cache
@@ -198,7 +199,8 @@ global_l2cache_profiler.addParams({
     "clauses_cmd_base_addr": hex(clauses_cmd_base_addr),
     "var_act_base_addr": hex(var_act_base_addr),
     "clause_act_base_addr": hex(clause_act_base_addr),
-    "verbose": str(args.verbose)
+    "verbose": str(args.verbose),
+    "exclude_cold_misses": "1"
 })
 
 # Create L3 cache
@@ -229,7 +231,8 @@ global_l3cache_profiler.addParams({
     "clauses_cmd_base_addr": hex(clauses_cmd_base_addr),
     "var_act_base_addr": hex(var_act_base_addr),
     "clause_act_base_addr": hex(clause_act_base_addr),
-    "verbose": str(args.verbose)
+    "verbose": str(args.verbose),
+    "exclude_cold_misses": "1"
 })
 
 # Create memory controller for global operations
