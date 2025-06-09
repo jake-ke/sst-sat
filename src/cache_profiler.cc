@@ -43,6 +43,10 @@ void CacheProfiler::notifyAccess(const CacheListenerNotification& notify) {
     const NotifyResultType notifyResType = notify.getResultType();
     Addr addr = notify.getPhysicalAddress();
 
+    if (notifyType != READ && notifyType != WRITE) {
+        return; // Only handle read and write accesses
+    }
+
     // Identify which data structure this access belongs to and update statistics
     if (addr >= clause_act_base_addr) {
         // Clause activity
