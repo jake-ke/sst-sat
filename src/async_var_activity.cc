@@ -1,3 +1,4 @@
+#include <sst/core/sst_config.h> // This include is REQUIRED for all implementation files
 #include "async_var_activity.h"
 #include "async_heap.h"
 

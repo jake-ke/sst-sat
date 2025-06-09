@@ -1,4 +1,3 @@
-
 # Directories
 BUILD_DIR = ../build
 
@@ -7,8 +6,12 @@ CXX = $(shell sst-config --CXX)
 CXXFLAGS = $(shell sst-config --ELEMENT_CXXFLAGS) -DBOOST_COROUTINES_NO_DEPRECATION_WARNING
 LDFLAGS = $(shell sst-config --ELEMENT_LDFLAGS)
 
+# Add SST Elements include path
+SST_ELEMENTS_INCLUDE = -I$(SST_ELEMENTS_HOME)/include
+CXXFLAGS += $(SST_ELEMENTS_INCLUDE)
+
 # Source files
-SOURCES = async_base.cc async_heap.cc async_watches.cc async_clauses.cc async_activity.cc async_var_activity.cc satsolver.cc
+SOURCES = cache_profiler.cc async_base.cc async_heap.cc async_watches.cc async_clauses.cc async_activity.cc async_var_activity.cc satsolver.cc
 OBJECTS = $(SOURCES:%.cc=$(BUILD_DIR)/%.o)
 TARGET = $(BUILD_DIR)/libsatsolver.so
 

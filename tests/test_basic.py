@@ -146,6 +146,7 @@ global_cache.addParams({
     "cache_line_size"    : "64",
     "associativity"      : "8",
     "access_latency_cycles" : "1",
+    "max_requests_per_cycle" : "-1",
     "L1"                 : "1",
     "replacement_policy" : "lru",
     "coherence_protocol" : "MSI",
@@ -154,6 +155,19 @@ global_cache.addParams({
     "debug_level" : "10",
     "statistics" : "1",           # Enable statistics for cache
     "collect_stats" : "1"         # Make sure stats are collected
+})
+
+# Add CacheProfiler to L1 cache
+global_cache_profiler = global_cache.setSubComponent("prefetcher", "satsolver.CacheProfiler")
+global_cache_profiler.addParams({
+    "cache_level": "L1",
+    "heap_base_addr": hex(heap_base_addr),
+    "variables_base_addr": hex(variables_base_addr),
+    "watches_base_addr": hex(watches_base_addr),
+    "clauses_cmd_base_addr": hex(clauses_cmd_base_addr),
+    "var_act_base_addr": hex(var_act_base_addr),
+    "clause_act_base_addr": hex(clause_act_base_addr),
+    "verbose": str(args.verbose)
 })
 
 # Create L2 cache
@@ -174,6 +188,19 @@ global_l2cache.addParams({
     "collect_stats" : "1"
 })
 
+# Add CacheProfiler to L2 cache
+global_l2cache_profiler = global_l2cache.setSubComponent("prefetcher", "satsolver.CacheProfiler")
+global_l2cache_profiler.addParams({
+    "cache_level": "L2",
+    "heap_base_addr": hex(heap_base_addr),
+    "variables_base_addr": hex(variables_base_addr),
+    "watches_base_addr": hex(watches_base_addr),
+    "clauses_cmd_base_addr": hex(clauses_cmd_base_addr),
+    "var_act_base_addr": hex(var_act_base_addr),
+    "clause_act_base_addr": hex(clause_act_base_addr),
+    "verbose": str(args.verbose)
+})
+
 # Create L3 cache
 global_l3cache = sst.Component("global_l3cache", "memHierarchy.Cache")
 global_l3cache.addParams({
@@ -190,6 +217,19 @@ global_l3cache.addParams({
     "debug_level" : "10",
     "statistics" : "1",
     "collect_stats" : "1"
+})
+
+# Add CacheProfiler to L3 cache
+global_l3cache_profiler = global_l3cache.setSubComponent("prefetcher", "satsolver.CacheProfiler")
+global_l3cache_profiler.addParams({
+    "cache_level": "L3",
+    "heap_base_addr": hex(heap_base_addr),
+    "variables_base_addr": hex(variables_base_addr),
+    "watches_base_addr": hex(watches_base_addr),
+    "clauses_cmd_base_addr": hex(clauses_cmd_base_addr),
+    "var_act_base_addr": hex(var_act_base_addr),
+    "clause_act_base_addr": hex(clause_act_base_addr),
+    "verbose": str(args.verbose)
 })
 
 # Create memory controller for global operations
@@ -256,7 +296,7 @@ sst.enableStatisticsForComponentName("solver", [
 })
 
 # Enable cache statistics for the L1 cache
-sst.enableStatisticsForComponentName("global_l1cache", [
+sst.enableStatisticsForComponentType("memHierarchy.Cache", [
     "CacheHits", 
     "CacheMisses",
 ], {
@@ -264,25 +304,24 @@ sst.enableStatisticsForComponentName("global_l1cache", [
     "rate": "1ms"
 })
 
-# Enable cache statistics for the L2 cache
-sst.enableStatisticsForComponentName("global_l2cache", [
-    "CacheHits", 
-    "CacheMisses",
-], {
-    "type": "sst.AccumulatorStatistic",
-    "rate": "1ms"
-})
-
-# Enable cache statistics for the L3 cache
-sst.enableStatisticsForComponentName("global_l3cache", [
-    "CacheHits", 
-    "CacheMisses",
+sst.enableStatisticsForComponentType("satsolver.CacheProfiler", [
+    "heap_hits",
+    "heap_misses",
+    "variables_hits",
+    "variables_misses",
+    "watches_hits",
+    "watches_misses",
+    "clauses_hits",
+    "clauses_misses",
+    "var_activity_hits",
+    "var_activity_misses",
+    "cla_activity_hits",
+    "cla_activity_misses",
 ], {
     "type": "sst.AccumulatorStatistic",
     "rate": "1ms"
 })
 
 # Set statistics output to CSV file
-sst.setStatisticLoadLevel(7)
 sst.setStatisticOutput("sst.statOutputCSV", 
     {"filepath": args.stats_file, "separator": ","})

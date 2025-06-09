@@ -1,7 +1,6 @@
 #ifndef ASYNC_WATCHES_H
 #define ASYNC_WATCHES_H
 
-#include <sst/core/sst_config.h> // This include is REQUIRED for all implementation files
 #include <sst/core/output.h>
 #include <sst/core/interfaces/stdMem.h>
 #include <boost/coroutine2/all.hpp>
