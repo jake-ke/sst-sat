@@ -8,9 +8,13 @@ AsyncBase::AsyncBase(const std::string& prefix, int verbose, SST::Interfaces::St
     output.init(prefix.c_str(), verbose, 0, SST::Output::STDOUT);
 }
 
-void AsyncBase::read(uint64_t addr, size_t size) {
-    output.verbose(CALL_INFO, 8, 0, "Read at 0x%lx, size %zu\n", addr, size);
-    memory->send(new SST::Interfaces::StandardMem::Read(addr, size));
+void AsyncBase::read(uint64_t addr, size_t size, uint64_t worker_id) {
+    output.verbose(CALL_INFO, 8, 0, "Read at 0x%lx, size %zu, worker %lu\n", 
+                  addr, size, worker_id);
+    // Create request and assign ID through the reorder buffer
+    auto req = new SST::Interfaces::StandardMem::Read(addr, size);
+    reorder_buffer->registerRequest(req->getID(), worker_id);
+    memory->send(req);
     doYield();
 }
 
@@ -44,7 +48,7 @@ std::vector<AsyncBase::CacheChunk> AsyncBase::calculateCacheChunks(uint64_t star
     return chunks;
 }
 
-void AsyncBase::readBurst(uint64_t start_addr, size_t element_size, size_t count) {
+void AsyncBase::readBurst(uint64_t start_addr, size_t element_size, size_t count, uint64_t worker_id) {
     size_t total_size = count * element_size;
     auto chunks = calculateCacheChunks(start_addr, total_size);
     
@@ -53,8 +57,8 @@ void AsyncBase::readBurst(uint64_t start_addr, size_t element_size, size_t count
     pending_read_count = chunks.size();
     all_reads_completed = false;
     in_burst_read = true;
-    burst_buffer.resize(total_size);
-    
+    reorder_buffer->startBurst(worker_id, total_size);
+
     for (const auto& chunk : chunks) {
         // Try to align to element boundaries when possible
         size_t aligned_size = chunk.size;
@@ -66,11 +70,14 @@ void AsyncBase::readBurst(uint64_t start_addr, size_t element_size, size_t count
         }
         
         output.verbose(CALL_INFO, 8, 0, 
-            "ReadBurst chunk: addr=0x%lx, size=%zu, offset=%zu\n", 
-            chunk.addr, aligned_size, chunk.offset_in_data);
+            "ReadBurst chunk: addr=0x%lx, size=%zu, offset=%zu, worker=%lu\n", 
+            chunk.addr, aligned_size, chunk.offset_in_data, worker_id);
 
-        // Send all read requests
-        memory->send(new SST::Interfaces::StandardMem::Read(chunk.addr, aligned_size));
+        // Create request and register with reorder buffer
+        auto req = new SST::Interfaces::StandardMem::Read(chunk.addr, aligned_size);
+        uint64_t req_id = req->getID();
+        reorder_buffer->registerRequest(req_id, worker_id);
+        memory->send(req);
     }
     
     // Wait for all responses to be received
@@ -109,19 +116,14 @@ void AsyncBase::writeBurst(uint64_t start_addr, size_t element_size, const std::
 void AsyncBase::handleMem(SST::Interfaces::StandardMem::Request* req) {
     if (auto* resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
         uint64_t addr = resp->pAddr;
+        uint64_t req_id = resp->getID();
         
         if (in_burst_read) {  // This is a response to a burst read
-            // Calculate offset in buffer based on address
-            size_t offset_in_buffer = addr - burst_start_addr;
-            
-            // Copy data directly to the appropriate position in burst_buffer
-            memcpy(burst_buffer.data() + offset_in_buffer, 
-                   resp->data.data(), resp->data.size());
-
-            // Decrement counter and check if all reads completed
+            uint64_t offset_in_buffer = addr - burst_start_addr;
+            reorder_buffer->storeResponse(req_id, resp->data, true, offset_in_buffer);
             if (--pending_read_count == 0) all_reads_completed = true;
         } else {  // Standard single read response
-            read_buffer = resp->data;  // Copy the read data
+            reorder_buffer->storeResponse(req_id, resp->data);
         }
     }
     // req will be deleted by the caller in SATSolver::handleGlobalMemEvent

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <functional>
 #include "structs.h"
+#include "reorder_buffer.h"
 
 using coro_t = boost::coroutines2::coroutine<void>;
 
@@ -21,12 +22,12 @@ public:
     virtual ~AsyncBase() = default;
 
     // Core memory operations
-    void read(uint64_t addr, size_t size);
+    void read(uint64_t addr, size_t size, uint64_t worker_id = 0);
     void write(uint64_t addr, size_t size, const std::vector<uint8_t>& data);
     void writeUntimed(uint64_t addr, size_t size, const std::vector<uint8_t>& data);
     
     // Cache-aware burst operations
-    void readBurst(uint64_t start_addr, size_t element_size, size_t count);
+    void readBurst(uint64_t start_addr, size_t element_size, size_t count, uint64_t worker_id = 0);
     void writeBurst(uint64_t start_addr, size_t element_size, const std::vector<uint8_t>& data);
     
     // Memory response handling
@@ -35,6 +36,7 @@ public:
     // Configuration
     void setLineSize(size_t size) { line_size = size; }
     void setPreYieldCallback(PreYieldCallback cb) { pre_yield_callback = cb; }
+    void setReorderBuffer(ReorderBuffer* rb) { reorder_buffer = rb; }
     size_t size() const { return size_; }
     bool empty() const { return size_ == 0; }
 
@@ -59,8 +61,6 @@ protected:
     coro_t::push_type** yield_ptr;
     PreYieldCallback pre_yield_callback;
     size_t line_size;
-    std::vector<uint8_t> read_buffer;  // Stores the last read data
-    std::vector<uint8_t> burst_buffer;  // Stores accumulated data for burst operations
     size_t size_;
     
     // For bulk read operations
@@ -68,6 +68,9 @@ protected:
     size_t pending_read_count;     // Counter for pending read responses
     bool all_reads_completed;      // Flag to indicate completion
     bool in_burst_read;            // Flag to indicate if currently in burst read mode
+    
+    // Reorder buffer for managing parallel memory requests
+    ReorderBuffer* reorder_buffer;
 };
 
 #endif // ASYNC_BASE_H

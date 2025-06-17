@@ -14,14 +14,15 @@ Clauses::Clauses(int verbose, SST::Interfaces::StandardMem* mem,
         "cmd=0x%lx, data=0x%lx\n", clauses_cmd_base_addr, clauses_base_addr);
 }
 
-void Clauses::getMetaData(int idx) {
+ClauseMetaData Clauses::getMetaData(int idx, int worker_id) {
     if (idx < 0 || idx >= size_) {
         output.fatal(CALL_INFO, -1, "Invalid clause index: %d\n", idx);
     }
-    read(cmdAddr(idx), sizeof(ClauseMetaData));
-    
-    // Copy metadata from read buffer
-    memcpy(&last_metadata, read_buffer.data(), sizeof(ClauseMetaData));
+    read(cmdAddr(idx), sizeof(ClauseMetaData), worker_id);
+
+    ClauseMetaData cmd;
+    memcpy(&cmd, reorder_buffer->getResponse(worker_id).data(), sizeof(ClauseMetaData));
+    return cmd;
 }
 
 void Clauses::writeMetaData(int idx, const ClauseMetaData& metadata) {
@@ -33,29 +34,35 @@ void Clauses::writeMetaData(int idx, const ClauseMetaData& metadata) {
     write(cmdAddr(idx), sizeof(ClauseMetaData), buffer);
 }
 
-void Clauses::readClause(int idx) {
+Clause Clauses::readClause(const ClauseMetaData& cmd, int worker_id) {
+    size_t totalBytes = cmd.size * sizeof(Lit);
+    readBurst(clauseAddr(cmd.offset), sizeof(Lit), cmd.size, worker_id);
+
+    Clause c = Clause();
+    c.literals.resize(cmd.size);
+    memcpy(c.literals.data(), reorder_buffer->getResponse(worker_id).data(), totalBytes);
+    return c;
+}
+
+Clause Clauses::readClause(int idx, int worker_id) {
     if (idx < 0 || idx >= size_) {
         output.fatal(CALL_INFO, -1, "Invalid clause index: %d\n", idx);
     }
-    getMetaData(idx);  // First, read metadata
-    
-    // Then read all actual clause literals
-    size_t totalBytes = last_metadata.size * sizeof(Lit);
-    uint64_t literalsAddr = clauses_base_addr + last_metadata.offset;
-    readBurst(literalsAddr, sizeof(Lit), last_metadata.size);
-    
-    // Copy data to the clause literals
-    last_read.literals.clear();
-    last_read.literals.resize(last_metadata.size);
-    memcpy(last_read.literals.data(), burst_buffer.data(), totalBytes);
+    ClauseMetaData cmd = getMetaData(idx);  // First, read metadata
+
+    return readClause(cmd, worker_id);
 }
 
 void Clauses::writeClause(uint64_t offset, const Clause& c) {
     size_t totalBytes = c.size() * sizeof(Lit);
-    uint64_t literalsAddr = clauses_base_addr + offset;
     std::vector<uint8_t> buffer(totalBytes);
     memcpy(buffer.data(), c.literals.data(), buffer.size());
-    writeBurst(literalsAddr, sizeof(Lit), buffer);
+    writeBurst(clauseAddr(offset), sizeof(Lit), buffer);
+}
+
+size_t Clauses::getSize(int idx, int worker_id) {
+    ClauseMetaData cmd = getMetaData(idx, worker_id);
+    return cmd.size;
 }
 
 void Clauses::initialize(const std::vector<Clause>& clauses) {
@@ -116,32 +123,15 @@ void Clauses::addClause(const Clause& clause) {
                    size_ - 1, clause.size(), offset);
 }
 
-void Clauses::swapLiterals(int idx, size_t pos1, size_t pos2) {
-    // Validate positions
-    if (pos1 >= last_read.size() || pos2 >= last_read.size()) {
-        output.fatal(CALL_INFO, -1,
-            "Invalid positions for swapping literals: %zu and %zu in clause of size %u\n", 
-            pos1, pos2, last_read.size());
-    } else if (pos1 == pos2) return;
-    
-    // Swap the literals and write back the clause
-    std::swap(last_read.literals[pos1], last_read.literals[pos2]);
-    writeClause(last_metadata.offset, last_read);
-    
-    output.verbose(CALL_INFO, 7, 0, 
-        "Swapped literals at positions %zu and %zu in clause %d\n", 
-        pos1, pos2, idx);
-}
-
-void Clauses::reduceDB(const std::vector<bool>& rm) {
+void Clauses::reduceDB(const std::vector<bool>& rm, int worker_id) {
     size_t nl = size_ - num_orig_clauses;
     output.verbose(CALL_INFO, 7, 0, "REDUCEDB: Starting with %zu learned clauses\n", nl);
     if (nl == 0) return;
     
     // Read all learned clause metadata
     std::vector<ClauseMetaData> meta(nl);
-    readBurst(cmdAddr(num_orig_clauses), sizeof(ClauseMetaData), nl);
-    memcpy(meta.data(), burst_buffer.data(), nl * sizeof(ClauseMetaData));
+    readBurst(cmdAddr(num_orig_clauses), sizeof(ClauseMetaData), nl, worker_id);
+    memcpy(meta.data(), reorder_buffer->getResponse(worker_id).data(), nl * sizeof(ClauseMetaData));
 
     // Find total literals size and starting offset
     uint64_t firstOffset = meta[0].offset;
@@ -149,8 +139,8 @@ void Clauses::reduceDB(const std::vector<bool>& rm) {
     for (auto& m : meta) totalLiteralBytes += m.size * sizeof(Lit);
     
     // Read all literals
-    readBurst(clauses_base_addr + firstOffset, sizeof(Lit), totalLiteralBytes / sizeof(Lit));
-    std::vector<uint8_t> literalsBuffer = burst_buffer;
+    readBurst(clauseAddr(firstOffset), sizeof(Lit), totalLiteralBytes / sizeof(Lit), worker_id);
+    std::vector<uint8_t> literalsBuffer = reorder_buffer->getResponse(worker_id);
     
     // Compact clauses
     std::vector<ClauseMetaData> newMeta;
@@ -180,7 +170,7 @@ void Clauses::reduceDB(const std::vector<bool>& rm) {
         writeBurst(cmdAddr(num_orig_clauses), sizeof(ClauseMetaData), metadataBuffer);
         
         // Write literals using writeBurst
-        writeBurst(clauses_base_addr + firstOffset, sizeof(Lit), newLiteralsBuffer);
+        writeBurst(clauseAddr(firstOffset), sizeof(Lit), newLiteralsBuffer);
     }
     
     // Update state and report stats

@@ -96,8 +96,7 @@ void Heap::handleMem(SST::Interfaces::StandardMem::Request* req) {
         if (addr >= var_act_base_addr) {  // VarActivity response
             var_activity.handleMem(req);
         } else {  // Heap response
-            memcpy(&read_data, read_req->data.data(), 
-                   std::min(sizeof(Var), read_req->data.size()));
+            reorder_buffer->storeResponse(req->getID(), read_req->data);
             outstanding_mem_requests--;
         }
     }
@@ -106,7 +105,6 @@ void Heap::handleMem(SST::Interfaces::StandardMem::Request* req) {
 }
 
 void Heap::handleRequest(HeapReqEvent* req) {
-    assert(outstanding_mem_requests == 0);
     assert(state == IDLE);
     output.verbose(CALL_INFO, 7, 0, "HandleReq: op %d, arg %d\n", req->op, req->arg);
     
@@ -117,13 +115,17 @@ void Heap::handleRequest(HeapReqEvent* req) {
     state = START;
 }
 
-Var Heap::read(uint64_t addr) {
-    memory->send(new SST::Interfaces::StandardMem::Read(addr, sizeof(Var)));
+Var Heap::read(uint64_t addr, int worker_id) {
+    auto req = new SST::Interfaces::StandardMem::Read(addr, sizeof(Var));
+    reorder_buffer->registerRequest(req->getID(), worker_id);
+    memory->send(req);
     outstanding_mem_requests++;
     state = WAIT;
     (*heap_sink_ptr)();
     
-    return read_data;
+    Var v;
+    memcpy(&v, reorder_buffer->getResponse(worker_id).data(), sizeof(Var));
+    return v;
 }
 
 void Heap::write(uint64_t addr, Var val) {
@@ -137,7 +139,8 @@ void Heap::write(uint64_t addr, Var val) {
 
 void Heap::complete(int res) {
     output.verbose(CALL_INFO, 7, 0, "Completed Op %d, res %d\n", current_op, res);
-    assert(outstanding_mem_requests == 0);
+    sst_assert(outstanding_mem_requests == 0, CALL_INFO, -1, 
+               "outstanding_mem_requests: %d\n", outstanding_mem_requests);
     HeapRespEvent* ev = new HeapRespEvent(res);
     response_port->send(ev);
     state = IDLE;
@@ -180,10 +183,10 @@ void Heap::percolateDown(int i) {
         Var heap_child = read(heapAddr(child));
 
         if (child + 1 < (int)heap_size) {
-            read(heapAddr(child + 1));
-            if (lt(read_data, heap_child)) {
+            Var right_child = read(heapAddr(child + 1));
+            if (lt(right_child, heap_child)) {
                 child++;
-                heap_child = read_data;
+                heap_child = right_child;
             }
         }
 
@@ -203,8 +206,9 @@ void Heap::percolateDown(int i) {
 
 void Heap::inHeap() {
     output.verbose(CALL_INFO, 7, 0, "InHeap: key %d\n", key);
-    read(indexAddr(key));
-    complete(read_data >= 0);
+    int i = read(indexAddr(key));
+
+    complete(i >= 0);
 }
 
 void Heap::readHeap() {
@@ -213,9 +217,9 @@ void Heap::readHeap() {
         complete(var_Undef);
         return;
     }
-    read(heapAddr(idx));
+    Var v = read(heapAddr(idx));
 
-    complete(read_data);
+    complete(v);
 }
 
 void Heap::decrease() {
@@ -310,15 +314,18 @@ void Heap::initHeap() {
 }
 
 bool Heap::lt(Var x, Var y) {
-    return var_activity[x] > var_activity[y];
+    double act_x = var_activity.readAct(x);
+    double act_y = var_activity.readAct(y);
+    output.verbose(CALL_INFO, 7, 0, "Comparing var %d (act %.2f) with var %d (act %.2f)\n", 
+                   x, act_x, y, act_y);
+    return act_x > act_y;
 }
 
 void Heap::varBump() {
-    output.verbose(CALL_INFO, 7, 0, "bumped activity for var %d\n", key);
-
-    double act = var_activity[key];
+    output.verbose(CALL_INFO, 7, 0, "bump activity for var %d\n", key);
+    double act = var_activity.readAct(key);
+    
     double new_act = act + *(var_inc_ptr);
-
     var_activity[key] = new_act;
 
     if (new_act > 1e100) {

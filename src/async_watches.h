@@ -48,22 +48,19 @@ public:
 
     WatchListProxy operator[](int idx) { return WatchListProxy(this, idx); }
     void freeNode(uint64_t addr) { free_nodes.push(addr); }
-    uint64_t getLastHeadPointer() const { return last_head_ptr; }
-    WatcherNode getLastReadNode() const { return last_node; }
         
     // Memory address calculations
     uint64_t watchesAddr(int idx) const { return watches_base_addr + idx * sizeof(uint64_t); }
     uint64_t allocateNode();
     
-    void readHeadPointer(int lit_idx);
+    uint64_t readHeadPointer(int lit_idx, int worker_id = 0);
     void writeHeadPointer(int start_idx, const uint64_t headptr);
-    void readNode(uint64_t addr);
+    WatcherNode readNode(uint64_t addr, int worker_id = 0);
     void writeNode(uint64_t addr, const WatcherNode& node);
 
     void initWatches(size_t watch_count, std::vector<Clause>& clauses);
-    void insertWatcher(int lit_idx, int clause_idx, Lit blocker);
-    void removeWatcher(int lit_idx, int clause_idx);
-    void handleMem(SST::Interfaces::StandardMem::Request* req) override;
+    void insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker_id = 0);
+    void removeWatcher(int lit_idx, int clause_idx, int worker_id = 0);
 
 private:
     uint64_t watches_base_addr;    // Base address of the watches array (head pointers)
@@ -72,10 +69,6 @@ private:
     
     // Free list for recycling nodes
     std::queue<uint64_t> free_nodes;
-    
-    // Results of memory operations
-    uint64_t last_head_ptr;        // Last read head pointer
-    WatcherNode last_node;         // Last read watcher node
 };
 
 #endif // ASYNC_WATCHES_H

@@ -16,9 +16,13 @@ uint64_t Watches::allocateNode() {
     return addr;
 }
 
-void Watches::readHeadPointer(int lit_idx) {
+uint64_t Watches::readHeadPointer(int lit_idx, int worker_id) {
     output.verbose(CALL_INFO, 7, 0, "Read head pointer for var %d\n", lit_idx/2);
-    read(watchesAddr(lit_idx), sizeof(uint64_t));
+    read(watchesAddr(lit_idx), sizeof(uint64_t), worker_id);
+    
+    uint64_t headptr;
+    memcpy(&headptr, reorder_buffer->getResponse(worker_id).data(), sizeof(uint64_t));
+    return headptr;
 }
 
 void Watches::writeHeadPointer(int start_idx, const uint64_t headptr) {
@@ -29,9 +33,13 @@ void Watches::writeHeadPointer(int start_idx, const uint64_t headptr) {
         "Write head pointers[%d], 0x%lx\n", start_idx, headptr);
 }
 
-void Watches::readNode(uint64_t addr) {
+WatcherNode Watches::readNode(uint64_t addr, int worker_id) {
     output.verbose(CALL_INFO, 7, 0, "Read watcher node at 0x%lx\n", addr);
-    read(addr, sizeof(WatcherNode));
+    read(addr, sizeof(WatcherNode), worker_id);
+
+    WatcherNode node;
+    memcpy(&node, reorder_buffer->getResponse(worker_id).data(), sizeof(WatcherNode));
+    return node;
 }
 
 void Watches::writeNode(uint64_t addr, const WatcherNode& node) {
@@ -116,10 +124,9 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
 }
 
 // Insert a new watcher for a literal
-void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker) {
+void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker_id) {
     // Read current head pointer
-    readHeadPointer(lit_idx);
-    uint64_t head = getLastHeadPointer();
+    uint64_t head = readHeadPointer(lit_idx, worker_id);
     
     // Allocate new node
     uint64_t new_node_addr = allocateNode();
@@ -135,15 +142,13 @@ void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker) {
 }
 
 // Remove a watcher with given clause index
-void Watches::removeWatcher(int lit_idx, int clause_idx) {
+void Watches::removeWatcher(int lit_idx, int clause_idx, int worker_id) {
     // Read head pointer
-    readHeadPointer(lit_idx);
-    uint64_t head = getLastHeadPointer();
+    uint64_t head = readHeadPointer(lit_idx, worker_id);
     if (head == 0) output.fatal(CALL_INFO, -1, "Empty watch list for var %d\n", lit_idx/2);
     
     // Read the first node
-    readNode(head);
-    WatcherNode current = getLastReadNode();
+    WatcherNode current = readNode(head, worker_id);
     
     // If first node matches, update head pointer
     if (current.clause_idx == clause_idx) {
@@ -156,8 +161,7 @@ void Watches::removeWatcher(int lit_idx, int clause_idx) {
     // Otherwise, traverse the list
     uint64_t prev_addr = head;
     while (current.next != 0) {
-        readNode(current.next);
-        WatcherNode next = getLastReadNode();
+        WatcherNode next = readNode(current.next, worker_id);
         if (next.clause_idx == clause_idx) {
             freeNode(current.next);  // Add removed node to free list
             current.next = next.next;  // Update previous node's next pointer
@@ -170,24 +174,4 @@ void Watches::removeWatcher(int lit_idx, int clause_idx) {
     }
     
     output.fatal(CALL_INFO, -1, "Remove failed clause %d, var %d\n", clause_idx, lit_idx/2);
-}
-
-// Handle memory response
-void Watches::handleMem(SST::Interfaces::StandardMem::Request* req) {
-    if (auto* resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
-        uint64_t addr = resp->pAddr;
-        // Determine if this is a head pointer read or a node read based on address range
-        if (addr >= watches_base_addr && addr < watches_base_addr + size_ * sizeof(uint64_t)) {
-            // Head pointer read
-            memcpy(&last_head_ptr, resp->data.data(), sizeof(uint64_t));
-            output.verbose(CALL_INFO, 7, 0, 
-                "Head pointer read response: 0x%lx for address 0x%lx\n", last_head_ptr, addr);
-        } else if (addr >= nodes_base_addr) {
-            // Node read
-            memcpy(&last_node, resp->data.data(), sizeof(WatcherNode));
-            output.verbose(CALL_INFO, 7, 0, 
-                "Node read response: clause=%d, blocker=%d, next=0x%lx for address 0x%lx\n", 
-                last_node.clause_idx, toInt(last_node.blocker), last_node.next, addr);
-        }
-    }
 }

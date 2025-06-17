@@ -1,6 +1,27 @@
 #include <sst/core/sst_config.h>
 #include "async_activity.h"
 
+double Activity::readAct(size_t idx, int worker_id) {
+    output.verbose(CALL_INFO, 7, 0, "Read activity at index %zu\n", idx);
+    read(calcAddr(idx), sizeof(double), worker_id);
+
+    double value;
+    memcpy(&value, reorder_buffer->getResponse(worker_id).data(), sizeof(double));
+    return value;
+}
+
+std::vector<double> Activity::readBurstAct(size_t start, size_t count, int worker_id) {
+    if (start + count > size_) {
+        output.fatal(CALL_INFO, -1, "Activity read out of range: %zu + %zu > %zu\n", 
+                        start, count, size_);
+    }
+    std::vector<double> result(count);
+    readBurst(calcAddr(start), sizeof(double), count, worker_id);
+
+    memcpy(result.data(), reorder_buffer->getResponse(worker_id).data(), count * sizeof(double));
+    return result;
+}
+
 void Activity::push(double value) {
     output.verbose(CALL_INFO, 7, 0, "Push new value %f at index %zu\n", value, size_);
     std::vector<uint8_t> buffer(sizeof(double));

@@ -265,6 +265,9 @@ private:
     int conflicts_until_restart;        // Number of conflicts to trigger next restart
     int conflictC;                      // Number of conflicts since last restart
 
+    // Reorder buffer for managing parallel memory requests
+    ReorderBuffer reorder_buffer;
+
     // Statistics
     Statistic<uint64_t>* stat_decisions;
     Statistic<uint64_t>* stat_propagations;

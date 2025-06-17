@@ -8,6 +8,7 @@
 #include <boost/coroutine2/all.hpp>
 #include "structs.h"
 #include "async_var_activity.h"
+#include "reorder_buffer.h"
 
 // Events for heap operations
 class HeapReqEvent : public SST::Event {
@@ -93,12 +94,15 @@ private:
     coro_t::pull_type* heap_source;
     coro_t::push_type* heap_sink_ptr;  // Pointer to current coroutine sink
     Var key;
-    int idx, read_data;
+    int idx;
     size_t line_size;
     
     VarActivity var_activity;
     uint64_t var_act_base_addr;  // Base address for variable activity array
     bool lt(Var x, Var y);  // Comparison method using var_activity directly
+
+    // Reorder buffer for managing parallel memory requests
+    ReorderBuffer* reorder_buffer;
 
     // Helper methods
     inline int parent(int i) { return (i - 1) >> 1; }
@@ -107,7 +111,7 @@ private:
     inline uint64_t heapAddr(int i) { return heap_addr + i*sizeof(Var); }
     inline uint64_t indexAddr(int i) { return indices_addr + i*sizeof(Var); }
     
-    Var read(uint64_t addr);
+    Var read(uint64_t addr, int worker_id = 0);
     void write(uint64_t addr, Var val);
     void complete(int res);
 
@@ -122,6 +126,11 @@ private:
 
 public:
     void setLineSize(size_t size) { line_size = size; var_activity.setLineSize(size); }
+
+    void setReorderBuffer(ReorderBuffer* rb) { 
+        reorder_buffer = rb;
+        var_activity.setReorderBuffer(rb);
+    }
 };
 
 #endif

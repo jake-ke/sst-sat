@@ -14,7 +14,6 @@ CacheProfiler::CacheProfiler(ComponentId_t id, Params& params) : CacheListener(i
                  Output::STDOUT);
 
     cache_level = params.find<std::string>("cache_level", "unknown");
-    output.output("testing output for level %s\n", cache_level.c_str());
     
     // Get parameter for excluding cold misses
     exclude_cold_misses = params.find<bool>("exclude_cold_misses", false);
