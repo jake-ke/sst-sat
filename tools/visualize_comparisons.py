@@ -124,20 +124,10 @@ def load_all_logs(logs_dir):
     
     return pd.DataFrame(all_stats)
 
-def create_scatter_plots(logs_dir, backup_dir):
+def create_scatter_plots(df_merged):
     """Create scatter plots comparing current vs backup performance."""
     
-    print("Loading current logs...")
-    df_current = load_all_logs(logs_dir)
-    print(f"Loaded {len(df_current)} current log files")
-    
-    print("Loading backup logs...")
-    df_backup = load_all_logs(backup_dir)
-    print(f"Loaded {len(df_backup)} backup log files")
-    
-    # Merge dataframes on problem name
-    df_merged = pd.merge(df_current, df_backup, on='problem', suffixes=('_current', '_backup'))
-    print(f"Found {len(df_merged)} matching problems")
+    print(f"Creating plots for {len(df_merged)} matching problems")
     
     if df_merged.empty:
         print("No matching problems found!")
@@ -304,12 +294,33 @@ def main():
     
     print(f"Loading logs from: {logs_dir}")
     df_current = load_all_logs(logs_dir)
+    print(f"Loaded {len(df_current)} current log files")
+    print(f"Current dataframe columns: {list(df_current.columns) if not df_current.empty else 'Empty dataframe'}")
+    
     print(f"Loading backup logs from: {backup_dir}")
     df_backup = load_all_logs(backup_dir)
+    print(f"Loaded {len(df_backup)} backup log files")
+    print(f"Backup dataframe columns: {list(df_backup.columns) if not df_backup.empty else 'Empty dataframe'}")
+    
+    # Check if both dataframes have the 'problem' column before merging
+    if df_current.empty:
+        print("Error: No current logs loaded!")
+        return
+    if df_backup.empty:
+        print("Error: No backup logs loaded!")
+        return
+    if 'problem' not in df_current.columns:
+        print("Error: 'problem' column missing from current logs!")
+        return
+    if 'problem' not in df_backup.columns:
+        print("Error: 'problem' column missing from backup logs!")
+        return
+    
     df_merged = pd.merge(df_current, df_backup, on='problem', suffixes=('_current', '_backup'))
+    print(f"Found {len(df_merged)} matching problems")
     
     if not df_merged.empty:
-        create_scatter_plots(logs_dir, backup_dir)
+        create_scatter_plots(df_merged)
         print_summary_stats(df_merged)
     else:
         print("No data available for comparison!")
