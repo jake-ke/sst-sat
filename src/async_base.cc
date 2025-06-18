@@ -3,8 +3,7 @@
 
 AsyncBase::AsyncBase(const std::string& prefix, int verbose, SST::Interfaces::StandardMem* mem, 
                      coro_t::push_type** yield_ptr)
-    : memory(mem), yield_ptr(yield_ptr), pre_yield_callback(nullptr), line_size(64), size_(0),
-      pending_read_count(0), all_reads_completed(false), in_burst_read(false) {
+    : memory(mem), yield_ptr(yield_ptr), pre_yield_callback(nullptr), line_size(64), size_(0) {
     output.init(prefix.c_str(), verbose, 0, SST::Output::STDOUT);
 }
 
@@ -52,11 +51,13 @@ void AsyncBase::readBurst(uint64_t start_addr, size_t element_size, size_t count
     size_t total_size = count * element_size;
     auto chunks = calculateCacheChunks(start_addr, total_size);
     
-    // Setup for burst read tracking
-    burst_start_addr = start_addr;
-    pending_read_count = chunks.size();
-    all_reads_completed = false;
-    in_burst_read = true;
+    // Create/update burst state for this worker
+    BurstReadState& worker_state = burst_states[worker_id];
+    worker_state.start_addr = start_addr;
+    worker_state.pending_read_count = chunks.size();
+    worker_state.completed = false;
+    
+    // Initialize buffer for the complete burst read
     reorder_buffer->startBurst(worker_id, total_size);
 
     for (const auto& chunk : chunks) {
@@ -80,11 +81,16 @@ void AsyncBase::readBurst(uint64_t start_addr, size_t element_size, size_t count
         memory->send(req);
     }
     
-    // Wait for all responses to be received
-    while (!all_reads_completed) doYield();
+    // Wait for this worker's burst read to complete
+    while (!worker_state.completed) {
+        doYield();
+    }
     
-    in_burst_read = false;
-    output.verbose(CALL_INFO, 7, 0, "ReadBurst: All %zu read requests completed\n", chunks.size());
+    // Clean up burst state for this worker
+    burst_states.erase(worker_id);
+    
+    output.verbose(CALL_INFO, 7, 0, "ReadBurst: All %zu read requests completed for worker %lu\n", 
+                  chunks.size(), worker_id);
 }
 
 void AsyncBase::writeBurst(uint64_t start_addr, size_t element_size, const std::vector<uint8_t>& data) {
@@ -117,12 +123,22 @@ void AsyncBase::handleMem(SST::Interfaces::StandardMem::Request* req) {
     if (auto* resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
         uint64_t addr = resp->pAddr;
         uint64_t req_id = resp->getID();
+        int worker_id = reorder_buffer->lookUpWorkerId(req_id);
         
-        if (in_burst_read) {  // This is a response to a burst read
-            uint64_t offset_in_buffer = addr - burst_start_addr;
+        output.verbose(CALL_INFO, 8, 0, "handleMem response for 0x%lx, req_id %lu, worker %d\n", 
+                      addr, req_id, worker_id);
+        
+        // Check if this is part of a burst read
+        auto burst_it = burst_states.find(worker_id);
+        if (burst_it != burst_states.end()) {
+            // This response belongs to a burst read
+            BurstReadState& state = burst_it->second;
+            uint64_t offset_in_buffer = addr - state.start_addr;
             reorder_buffer->storeResponse(req_id, resp->data, true, offset_in_buffer);
-            if (--pending_read_count == 0) all_reads_completed = true;
-        } else {  // Standard single read response
+            
+            if (--state.pending_read_count == 0) state.completed = true;
+        } else {
+            // Standard single read response
             reorder_buffer->storeResponse(req_id, resp->data);
         }
     }

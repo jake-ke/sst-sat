@@ -7,10 +7,10 @@
 #include <vector>
 #include <cstring>
 #include <functional>
+#include <unordered_map>
 #include "structs.h"
 #include "reorder_buffer.h"
 
-using coro_t = boost::coroutines2::coroutine<void>;
 
 class AsyncBase {
 public:
@@ -55,6 +55,15 @@ protected:
     };
     std::vector<CacheChunk> calculateCacheChunks(uint64_t start_addr, size_t total_size);
     
+    // Per-worker burst read state tracking
+    struct BurstReadState {
+        uint64_t start_addr;        // Starting address of burst read
+        size_t pending_read_count;  // Number of pending reads
+        bool completed;             // Flag to indicate completion
+        
+        BurstReadState() : start_addr(0), pending_read_count(0), completed(false) {}
+    };
+    
     // Member variables
     SST::Output output;
     SST::Interfaces::StandardMem* memory;
@@ -63,11 +72,8 @@ protected:
     size_t line_size;
     size_t size_;
     
-    // For bulk read operations
-    uint64_t burst_start_addr;     // Starting address of current burst read
-    size_t pending_read_count;     // Counter for pending read responses
-    bool all_reads_completed;      // Flag to indicate completion
-    bool in_burst_read;            // Flag to indicate if currently in burst read mode
+    // Worker-specific burst read state map
+    std::unordered_map<uint64_t, BurstReadState> burst_states;
     
     // Reorder buffer for managing parallel memory requests
     ReorderBuffer* reorder_buffer;

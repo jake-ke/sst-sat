@@ -27,6 +27,8 @@ enum SolverState {
     PROPAGATE,
     DECIDE,
     ANALYZE,
+    MINIMIZE,
+    BTLEVEL,
     BACKTRACK,
     REDUCE,
     RESTART,
@@ -113,6 +115,8 @@ public:
     bool clockTick(SST::Cycle_t currentCycle);
     void execPropagate();
     void execAnalyze();
+    void execMinimize();
+    void execBtLevel();
     void execBacktrack();
     void execReduce();
     void execRestart();
@@ -126,6 +130,10 @@ public:
     bool decide();
     int unitPropagate();
     void analyze();
+    void minimizeL1();
+    void minimizeL2(int worker_id);
+    void postMinimizeL2();
+    void findBtLevel();
     void backtrack(int backtrack_level);
     
     // Trail Management
@@ -150,7 +158,7 @@ public:
     bool locked(int clause_idx);   // Check if clause is locked (reason for assignment)
 
     // Clause Minimization
-    bool litRedundant(Lit p);
+    bool litRedundant(Lit p, int worker_id = 0);  // Check if literal can be removed
 
     // Restart helpers
     double luby(double y, int x);  // Calculate Luby sequence value
@@ -184,8 +192,6 @@ private:
     SST::Interfaces::StandardMem* global_memory; // For heap and variables operations
     std::string dimacs_content;
     SST::Cycle_t currentCycle;
-    coro_t::pull_type* coroutine; // Coroutine for async operations
-    coro_t::push_type* yield_ptr; // Pointer to current yield object
     int heap_resp;
 
     // Parsing state
@@ -212,9 +218,11 @@ private:
     std::vector<Lit> learnt_clause;             // Learnt clause from conflict analysis
     int bt_level;                               // Backtrack level from conflict analysis
     std::vector<char> seen;                     // Temporary array for conflict analysis
+
+    // Clause minimization
     int ccmin_mode;                             // Conflict clause minimization mode
-    std::vector<ShrinkStackElem> analyze_stack; // Stack for clause minimization
     std::vector<Lit> analyze_toclear;           // Literals to clear after analysis
+    std::vector<bool> redundant;                // Whether a literal is redundant in the clause
 
     // Two Watched Literals implementation
     Watches watches;  // Replaces std::vector<std::vector<Watcher>> watches
@@ -267,6 +275,12 @@ private:
 
     // Reorder buffer for managing parallel memory requests
     ReorderBuffer reorder_buffer;
+    std::vector<coro_t::pull_type*> coroutines;             // Coroutines for parallel tasks
+    std::vector<coro_t::push_type*> yield_ptrs;             // yield pointers for parallel tasks
+    coro_t::push_type* yield_ptr;                           // current yield pointer
+    std::vector<bool> active_workers;                       // Track active workers
+    std::function<void()> post_coroutine_cb;                // Callback after parallel coroutines
+
 
     // Statistics
     Statistic<uint64_t>* stat_decisions;

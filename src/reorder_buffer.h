@@ -11,17 +11,21 @@ public:
     void registerRequest(uint64_t req_id, int worker_id) {
         req_to_worker[req_id] = worker_id;
     }
+
+    int lookUpWorkerId(uint64_t req_id) {
+        auto it = req_to_worker.find(req_id);
+        assert(it != req_to_worker.end());
+        return it->second;
+    }
     
     // Store response data for a specific request ID
     void storeResponse(uint64_t req_id, const std::vector<uint8_t> data, bool burst = false, uint64_t offset = 0) {
-        auto it = req_to_worker.find(req_id);
-        assert(it != req_to_worker.end());
-        int worker_id = it->second;
+        int worker_id = lookUpWorkerId(req_id);
         if (burst) {
             std::memcpy(worker_to_data[worker_id].data() + offset, data.data(), data.size());
         }
         else worker_to_data[worker_id] = data;
-        req_to_worker.erase(it);  // Clean up the mapping after use
+        req_to_worker.erase(req_id);  // Clean up the mapping after use
     }
     
     // Retrieve response data for a specific worker ID

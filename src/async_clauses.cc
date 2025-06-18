@@ -48,7 +48,7 @@ Clause Clauses::readClause(int idx, int worker_id) {
     if (idx < 0 || idx >= size_) {
         output.fatal(CALL_INFO, -1, "Invalid clause index: %d\n", idx);
     }
-    ClauseMetaData cmd = getMetaData(idx);  // First, read metadata
+    ClauseMetaData cmd = getMetaData(idx, worker_id);  // First, read metadata
 
     return readClause(cmd, worker_id);
 }
