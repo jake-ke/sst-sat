@@ -14,10 +14,19 @@
 struct WatcherNode {
     int clause_idx;     // Index of the clause
     Lit blocker;        // Blocker literal
-    uint64_t next;      // Address of next node (0 = nullptr)
     
-    WatcherNode() : clause_idx(ClauseRef_Undef), blocker(lit_Undef), next(0) {}
-    WatcherNode(int ci, Lit b, uint64_t n = 0) : clause_idx(ci), blocker(b), next(n) {}
+    WatcherNode() : clause_idx(ClauseRef_Undef), blocker(lit_Undef) {}
+    WatcherNode(int ci, Lit b) : clause_idx(ci), blocker(b) {}
+};
+
+// Block of watchers - hardcoded to 64 byte cache line!
+struct WatcherBlock {
+    WatcherNode nodes[7];     // Array of nodes (size will be adjusted based on line_size)
+    uint32_t next_block;      // Pointer to next block (0 = nullptr)
+    uint8_t valid_mask;       // Bit mask for valid nodes
+    // No need for padding as we'll handle line_size directly
+    
+    WatcherBlock() : valid_mask(0), next_block(0) {}
 };
 
 class Watches : public AsyncBase {
@@ -40,23 +49,29 @@ public:
         : AsyncBase("WATCH-> ", verbose, mem, yield_ptr), 
           watches_base_addr(watches_base_addr), 
           nodes_base_addr(nodes_base_addr), 
-          next_free_node(nodes_base_addr) {
+          next_free_block(nodes_base_addr),
+          nodes_per_block(0) {
         output.verbose(CALL_INFO, 1, 0, 
             "base addresses: watchlist=0x%lx, nodes=0x%lx\n", 
             watches_base_addr, nodes_base_addr);
     }
 
     WatchListProxy operator[](int idx) { return WatchListProxy(this, idx); }
-    void freeNode(uint64_t addr) { free_nodes.push(addr); }
+    void freeBlock(uint64_t addr) { free_blocks.push(addr); }
         
     // Memory address calculations
     uint64_t watchesAddr(int idx) const { return watches_base_addr + idx * sizeof(uint64_t); }
-    uint64_t allocateNode();
+    uint64_t allocateBlock();
+    
+    // Helper method to access nodes_per_block
+    size_t getNodesPerBlock() const { return nodes_per_block; }
     
     uint64_t readHeadPointer(int lit_idx, int worker_id = 0);
     void writeHeadPointer(int start_idx, const uint64_t headptr);
-    WatcherNode readNode(uint64_t addr, int worker_id = 0);
-    void writeNode(uint64_t addr, const WatcherNode& node);
+    WatcherBlock readBlock(uint64_t addr, int worker_id = 0);
+    void writeBlock(uint64_t addr, const WatcherBlock& block);
+    void updateBlock(int lit_idx, uint64_t prev_addr, uint64_t curr_addr, 
+                     WatcherBlock& prev_block, WatcherBlock& curr_block);
 
     void initWatches(size_t watch_count, std::vector<Clause>& clauses);
     void insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker_id = 0);
@@ -65,10 +80,13 @@ public:
 private:
     uint64_t watches_base_addr;    // Base address of the watches array (head pointers)
     uint64_t nodes_base_addr;      // Base address for watcher nodes
-    uint64_t next_free_node;       // Next free address for node allocation
+    uint64_t next_free_block;      // Next free address for block allocation
     
-    // Free list for recycling nodes
-    std::queue<uint64_t> free_nodes;
+    // Free list for recycling blocks
+    std::queue<uint64_t> free_blocks;
+    
+    // Number of nodes that can fit in a cache line
+    size_t nodes_per_block;
 };
 
 #endif // ASYNC_WATCHES_H

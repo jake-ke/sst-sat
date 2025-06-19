@@ -1,18 +1,18 @@
 #include <sst/core/sst_config.h>
 #include "async_watches.h"
 
-uint64_t Watches::allocateNode() {
-    // First check if we have recycled nodes available
-    if (!free_nodes.empty()) {
-        uint64_t addr = free_nodes.front();
-        free_nodes.pop();
+uint64_t Watches::allocateBlock() {
+    // First check if we have recycled blocks available
+    if (!free_blocks.empty()) {
+        uint64_t addr = free_blocks.front();
+        free_blocks.pop();
         return addr;
     }
     
-    // Otherwise, allocate a new node
-    uint64_t addr = next_free_node;
-    next_free_node += sizeof(WatcherNode);
-    output.verbose(CALL_INFO, 7, 0, "Allocating new node at 0x%lx\n", addr);
+    // Otherwise, allocate a new block
+    uint64_t addr = next_free_block;
+    next_free_block += line_size;  // Use line_size directly
+    output.verbose(CALL_INFO, 7, 0, "Allocating new block at 0x%lx\n", addr);
     return addr;
 }
 
@@ -33,27 +33,46 @@ void Watches::writeHeadPointer(int start_idx, const uint64_t headptr) {
         "Write head pointers[%d], 0x%lx\n", start_idx, headptr);
 }
 
-WatcherNode Watches::readNode(uint64_t addr, int worker_id) {
-    output.verbose(CALL_INFO, 7, 0, "Read watcher node at 0x%lx\n", addr);
-    read(addr, sizeof(WatcherNode), worker_id);
+WatcherBlock Watches::readBlock(uint64_t addr, int worker_id) {
+    output.verbose(CALL_INFO, 7, 0, "Read watcher block at 0x%lx\n", addr);
+    read(addr, line_size, worker_id);
 
-    WatcherNode node;
-    memcpy(&node, reorder_buffer->getResponse(worker_id).data(), sizeof(WatcherNode));
-    return node;
+    WatcherBlock block;
+    memcpy(&block, reorder_buffer->getResponse(worker_id).data(), sizeof(WatcherBlock));
+    return block;
 }
 
-void Watches::writeNode(uint64_t addr, const WatcherNode& node) {
-    output.verbose(CALL_INFO, 7, 0, "Write watcher node at 0x%lx\n", addr);
-    std::vector<uint8_t> data(sizeof(WatcherNode));
-    memcpy(data.data(), &node, sizeof(WatcherNode));
-    write(addr, sizeof(WatcherNode), data);
+void Watches::writeBlock(uint64_t addr, const WatcherBlock& block) {
+    output.verbose(CALL_INFO, 7, 0, "Write watcher block at 0x%lx\n", addr);
+    std::vector<uint8_t> data(line_size, 0);
+    memcpy(data.data(), &block, sizeof(WatcherBlock));
+    write(addr, line_size, data);
+}
+
+void Watches::updateBlock(int lit_idx, uint64_t prev_addr, uint64_t curr_addr, 
+                          WatcherBlock& prev_block, WatcherBlock& curr_block) {
+    // have removed some watchers, update the blocks accordingly
+    if (curr_block.valid_mask == 0) {
+        // Block became empty, remove it
+        if (prev_addr == 0) {
+            // Current block was the head
+            writeHeadPointer(lit_idx, curr_block.next_block);
+        } else {
+            // Update previous block's next pointer
+            prev_block.next_block = curr_block.next_block;
+            writeBlock(prev_addr, prev_block);
+        }
+        freeBlock(curr_addr);
+    } else {
+        // Block still has valid nodes, update it
+        writeBlock(curr_addr, curr_block);
+    }
 }
 
 void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
-    output.verbose(CALL_INFO, 1, 0, "Size: %zu watches, %ld bytes\n", 
-                   watch_count, watch_count * sizeof(uint64_t));
-    output.verbose(CALL_INFO, 1, 0, "Size: %zu watch nodes, %ld bytes\n", 
-                   clauses.size() * 2, clauses.size() * 2 * sizeof(WatcherNode));
+    // Calculate how many nodes can fit in a cache line
+    size_t header_size = sizeof(uint8_t) + sizeof(uint32_t); // valid_mask + next_block
+    nodes_per_block = (line_size - header_size) / sizeof(WatcherNode);
     
     // First, allocate and initialize head pointers to null
     std::vector<uint64_t> head_ptrs(watch_count, 0);
@@ -76,69 +95,127 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
         }
     }
     
-    // Allocate memory for all nodes at once
-    size_t total_nodes = clauses.size() * 2;  // Each clause contributes two watchers
-    std::vector<WatcherNode> all_nodes(total_nodes);
-    std::vector<uint64_t> node_addrs(total_nodes);
+    // Allocate memory for batched write operations
+    std::vector<uint8_t> all_blocks_data;
     
-    // Build linked lists and node addresses
-    size_t node_idx = 0;
+    // Track which blocks we've used
+    size_t block_idx_counter = 0;
+    
     for (size_t lit_idx = 0; lit_idx < watch_count; lit_idx++) {
         auto& watch_list = tmp_watches[lit_idx];
         if (watch_list.empty()) continue;
         
-        // Set head pointer for this watch list
-        head_ptrs[lit_idx] = nodes_base_addr + node_idx * sizeof(WatcherNode);
+        // Calculate blocks needed for this watch list
+        size_t blocks_needed = (watch_list.size() + nodes_per_block - 1) / nodes_per_block;  // Ceiling division
         
-        // Build linked list for this literal
-        for (size_t i = 0; i < watch_list.size(); i++) {
-            auto& watcher = watch_list[i];
-            node_addrs[node_idx] = nodes_base_addr + node_idx * sizeof(WatcherNode);
+        // Set head pointer for this watch list
+        uint64_t first_block_addr = nodes_base_addr + (block_idx_counter * line_size);
+        head_ptrs[lit_idx] = first_block_addr;
+        
+        // Fill the blocks
+        size_t node_in_list = 0;
+        
+        for (size_t block_idx = 0; block_idx < blocks_needed; block_idx++) {
+            // Prepare block
+            WatcherBlock block;
+            size_t nodes_in_this_block = 0;
             
-            uint64_t next_addr = 0;
-            if (i < watch_list.size() - 1) {
-                next_addr = nodes_base_addr + (node_idx + 1) * sizeof(WatcherNode);
+            // Add nodes to this block
+            while (node_in_list < watch_list.size() && nodes_in_this_block < nodes_per_block) {
+                auto& watcher = watch_list[node_in_list];
+                block.nodes[nodes_in_this_block] = WatcherNode(watcher.first, watcher.second);
+                block.valid_mask |= (1 << nodes_in_this_block);
+                nodes_in_this_block++;
+                node_in_list++;
             }
             
-            all_nodes[node_idx] = WatcherNode(watcher.first, watcher.second, next_addr);
-            node_idx++;
+            // Set next block pointer if there are more blocks
+            if (block_idx < blocks_needed - 1) {
+                block.next_block = first_block_addr + ((block_idx + 1) * line_size);
+            }
+            
+            // Copy block data to the batch buffer
+            std::vector<uint8_t> block_data(line_size, 0);
+            uint64_t offset = (block_idx_counter + block_idx) * line_size;
+            memcpy(block_data.data(), &block, sizeof(WatcherBlock));
+            all_blocks_data.insert(all_blocks_data.end(), block_data.begin(), block_data.end());
         }
+        
+        block_idx_counter += blocks_needed;
     }
     
-    // Write all nodes to memory in one operation
-    std::vector<uint8_t> node_data(total_nodes * sizeof(WatcherNode));
-    memcpy(node_data.data(), all_nodes.data(), node_data.size());
-    writeUntimed(nodes_base_addr, node_data.size(), node_data);
+    // Write all blocks in one operation
+    writeUntimed(nodes_base_addr, all_blocks_data.size(), all_blocks_data);
     
-    // Update next_free_node to point after our allocated nodes
-    next_free_node = nodes_base_addr + total_nodes * sizeof(WatcherNode);
+    // Update next_free_block to point after our allocated blocks
+    next_free_block = nodes_base_addr + (block_idx_counter * line_size);
     
     // Write all head pointers in one operation
     std::vector<uint8_t> ptr_data(watch_count * sizeof(uint64_t));
     memcpy(ptr_data.data(), head_ptrs.data(), ptr_data.size());
     writeUntimed(watches_base_addr, ptr_data.size(), ptr_data);
     
-    output.verbose(CALL_INFO, 7, 0, 
-        "Watch initialization complete: wrote %zu nodes, next free at 0x%lx\n", 
-        total_nodes, next_free_node);
+    output.verbose(CALL_INFO, 1, 0, "Size: %zu watches, %ld bytes\n", 
+                   watch_count, watch_count * sizeof(uint64_t));
+    output.verbose(CALL_INFO, 1, 0, "Size: %zu watch node blocks, %ld bytes\n", 
+                   block_idx_counter, block_idx_counter * line_size);
+    
 }
 
-// Insert a new watcher for a literal
+// Insert a new watcher for a literal - simplified to only check the first block
 void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker_id) {
     // Read current head pointer
     uint64_t head = readHeadPointer(lit_idx, worker_id);
+
+    // Case 1: Empty watch list - create first block
+    if (head == 0) {
+        uint64_t new_block_addr = allocateBlock();
+        WatcherBlock new_block;
+        new_block.nodes[0] = WatcherNode(clause_idx, blocker);
+        new_block.valid_mask = 0x01;  // First node is valid
+        writeBlock(new_block_addr, new_block);
+        writeHeadPointer(lit_idx, new_block_addr);
+        
+        output.verbose(CALL_INFO, 7, 0, 
+            "Inserted watcher for clause %d at var %d in new block 0x%lx\n", 
+            clause_idx, lit_idx/2, new_block_addr);
+        return;
+    }
     
-    // Allocate new node
-    uint64_t new_node_addr = allocateNode();
-    WatcherNode new_node(clause_idx, blocker, head);
+    // Case 2: Try to insert into the first block
+    WatcherBlock first_block = readBlock(head, worker_id);
     
-    writeNode(new_node_addr, new_node);  // Write the new node
-    
-    writeHeadPointer(lit_idx, new_node_addr);  // Update head pointer
+    // Check if this block has a free slot
+    uint8_t full_mask = (1 << nodes_per_block) - 1;  // All bits set for nodes_per_block
+    if (first_block.valid_mask != full_mask) {
+        // Find the first free slot
+        for (size_t i = 0; i < nodes_per_block; i++) {
+            if ((first_block.valid_mask & (1 << i)) == 0) {
+                // Found a free slot
+                first_block.nodes[i] = WatcherNode(clause_idx, blocker);
+                first_block.valid_mask |= (1 << i);
+                writeBlock(head, first_block);
+                
+                output.verbose(CALL_INFO, 7, 0, 
+                    "Inserted watcher for clause %d at var %d in existing block 0x%lx slot %zu\n", 
+                    clause_idx, lit_idx/2, head, i);
+                return;
+            }
+        }
+    }
+
+    // Case 3: First block is full - add a new block at front
+    uint64_t new_block_addr = allocateBlock();
+    WatcherBlock new_block;
+    new_block.nodes[0] = WatcherNode(clause_idx, blocker);
+    new_block.valid_mask = 0x01;  // First node is valid
+    new_block.next_block = head;  // Link to current head
+    writeBlock(new_block_addr, new_block);
+    writeHeadPointer(lit_idx, new_block_addr);
     
     output.verbose(CALL_INFO, 7, 0, 
-        "Inserted watcher for clause %d at var %d, addr 0x%lx\n", 
-        clause_idx, lit_idx/2, new_node_addr);
+        "Inserted watcher for clause %d at var %d in new block 0x%lx\n", 
+        clause_idx, lit_idx/2, new_block_addr);
 }
 
 // Remove a watcher with given clause index
@@ -147,30 +224,53 @@ void Watches::removeWatcher(int lit_idx, int clause_idx, int worker_id) {
     uint64_t head = readHeadPointer(lit_idx, worker_id);
     if (head == 0) output.fatal(CALL_INFO, -1, "Empty watch list for var %d\n", lit_idx/2);
     
-    // Read the first node
-    WatcherNode current = readNode(head, worker_id);
+    uint64_t curr_addr = head;
+    uint64_t prev_addr = 0;
+    WatcherBlock prev_block;
     
-    // If first node matches, update head pointer
-    if (current.clause_idx == clause_idx) {
-        writeHeadPointer(lit_idx, {current.next});
+    while (curr_addr != 0) {
+        WatcherBlock curr_block = readBlock(curr_addr, worker_id);
         
-        freeNode(head);  // Add node to free list for recycling
-        return;
-    }
-    
-    // Otherwise, traverse the list
-    uint64_t prev_addr = head;
-    while (current.next != 0) {
-        WatcherNode next = readNode(current.next, worker_id);
-        if (next.clause_idx == clause_idx) {
-            freeNode(current.next);  // Add removed node to free list
-            current.next = next.next;  // Update previous node's next pointer
-            writeNode(prev_addr, current);
-            return;
+        // Search for the clause in this block
+        for (size_t i = 0; i < nodes_per_block; i++) {
+            if ((curr_block.valid_mask & (1 << i)) && curr_block.nodes[i].clause_idx == clause_idx) {
+                // Found the clause, invalidate this node
+                curr_block.valid_mask &= ~(1 << i);
+                
+                // Check if the entire block is now empty
+                if (curr_block.valid_mask == 0) {
+                    // Block is empty, remove it from the list
+                    if (prev_addr == 0) {
+                        // This was the head block
+                        writeHeadPointer(lit_idx, curr_block.next_block);
+                    } else {
+                        // Update previous block's next pointer
+                        prev_block.next_block = curr_block.next_block;
+                        writeBlock(prev_addr, prev_block);
+                    }
+                    
+                    // Add the empty block to the free list
+                    freeBlock(curr_addr);
+                    
+                    output.verbose(CALL_INFO, 7, 0, 
+                        "Removed watcher for clause %d at var %d, freed empty block 0x%lx\n", 
+                        clause_idx, lit_idx/2, curr_addr);
+                } else {
+                    // Block still has valid nodes, just update it
+                    writeBlock(curr_addr, curr_block);
+                    
+                    output.verbose(CALL_INFO, 7, 0, 
+                        "Removed watcher for clause %d at var %d, updated block 0x%lx\n", 
+                        clause_idx, lit_idx/2, curr_addr);
+                }
+                
+                return;
+            }
         }
         
-        prev_addr = current.next;
-        current = next;
+        prev_addr = curr_addr;
+        prev_block = curr_block;
+        curr_addr = curr_block.next_block;
     }
     
     output.fatal(CALL_INFO, -1, "Remove failed clause %d, var %d\n", clause_idx, lit_idx/2);

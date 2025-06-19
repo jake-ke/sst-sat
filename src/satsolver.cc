@@ -754,7 +754,7 @@ int SATSolver::unitPropagate() {
         Lit not_p = ~p;
         int watch_idx = toWatchIndex(p);
         uint64_t head_addr = watches.readHeadPointer(watch_idx);
-        
+
         if (head_addr == 0) continue; // Empty watch list
             
         output.verbose(CALL_INFO, 3, 0,
@@ -762,121 +762,122 @@ int SATSolver::unitPropagate() {
             
         uint64_t curr_addr = head_addr;
         uint64_t prev_addr = 0;
-        WatcherNode prev_watcher;
+        WatcherBlock prev_block;
         
-        // Traverse the linked list directly
+        // Traverse the linked list
         while (curr_addr != 0) {
-            // Read current node
-            WatcherNode current = watches.readNode(curr_addr);
+            // Read current block
+            WatcherBlock curr_block = watches.readBlock(curr_addr);
+            uint64_t next_addr = curr_block.next_block;
+            bool block_modified = false;
             
-            int clause_idx = current.clause_idx;
-            Lit blocker = current.blocker;
-            uint64_t next_addr = current.next;
-            
-            // Debug info for watchers
-            output.verbose(CALL_INFO, 4, 0, "  Watcher: clause %d, blocker %d\n", 
-                clause_idx, toInt(blocker));
+            // Process all valid nodes in the current block
+            for (size_t i = 0; i < watches.getNodesPerBlock(); i++) {
+                // Skip invalid nodes
+                if ((curr_block.valid_mask & (1 << i)) == 0) continue;
                 
-            if (var_assigned[var(blocker)] && value(blocker) == true) {
-                // Blocker is true, skip to next watcher
-                output.verbose(CALL_INFO, 4, 0, "    Blocker is true, skipping\n");
-                prev_addr = curr_addr;
-                prev_watcher = current;
-                curr_addr = next_addr;
-                continue;
-            }
-            
-            // Need to inspect the clause
-            ClauseMetaData cmd = clauses.getMetaData(clause_idx);
-            Clause c = clauses.readClause(cmd);
+                int clause_idx = curr_block.nodes[i].clause_idx;
+                Lit blocker = curr_block.nodes[i].blocker;
+                
+                // Debug info for watchers
+                output.verbose(CALL_INFO, 4, 0, "  Watcher: clause %d, blocker %d\n", 
+                    clause_idx, toInt(blocker));
+                    
+                if (var_assigned[var(blocker)] && value(blocker) == true) {
+                    // Blocker is true, skip to next watcher
+                    output.verbose(CALL_INFO, 4, 0, "    Blocker is true, skipping\n");
+                    continue;
+                }
+                
+                // Need to inspect the clause
+                ClauseMetaData cmd = clauses.getMetaData(clause_idx);
+                Clause c = clauses.readClause(cmd);
 
-            // Print clause for debugging
-            output.verbose(CALL_INFO, 4, 0, "    Clause %d: %s\n",
-                           clause_idx, printClause(c).c_str());
+                // Print clause for debugging
+                output.verbose(CALL_INFO, 4, 0, "    Clause %d: %s\n",
+                               clause_idx, printClause(c).c_str());
 
-            // Make sure the false literal (~p) is at position 1
-            if (c.literals[0] == not_p) {
-                std::swap(c.literals[0], c.literals[1]);
-                clauses.writeClause(cmd.offset, c);
-                output.verbose(CALL_INFO, 4, 0, "    Swapped literals 0 and 1\n");
-            }
-            assert(c[1] == not_p);
-            
-            // If first literal is already true, just update the blocker and continue
-            Lit first = c[0];
-            if (var_assigned[var(first)] && value(first) == true) {
-                output.verbose(CALL_INFO, 4, 0,
-                    "    First literal %d is true\n", toInt(first));
-                current.blocker = first;
-                watches.writeNode(curr_addr, current);
-
-                prev_addr = curr_addr;
-                prev_watcher = current;
-                curr_addr = next_addr;
-                continue;
-            }
-            
-            // Look for a new literal to watch
-            // can be a true literal for faster termination
-            for (size_t k = 2; k < c.size(); k++) {
-                Lit lit = c[k];
-                if (!var_assigned[var(lit)] || value(lit) == true) {
-                    // Swap to position 1 and update watcher
-                    std::swap(c.literals[1], c.literals[k]);
+                // Make sure the false literal (~p) is at position 1
+                if (c.literals[0] == not_p) {
+                    std::swap(c.literals[0], c.literals[1]);
                     clauses.writeClause(cmd.offset, c);
-                    output.verbose(CALL_INFO, 4, 0, 
-                        "    Found new watch: literal %d at position %zu\n", 
-                        toInt(c[1]), k);
-                    
-                    output.verbose(CALL_INFO, 4, 0, "    Start watchlist insertion\n");
-                    watches.insertWatcher(toWatchIndex(~c[1]), clause_idx, first);
-                    
-                    output.verbose(CALL_INFO, 4, 0, "    Start watchlist deletion for Lit %d\n", 
-                        toInt(p));
-                    if (prev_addr == 0) {
-                        // Current node is head of the list - update head pointer directly
-                        watches.writeHeadPointer(watch_idx, {next_addr});
-                    } else {
-                        // Update previous node's next pointer to skip current node
-                        prev_watcher.next = next_addr;
-                        watches.writeNode(prev_addr, prev_watcher);
+                    output.verbose(CALL_INFO, 4, 0, "    Swapped literals 0 and 1\n");
+                }
+                assert(c[1] == not_p);
+                
+                // If first literal is already true, just update the blocker and continue
+                Lit first = c[0];
+                if (var_assigned[var(first)] && value(first) == true) {
+                    output.verbose(CALL_INFO, 4, 0,
+                        "    First literal %d is true\n", toInt(first));
+                    curr_block.nodes[i].blocker = first;
+                    block_modified = true;
+                    continue;
+                }
+                
+                // Look for a new literal to watch
+                bool found_new_watch = false;
+                for (size_t k = 2; k < c.size(); k++) {
+                    Lit lit = c[k];
+                    if (!var_assigned[var(lit)] || value(lit) == true) {
+                        // Swap to position 1 and update watcher
+                        std::swap(c.literals[1], c.literals[k]);
+                        clauses.writeClause(cmd.offset, c);
+                        output.verbose(CALL_INFO, 4, 0, 
+                            "    Found new watch: literal %d at position %zu\n", 
+                            toInt(c[1]), k);
+                        
+                        output.verbose(CALL_INFO, 4, 0, "    Start watchlist insertion\n");
+                        watches.insertWatcher(toWatchIndex(~c[1]), clause_idx, first);
+                        
+                        // Mark this node as invalid in the current block
+                        curr_block.valid_mask &= ~(1 << i);
+                        block_modified = true;
+                        found_new_watch = true;
+                        break;
                     }
-                    // free the current node
-                    watches.freeNode(curr_addr);
-                    output.verbose(CALL_INFO, 4, 0, "    Watchlist deletion done\n");
+                }
+                
+                if (found_new_watch) continue;
+                
+                // Did not find a new watch - clause is unit or conflicting
+                output.verbose(CALL_INFO, 4, 0, "    No new watch found\n");
+                
+                // Check if first literal is false (conflict) or undefined (unit)
+                if (var_assigned[var(first)] && value(first) == false) {
+                    // Conflict detected
+                    output.verbose(CALL_INFO, 3, 0,
+                        "CONFLICT: Clause %d has all literals false\n", clause_idx);
+                    qhead = trail.size();
+                    conflict = clause_idx;
                     
-                    curr_addr = next_addr;
-                    goto NextClause;  // Continue with the next watcher
+                    // Write back modified block before exiting on conflict
+                    if (block_modified)
+                        watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block);
+                    
+                    return conflict;
+                } else {
+                    // Unit clause found, propagate
+                    output.verbose(CALL_INFO, 3, 0,
+                        "    forces literal %d (to true)\n", toInt(first));
+                    trailEnqueue(first, clause_idx);
                 }
             }
             
-            // Did not find a new watch - clause is unit or conflicting
-            output.verbose(CALL_INFO, 4, 0, "    No new watch found\n");
+            // After processing all nodes in the block, check if we need to write it back
+            if (block_modified)
+                watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block);
             
-            // Check if first literal is false (conflict) or undefined (unit)
-            if (var_assigned[var(first)] && value(first) == false) {
-                // Conflict detected
-                output.verbose(CALL_INFO, 3, 0,
-                    "CONFLICT: Clause %d has all literals false\n", clause_idx);
-                qhead = trail.size();
-                conflict = clause_idx;
-                break;  // Exit the loop immediately on conflict
-            } else {
-                // Unit clause found, propagate
-                output.verbose(CALL_INFO, 3, 0,
-                    "UNIT: Clause %d forces literal %d (to true)\n",
-                    clause_idx, toInt(first));
-                trailEnqueue(first, clause_idx);
+            // the current block is deleted if it has no valid nodes left
+            if (curr_block.valid_mask != 0) {
+                prev_addr = curr_addr;
+                prev_block = curr_block;
             }
-            prev_addr = curr_addr;
-            prev_watcher = current;
+
+            // Move to next block
             curr_addr = next_addr;
-            
-        NextClause:;
+            block_modified = false;
         }
-        
-        // If conflict found, stop propagation
-        // if (conflict != ClauseRef_Undef) break;
     }
     
     output.verbose(CALL_INFO, 3, 0, "PROPAGATE: no more propagations\n");
@@ -1202,21 +1203,29 @@ void SATSolver::reduceDB() {
         uint64_t curr_addr = watches.readHeadPointer(i);
         
         if (curr_addr == 0) continue;  // Skip empty watch lists
-        while (curr_addr != 0) {  // Traverse the linked list
-            WatcherNode current = watches.readNode(curr_addr);
+        while (curr_addr != 0) {  // Traverse the linked list of blocks
+            WatcherBlock curr_block = watches.readBlock(curr_addr);
+            uint64_t next_addr = curr_block.next_block;
+            bool block_modified = false;
             
-            int old_idx = current.clause_idx;
-            uint64_t next_addr = current.next;
-            // Only update indices for learnt clauses that aren't being removed
-            if (old_idx >= num_clauses) {
-                assert(!to_remove[old_idx]);  // already been removed
-                current.clause_idx = clause_map[old_idx];
-                watches.writeNode(curr_addr, current);
+            for (size_t j = 0; j < watches.getNodesPerBlock(); j++) {
+                // Check if this node is valid
+                if ((curr_block.valid_mask & (1 << j)) == 0) continue;
+                
+                int old_idx = curr_block.nodes[j].clause_idx;
+                // Only update indices for learnt clauses that aren't being removed
+                if (old_idx >= num_clauses) {
+                    assert(!to_remove[old_idx]);  // already been removed
+                    curr_block.nodes[j].clause_idx = clause_map[old_idx];
+                    block_modified = true;
                     
-                output.verbose(CALL_INFO, 6, 0, 
-                    "REDUCEDB: Updated watcher reference from %d to %d\n",
-                    old_idx, current.clause_idx);
+                    output.verbose(CALL_INFO, 6, 0, 
+                        "REDUCEDB: Updated watcher reference from %d to %d\n",
+                        old_idx, curr_block.nodes[j].clause_idx);
+                }
             }
+            
+            if (block_modified)  watches.writeBlock(curr_addr, curr_block);
             curr_addr = next_addr;
         }
     }
@@ -1251,7 +1260,7 @@ void SATSolver::trailEnqueue(Lit literal, int reason) {
     // Add to trail
     trail.push_back(literal);
     stat_assigns->addData(1);
-    output.verbose(CALL_INFO, 4, 0,"ASSIGN: x%d = %d at level %d due to clause %d\n", 
+    output.verbose(CALL_INFO, 5, 0,"ASSIGN: x%d = %d at level %d due to clause %d\n", 
         v, var_value[v] ? 1 : 0, current_level(), reason);
 }
 
@@ -1297,8 +1306,6 @@ Lit SATSolver::chooseBranchVariable() {
     }
     
     while (next == var_Undef || var_assigned[next] || !decision[next]) {
-        output.verbose(CALL_INFO, 5, 0, 
-            "DECISION: order heap size %ld\n", order_heap->size()); 
         if (order_heap->empty()) {
             next = var_Undef;
             break;
@@ -1308,7 +1315,7 @@ Lit SATSolver::chooseBranchVariable() {
         next = heap_resp;
     }
 
-    output.verbose(CALL_INFO, 5, 0, "DECISION: Selected var %d \n", next);
+    output.verbose(CALL_INFO, 3, 0, "DECISION: Selected lit %d \n", toInt(mkLit(next, polarity[next])));
     if (next == var_Undef) return lit_Undef;
     return mkLit(next, polarity[next]);
 }
