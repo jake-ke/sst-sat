@@ -101,10 +101,6 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
         output.fatal(CALL_INFO, -1, "Unable to load StandardMem SubComponent for global memory\n");
     }
 
-    coroutines.resize(1, nullptr);
-    yield_ptrs.resize(1, nullptr);
-    active_workers.resize(1, false);
-
     // Create Variables object by passing point of yield_ptr
     variables = Variables(verbose, global_memory, variables_base_addr, &yield_ptr);
     variables.setReorderBuffer(&reorder_buffer);
@@ -368,7 +364,7 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
     if (auto* read_resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
         uint64_t addr = read_resp->pAddr;
         int worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
-        active_workers[worker_id] = true;
+        if (active_workers.size() > 0) active_workers[worker_id] = true;
         output.verbose(CALL_INFO, 8, 0, "handleGlobalMemEvent received for 0x%lx, worker %d\n", addr, worker_id);
 
         // Route the request to the appropriate handler based on address range
@@ -404,125 +400,109 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
     switch (state) {
         case IDLE: return false; // skip prints
         case INIT: 
-            coroutines[0] = new coro_t::pull_type(
+            coroutine = new coro_t::pull_type(
                 [this](coro_t::push_type &yield) {
                     yield_ptr = &yield;
-                    yield_ptrs[0] = yield_ptr;
                     initialize();
                 });
-            if (!(*coroutines[0])) {
+            if (!(*coroutine)) {
                 output.verbose(CALL_INFO, 8, 0, "Coroutine never paused but completed\n");
-                delete coroutines[0];
-                coroutines[0] = nullptr;
+                delete coroutine;
+                coroutine = nullptr;
                 yield_ptr = nullptr;
             } else state = IDLE;
             break;
         case STEP: {
-            bool done = true;
-
-            for (int i = 0; i < coroutines.size(); i++) {
-                if (active_workers[i]) {
-                    yield_ptr = yield_ptrs[i];
-                    (*coroutines[i])();
-                    active_workers[i] = false;
-                    if ((*coroutines[i])) {
-                        done = false;
-                    } else {
-                        delete coroutines[i];
-                        coroutines[i] = nullptr;
-                        yield_ptrs[i] = nullptr;
-                        yield_ptr = nullptr;
-                    }
-                } else if (coroutines[i]) {
-                    done = false;
-                }
-            }
-
-            if (!done) state = IDLE;
-            else {
-                if (post_coroutine_cb) post_coroutine_cb();
-                post_coroutine_cb = nullptr;
-                active_workers.resize(1);
-                coroutines.resize(1);
-                yield_ptrs.resize(1);
+            (*coroutine)();
+            if (*coroutine) {
+                output.verbose(CALL_INFO, 8, 0, "coroutine paused\n");
+                state = IDLE;  // Continue coroutine later
+            } else {
+                output.verbose(CALL_INFO, 8, 0, "coroutine completed\n");
+                delete coroutine;
+                coroutine = nullptr;  // coroutine will set the next state
+                yield_ptr = nullptr;  // Clear yield pointer when coroutine completes
             }
             break;
         }
         case PROPAGATE:
-            coroutines[0] = new coro_t::pull_type(
+            coroutine = new coro_t::pull_type(
                 [this](coro_t::push_type &yield) {
                     yield_ptr = &yield;
-                    yield_ptrs[0] = yield_ptr;
                     execPropagate(); 
                 });
-            if (!(*coroutines[0])) {
-                delete coroutines[0];
-                coroutines[0] = nullptr;
+            if (!(*coroutine)) {
+                delete coroutine;
+                coroutine = nullptr;
                 yield_ptr = nullptr;
             } else state = IDLE;
             break;
         case DECIDE:
-            coroutines[0] = new coro_t::pull_type(
+            coroutine = new coro_t::pull_type(
                 [this](coro_t::push_type &yield) {
                     yield_ptr = &yield;
-                    yield_ptrs[0] = yield_ptr;
                     execDecide(); 
                 });
-            if (!(*coroutines[0])) {
-                delete coroutines[0];
-                coroutines[0] = nullptr;
+            if (!(*coroutine)) {
+                delete coroutine;
+                coroutine = nullptr;
                 yield_ptr = nullptr;
             } else state = IDLE;
             break;
         case ANALYZE:
-            coroutines[0] = new coro_t::pull_type(
+            coroutine = new coro_t::pull_type(
                 [this](coro_t::push_type &yield) {
                     yield_ptr = &yield;
-                    yield_ptrs[0] = yield_ptr;
                     execAnalyze(); 
                 });
             state = IDLE;
             break;
         case MINIMIZE:
-            execMinimize();
+            if (ccmin_mode == 0 || learnt_clause.size() <= 1) {
+                state = BTLEVEL;
+                break;
+            }
+
+            coroutine = new coro_t::pull_type(
+                [this](coro_t::push_type &yield) {
+                    yield_ptr = &yield;
+                    execMinimize(); 
+                });
+            state = IDLE;
             break;
         case BTLEVEL:
             if (learnt_clause.size() == 1) {
                 bt_level = 0;
                 state = BACKTRACK;
             } else {
-                coroutines[0] = new coro_t::pull_type(
+                coroutine = new coro_t::pull_type(
                     [this](coro_t::push_type &yield) {
                         yield_ptr = &yield;
-                        yield_ptrs[0] = yield_ptr;
                         findBtLevel(); 
                     });
                 state = IDLE;
             }
             break;
         case BACKTRACK:
-            coroutines[0] = new coro_t::pull_type(
+            coroutine = new coro_t::pull_type(
                 [this](coro_t::push_type &yield) {
                     yield_ptr = &yield;
-                    yield_ptrs[0] = yield_ptr;
                     execBacktrack(); 
                 });
             state = IDLE;
             break;
         case REDUCE:
-            coroutines[0] = new coro_t::pull_type(
+            coroutine = new coro_t::pull_type(
                 [this](coro_t::push_type &yield) {
                     yield_ptr = &yield;
-                    yield_ptrs[0] = yield_ptr;
                     execReduce(); 
                 });
             state = IDLE;
             break;
         case RESTART:
-            coroutines[0] = new coro_t::pull_type(
+            coroutine = new coro_t::pull_type(
                 [this](coro_t::push_type &yield) {
                     yield_ptr = &yield;
-                    yield_ptrs[0] = yield_ptr;
                     execRestart(); 
                 });
             state = IDLE;
@@ -573,47 +553,103 @@ void SATSolver::execAnalyze() {
 }
 
 void SATSolver::execMinimize() {
-    if (ccmin_mode == 0 || learnt_clause.size() <= 1) {
-        output.verbose(CALL_INFO, 2, 0, "MINIMIZE: No minimization performed\n");
-        state = BTLEVEL;
-        return;
-    }
-    
+    // Keep track of literals to clear
+    analyze_toclear.clear();
+    analyze_toclear = learnt_clause; 
+
+    // Minimize conflict clause:
+    int i, j;
     output.verbose(CALL_INFO, 3, 0,
         "ANALYZE: Minimizing clause (size %zu): %s\n", learnt_clause.size(),
         printClause(learnt_clause).c_str());
+
+    if (ccmin_mode == 2) {
+        // Deep minimization (more thorough)
+        parent_yield_ptr = yield_ptr;
+        int workers = std::min((int)MINIMIZERS, (int)learnt_clause.size() - 1);
+        active_workers.resize(workers, false);
+        coroutines.resize(workers);
+        yield_ptrs.resize(workers);
+        std::vector<bool> redundant(learnt_clause.size(), false);
+
+        // spawn sub-coroutines for each literal
+        for (int worker_id = 0; worker_id < workers; worker_id++) {
+            coroutines[worker_id] = new coro_t::pull_type(
+                [this, worker_id, &redundant](coro_t::push_type &yield) {
+                    yield_ptr = &yield;
+                    yield_ptrs[worker_id] = yield_ptr;
+                    minimizeL2_sub(redundant, worker_id);
+                });
+        }
+        (*parent_yield_ptr)();  // yield back to IDLE
+
+        // stepping sub-coroutines
+        bool done = false;
+        while (!done) {
+            done = true;
+            // Check if any worker is active
+            for (int worker_id = 0; worker_id < workers; worker_id++) {
+                if (active_workers[worker_id]) {
+                    yield_ptr = yield_ptrs[worker_id];
+                    (*coroutines[worker_id])();
+                    active_workers[worker_id] = false;
+                    if ((*coroutines[worker_id])) {
+                        done = false;
+                    } else {
+                        delete coroutines[worker_id];
+                        coroutines[worker_id] = nullptr;
+                        yield_ptrs[worker_id] = nullptr;
+                    }
+                } else if (coroutines[worker_id]) done = false;
+            }
+
+            if (!done) (*parent_yield_ptr)();  // yield back to IDLE
+        }
+        
+        // finished all sub-coroutines
+        active_workers.clear();
+        coroutines.clear();
+        yield_ptrs.clear();
+        yield_ptr = parent_yield_ptr;
+
+        for (i = j = 1; i < learnt_clause.size(); i++) {
+            if (!redundant[i]) learnt_clause[j++] = learnt_clause[i];
+        }
+
+    } else if (ccmin_mode == 1) {
+        // Basic minimization (faster but less thorough)
+        for (i = j = 1; i < learnt_clause.size(); i++) {
+            Variable var_data = variables.readVar(var(learnt_clause[i]));
+
+            if (var_data.reason == ClauseRef_Undef)
+                learnt_clause[j++] = learnt_clause[i];
+            else {
+                const Clause& c = clauses.readClause(var_data.reason);
+                for (size_t k = 1; k < c.size(); k++) {
+                    Var l = var(c[k]);
+                    if (!seen[l] && var_data.level > 0) {
+                        learnt_clause[j++] = learnt_clause[i];
+                        break; }
+                }
+            }
+        }
+    } else i = j = learnt_clause.size();
+
+    learnt_clause.resize(j);
     
-    if (ccmin_mode == 1) {
-        coroutines[0] = new coro_t::pull_type(
-            [this](coro_t::push_type &yield) {
-                yield_ptr = &yield;
-                minimizeL1(); 
-            });
-        state = IDLE;
-        return;
+    // Clear seen vector for next analysis
+    for (const Lit& l : analyze_toclear) seen[var(l)] = 0;
+    
+    // Update statistics - count how many literals were removed
+    if (i - j > 0) {
+        stat_minimized_literals->addDataNTimes(i - j, 1);
+        output.verbose(CALL_INFO, 3, 0, 
+            "MINIMIZE: removed %d literals\n", i - j);
+        output.verbose(CALL_INFO, 3, 0, "MINIMIZE: Final minimized clause: %s\n", 
+            printClause(learnt_clause).c_str());
     }
 
-    // ccmin_mode == 2
-    analyze_toclear.clear();
-    analyze_toclear = learnt_clause;
-    redundant.resize(learnt_clause.size(), false);
-    
-    int workers = std::min((int)MINIMIZERS, (int)learnt_clause.size() - 1);
-    active_workers.resize(workers, false);
-    coroutines.resize(workers);
-    yield_ptrs.resize(workers);
-
-    for (int i = 0; i < workers; i++) {
-        coroutines[i] = new coro_t::pull_type(
-            [this, i](coro_t::push_type &yield) {
-                yield_ptr = &yield;
-                yield_ptrs[i] = yield_ptr;
-                minimizeL2(i);
-            });
-    }
-
-    post_coroutine_cb = [this]() { this->postMinimizeL2(); };
-    state = IDLE;
+    state = BTLEVEL;
 }
 
 void SATSolver::execBacktrack() {
@@ -981,76 +1017,6 @@ void SATSolver::analyze() {
 }
 
 //-----------------------------------------------------------------------------------
-// minimize
-//-----------------------------------------------------------------------------------
-
-// minimizeL1 is never tested
-void SATSolver::minimizeL1() {
-    size_t i, j;
-    for (i = j = 1; i < learnt_clause.size(); i++) {
-        Variable var_data = variables.readVar(var(learnt_clause[i]));
-
-        if (var_data.reason == ClauseRef_Undef)
-            learnt_clause[j++] = learnt_clause[i];
-        else {
-            const Clause& c = clauses.readClause(var_data.reason);
-            for (size_t k = 1; k < c.size(); k++) {
-                Var l = var(c[k]);
-                if (!seen[l] && var_data.level > 0) {
-                    learnt_clause[j++] = learnt_clause[i];
-                    break; }
-            }
-        }
-    }
-    learnt_clause.resize(j);
-
-    state = BTLEVEL;
-
-    stat_minimized_literals->addDataNTimes(i - j, 1);
-    output.verbose(CALL_INFO, 3, 0, 
-        "ANALYZE: removed %zu literals\n", i - j);
-    output.verbose(CALL_INFO, 3, 0, "MINIMIZE: Final minimized clause: %s\n", 
-        printClause(learnt_clause).c_str());
-}
-
-void SATSolver::minimizeL2(int worker_id) {
-    output.verbose(CALL_INFO, 3, 0, "MINIMIZE[%d]: Starting L2 minimization\n", worker_id);
-    for (size_t i = worker_id + 1; i < learnt_clause.size(); i += MINIMIZERS) {
-        output.verbose(CALL_INFO, 4, 0, 
-            "MINIMIZE[%d]: Checking literal %d at position %zu\n", 
-            worker_id, toInt(learnt_clause[i]), i);
-        
-        redundant[i] = litRedundant(learnt_clause[i], worker_id);
-    }
-
-    state = BTLEVEL;
-}
-
-void SATSolver::postMinimizeL2() {
-    output.verbose(CALL_INFO, 3, 0, "MINIMIZE: Merging results from workers\n");
-    size_t i, j;
-    for (i = j = 1; i < learnt_clause.size(); i++) {
-        if (!redundant[i]) {
-            learnt_clause[j++] = learnt_clause[i];
-        } else {
-            output.verbose(CALL_INFO, 4, 0, 
-                "MINIMIZE: literal %d at position %zu is redundant\n", 
-                toInt(learnt_clause[i]), i);
-        }
-    }
-    learnt_clause.resize(j);
-
-    // Clear seen vector for next analysis
-    for (const Lit& l : analyze_toclear) seen[var(l)] = 0;
-    
-    stat_minimized_literals->addDataNTimes(i - j, 1);
-    output.verbose(CALL_INFO, 3, 0, 
-        "MINIMIZE: removed %zu literals\n", i - j);
-    output.verbose(CALL_INFO, 3, 0, "MINIMIZE: Final minimized clause: %s\n", 
-        printClause(learnt_clause).c_str());
-}
-
-//-----------------------------------------------------------------------------------
 // find backtrack level
 //-----------------------------------------------------------------------------------
 
@@ -1379,6 +1345,16 @@ bool SATSolver::locked(int clause_idx) {
 //-----------------------------------------------------------------------------------
 // Clause Minimization
 //-----------------------------------------------------------------------------------
+
+void SATSolver::minimizeL2_sub(std::vector<bool>& redundant, int worker_id) {
+    for (size_t i = worker_id + 1; i < learnt_clause.size(); i += MINIMIZERS) {
+        output.verbose(CALL_INFO, 4, 0, 
+            "MINIMIZE[%d]: Checking literal %d at position %zu\n", 
+            worker_id, toInt(learnt_clause[i]), i);
+        
+        redundant[i] = litRedundant(learnt_clause[i], worker_id);
+    }
+}
 
 // Check if 'p' can be removed from a conflict clause
 bool SATSolver::litRedundant(Lit p, int worker_id) {

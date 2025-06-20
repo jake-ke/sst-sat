@@ -130,9 +130,6 @@ public:
     bool decide();
     int unitPropagate();
     void analyze();
-    void minimizeL1();
-    void minimizeL2(int worker_id);
-    void postMinimizeL2();
     void findBtLevel();
     void backtrack(int backtrack_level);
     
@@ -158,6 +155,7 @@ public:
     bool locked(int clause_idx);   // Check if clause is locked (reason for assignment)
 
     // Clause Minimization
+    void minimizeL2_sub(std::vector<bool>& redundant, int worker_id = 0);  // coroutine function
     bool litRedundant(Lit p, int worker_id = 0);  // Check if literal can be removed
 
     // Restart helpers
@@ -222,7 +220,6 @@ private:
     // Clause minimization
     int ccmin_mode;                             // Conflict clause minimization mode
     std::vector<Lit> analyze_toclear;           // Literals to clear after analysis
-    std::vector<bool> redundant;                // Whether a literal is redundant in the clause
 
     // Two Watched Literals implementation
     Watches watches;  // Replaces std::vector<std::vector<Watcher>> watches
@@ -273,13 +270,14 @@ private:
     int conflicts_until_restart;        // Number of conflicts to trigger next restart
     int conflictC;                      // Number of conflicts since last restart
 
-    // Reorder buffer for managing parallel memory requests
-    ReorderBuffer reorder_buffer;
-    std::vector<coro_t::pull_type*> coroutines;             // Coroutines for parallel tasks
-    std::vector<coro_t::push_type*> yield_ptrs;             // yield pointers for parallel tasks
-    coro_t::push_type* yield_ptr;                           // current yield pointer
-    std::vector<bool> active_workers;                       // Track active workers
-    std::function<void()> post_coroutine_cb;                // Callback after parallel coroutines
+    // simulating parallel execution support
+    ReorderBuffer reorder_buffer;                   // Reorder buffer for managing parallel read requests
+    coro_t::pull_type* coroutine;                   // coroutine in the top level FSM
+    coro_t::push_type* yield_ptr;                   // current yield pointer
+    coro_t::push_type* parent_yield_ptr;            // saves parent (fsm) yield pointer
+    std::vector<coro_t::pull_type*> coroutines;     // sub coroutines for parallel tasks
+    std::vector<coro_t::push_type*> yield_ptrs;     // yield pointers for parallel tasks
+    std::vector<bool> active_workers;               // Track completion of sub coroutines
 
 
     // Statistics

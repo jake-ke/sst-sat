@@ -7,7 +7,7 @@
 
 using coro_t = boost::coroutines2::coroutine<void>;
 
-#define MINIMIZERS 2 // Number of minimizers to use in analyze phase
+const int MINIMIZERS = 2; // Number of minimizers
 
 // Define types for variables and literals
 typedef int Var;
