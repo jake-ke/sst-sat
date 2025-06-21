@@ -566,7 +566,7 @@ void SATSolver::execMinimize() {
     if (ccmin_mode == 2) {
         // Deep minimization (more thorough)
         parent_yield_ptr = yield_ptr;
-        int workers = std::min((int)MINIMIZERS, (int)learnt_clause.size() - 1);
+        int workers = std::min(MINIMIZERS, (int)learnt_clause.size() - 1);
         active_workers.resize(workers, false);
         coroutines.resize(workers);
         yield_ptrs.resize(workers);
@@ -782,7 +782,7 @@ bool SATSolver::decide() {
 
 int SATSolver::unitPropagate() {
     output.verbose(CALL_INFO, 3, 0, "PROPAGATE: Starting unit propagation\n");
-    int conflict = ClauseRef_Undef;
+    conflict = ClauseRef_Undef;
 
     while (qhead < trail.size()) {
         stat_propagations->addData(1);
@@ -804,105 +804,45 @@ int SATSolver::unitPropagate() {
         while (curr_addr != 0) {
             // Read current block
             WatcherBlock curr_block = watches.readBlock(curr_addr);
+
             uint64_t next_addr = curr_block.next_block;
             bool block_modified = false;
             
+            // set up for sub-coroutines
+            parent_yield_ptr = yield_ptr;
+            // int valid_nodes_in_block = __builtin_popcount(curr_block.valid_mask);
+            // int workers = std::min(PROPAGATORS, valid_nodes_in_block);
+            // active_workers.resize(workers, false);
+            // coroutines.resize(workers);
+            // yield_ptrs.resize(workers);
+            
             // Process all valid nodes in the current block
-            for (size_t i = 0; i < watches.getNodesPerBlock(); i++) {
+            for (int i = 0; i < watches.getNodesPerBlock(); i++) {
                 // Skip invalid nodes
                 if ((curr_block.valid_mask & (1 << i)) == 0) continue;
-                
-                int clause_idx = curr_block.nodes[i].clause_idx;
+
                 Lit blocker = curr_block.nodes[i].blocker;
-                
-                // Debug info for watchers
-                output.verbose(CALL_INFO, 4, 0, "  Watcher: clause %d, blocker %d\n", 
-                    clause_idx, toInt(blocker));
+                output.verbose(CALL_INFO, 4, 0, "  Watch block[%d]: clause %d, blocker %d\n", 
+                    i, curr_block.nodes[i].clause_idx, toInt(blocker));
                     
                 if (var_assigned[var(blocker)] && value(blocker) == true) {
                     // Blocker is true, skip to next watcher
                     output.verbose(CALL_INFO, 4, 0, "    Blocker is true, skipping\n");
                     continue;
                 }
-                
-                // Need to inspect the clause
-                ClauseMetaData cmd = clauses.getMetaData(clause_idx);
-                Clause c = clauses.readClause(cmd);
 
-                // Print clause for debugging
-                output.verbose(CALL_INFO, 4, 0, "    Clause %d: %s\n",
-                               clause_idx, printClause(c).c_str());
-
-                // Make sure the false literal (~p) is at position 1
-                if (c.literals[0] == not_p) {
-                    std::swap(c.literals[0], c.literals[1]);
-                    clauses.writeClause(cmd.offset, c);
-                    output.verbose(CALL_INFO, 4, 0, "    Swapped literals 0 and 1\n");
-                }
-                assert(c[1] == not_p);
-                
-                // If first literal is already true, just update the blocker and continue
-                Lit first = c[0];
-                if (var_assigned[var(first)] && value(first) == true) {
-                    output.verbose(CALL_INFO, 4, 0,
-                        "    First literal %d is true\n", toInt(first));
-                    curr_block.nodes[i].blocker = first;
-                    block_modified = true;
-                    continue;
-                }
-                
-                // Look for a new literal to watch
-                bool found_new_watch = false;
-                for (size_t k = 2; k < c.size(); k++) {
-                    Lit lit = c[k];
-                    if (!var_assigned[var(lit)] || value(lit) == true) {
-                        // Swap to position 1 and update watcher
-                        std::swap(c.literals[1], c.literals[k]);
-                        clauses.writeClause(cmd.offset, c);
-                        output.verbose(CALL_INFO, 4, 0, 
-                            "    Found new watch: literal %d at position %zu\n", 
-                            toInt(c[1]), k);
-                        
-                        output.verbose(CALL_INFO, 4, 0, "    Start watchlist insertion\n");
-                        watches.insertWatcher(toWatchIndex(~c[1]), clause_idx, first);
-                        
-                        // Mark this node as invalid in the current block
-                        curr_block.valid_mask &= ~(1 << i);
-                        block_modified = true;
-                        found_new_watch = true;
-                        break;
-                    }
-                }
-                
-                if (found_new_watch) continue;
-                
-                // Did not find a new watch - clause is unit or conflicting
-                output.verbose(CALL_INFO, 4, 0, "    No new watch found\n");
-                
-                // Check if first literal is false (conflict) or undefined (unit)
-                if (var_assigned[var(first)] && value(first) == false) {
-                    // Conflict detected
-                    output.verbose(CALL_INFO, 3, 0,
-                        "CONFLICT: Clause %d has all literals false\n", clause_idx);
-                    qhead = trail.size();
-                    conflict = clause_idx;
-                    
-                    // Write back modified block before exiting on conflict
-                    if (block_modified)
-                        watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block);
-                    
-                    return conflict;
-                } else {
-                    // Unit clause found, propagate
-                    output.verbose(CALL_INFO, 3, 0,
-                        "    forces literal %d (to true)\n", toInt(first));
-                    trailEnqueue(first, clause_idx);
-                }
+                subPropagate(i, not_p, block_modified, curr_block);
             }
+            output.verbose(CALL_INFO, 4, 0, "  Finished processing a watch block\n");
             
             // After processing all nodes in the block, check if we need to write it back
             if (block_modified)
                 watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block);
+
+            if (conflict != ClauseRef_Undef) {
+                qhead = trail.size();
+                return conflict;
+            }
             
             // the current block is deleted if it has no valid nodes left
             if (curr_block.valid_mask != 0) {
@@ -919,6 +859,78 @@ int SATSolver::unitPropagate() {
     output.verbose(CALL_INFO, 3, 0, "PROPAGATE: no more propagations\n");
     return conflict;
 }
+
+void SATSolver::subPropagate(
+    int i,
+    Lit not_p,
+    bool& block_modified,
+    WatcherBlock& curr_block
+) {
+    // Need to inspect the clause
+    int clause_idx = curr_block.nodes[i].clause_idx;
+    ClauseMetaData cmd = clauses.getMetaData(clause_idx);
+    Clause c = clauses.readClause(cmd);
+
+    // Print clause for debugging
+    output.verbose(CALL_INFO, 4, 0, "    Clause %d: %s\n",
+                   clause_idx, printClause(c).c_str());
+
+    // Make sure the false literal (~p) is at position 1
+    if (c.literals[0] == not_p) {
+        std::swap(c.literals[0], c.literals[1]);
+        clauses.writeClause(cmd.offset, c);
+        output.verbose(CALL_INFO, 4, 0, "    Swapped literals 0 and 1\n");
+    }
+    assert(c[1] == not_p);
+    
+    // If first literal is already true, just update the blocker and continue
+    Lit first = c[0];
+    if (var_assigned[var(first)] && value(first) == true) {
+        output.verbose(CALL_INFO, 4, 0,
+            "    First literal %d is true\n", toInt(first));
+        curr_block.nodes[i].blocker = first;
+        block_modified = true;
+        return;
+    }
+    
+    // Look for a new literal to watch
+    for (size_t k = 2; k < c.size(); k++) {
+        Lit lit = c[k];
+        if (!var_assigned[var(lit)] || value(lit) == true) {
+            // Swap to position 1 and update watcher
+            std::swap(c.literals[1], c.literals[k]);
+            clauses.writeClause(cmd.offset, c);
+            output.verbose(CALL_INFO, 4, 0, 
+                "    Found new watch: literal %d at position %zu\n", 
+                toInt(c[1]), k);
+            
+            output.verbose(CALL_INFO, 4, 0, "    Start watchlist insertion\n");
+            watches.insertWatcher(toWatchIndex(~c[1]), clause_idx, first);
+            
+            // Mark this node as invalid in the current block
+            curr_block.valid_mask &= ~(1 << i);
+            block_modified = true;
+            return;
+        }
+    }
+    
+    // Did not find a new watch - clause is unit or conflicting
+    output.verbose(CALL_INFO, 4, 0, "    No new watch found\n");
+    
+    // Check if first literal is false (conflict) or undefined (unit)
+    if (var_assigned[var(first)] && value(first) == false) {
+        // Conflict detected
+        output.verbose(CALL_INFO, 3, 0,
+            "     Conflict: Clause %d has all literals false\n", clause_idx);
+        conflict = clause_idx;
+    } else {
+        // Unit clause found, propagate
+        output.verbose(CALL_INFO, 3, 0,
+            "    forces literal %d (to true)\n", toInt(first));
+        trailEnqueue(first, clause_idx);
+    }
+}
+
 
 //-----------------------------------------------------------------------------------
 // analyze

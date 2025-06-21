@@ -129,6 +129,7 @@ public:
     void initialize();
     bool decide();
     int unitPropagate();
+    void subPropagate(int i, Lit not_p, bool& block_modified, WatcherBlock& block);
     void analyze();
     void findBtLevel();
     void backtrack(int backtrack_level);
