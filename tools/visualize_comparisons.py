@@ -255,7 +255,7 @@ def print_summary_stats(df_merged):
     print("\n" + "="*80)
     print("PERFORMANCE COMPARISON SUMMARY")
     print("="*80)
-    print(f"{'Metric':<20} {'Improved':<10} {'Worse':<10} {'Same':<8} {'Avg Ratio':<12}")
+    print(f"{'Metric':<20} {'Improved':<10} {'Worse':<10} {'Same':<8} {'Avg Diff':<12}")
     print("-"*80)
     
     for metric in metrics:
@@ -275,13 +275,13 @@ def print_summary_stats(df_merged):
                 improved = (current_vals < backup_vals).sum()
                 worse = (current_vals > backup_vals).sum() 
                 same = (current_vals == backup_vals).sum()
-                
-                # Calculate average ratio (current/backup)
-                ratios = current_vals / backup_vals.replace(0, 1)  # Avoid division by zero
-                avg_ratio = ratios.mean()
-                
+
+                # Calculate average diff (current/backup)
+                diffs = current_vals - backup_vals
+                avg_diff = diffs.mean()
+
                 metric_name = metric.replace('_', ' ').title()
-                print(f"{metric_name:<20} {improved:<10} {worse:<10} {same:<8} {avg_ratio:<12.2f}")
+                print(f"{metric_name:<20} {improved:<10} {worse:<10} {same:<8} {avg_diff:<12.2f}")
 
 def main():
     print("Starting visualization script...")
