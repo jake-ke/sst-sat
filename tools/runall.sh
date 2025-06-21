@@ -168,7 +168,7 @@ run_single_test() {
     append_to_file_safely "$progress_file" "START|$filename|$start_time"
     
     # Build command with timeout and basic arguments
-    local command="timeout 7200 sst ./tests/test_basic.py -- --cnf \"$file\" --stats-file \"$stats_file\""
+    local command="timeout 9000 sst ./tests/test_basic.py -- --cnf \"$file\" --stats-file \"$stats_file\""
     
     # Add decision file if directory specified and file exists
     if [[ -n "$DECISION_DIR" ]]; then
@@ -258,7 +258,7 @@ cleanup() {
 
 # Set trap to catch SIGINT (Ctrl+C)
 trap cleanup INT
-trap cleanup EXIT  # Also clean up on normal exit
+# trap cleanup EXIT  # Also clean up on normal exit
 
 # Function for thread-safe file operations
 safe_read_line() {
