@@ -129,7 +129,7 @@ public:
     void initialize();
     bool decide();
     int unitPropagate();
-    void subPropagate(int i, Lit not_p, bool& block_modified, WatcherBlock& block);
+    void subPropagate(int i, Lit not_p, bool& block_modified, WatcherBlock& block, int worker_id);
     void analyze();
     void findBtLevel();
     void backtrack(int backtrack_level);
@@ -279,6 +279,7 @@ private:
     std::vector<coro_t::pull_type*> coroutines;     // sub coroutines for parallel tasks
     std::vector<coro_t::push_type*> yield_ptrs;     // yield pointers for parallel tasks
     std::vector<bool> active_workers;               // Track completion of sub coroutines
+    std::vector<bool> polling;
 
 
     // Statistics

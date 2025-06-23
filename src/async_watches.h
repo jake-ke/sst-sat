@@ -7,6 +7,7 @@
 #include <cstring>
 #include <vector>
 #include <queue>
+#include <unordered_set>
 #include "structs.h"
 #include "async_base.h"
 
@@ -77,6 +78,9 @@ public:
     void insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker_id = 0);
     void removeWatcher(int lit_idx, int clause_idx, int worker_id = 0);
 
+    // only support one worker at a time for now
+    bool isBusy(int lit_idx) const { return busy.find(lit_idx) != busy.end(); }
+
 private:
     uint64_t watches_base_addr;    // Base address of the watches array (head pointers)
     uint64_t nodes_base_addr;      // Base address for watcher nodes
@@ -87,6 +91,9 @@ private:
     
     // Number of nodes that can fit in a cache line
     size_t nodes_per_block;
+    
+    // literal indices that are currently busy
+    std::unordered_set<int> busy;
 };
 
 #endif // ASYNC_WATCHES_H

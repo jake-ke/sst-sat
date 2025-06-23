@@ -813,13 +813,8 @@ int SATSolver::unitPropagate() {
             uint64_t next_addr = curr_block.next_block;
             bool block_modified = false;
             
-            // set up for sub-coroutines
+            // spawn sub-coroutines
             parent_yield_ptr = yield_ptr;
-            // int valid_nodes_in_block = __builtin_popcount(curr_block.valid_mask);
-            // int workers = std::min(PROPAGATORS, valid_nodes_in_block);
-            // active_workers.resize(workers, false);
-            // coroutines.resize(workers);
-            // yield_ptrs.resize(workers);
             
             // Process all valid nodes in the current block
             for (int i = 0; i < watches.getNodesPerBlock(); i++) {
@@ -827,17 +822,66 @@ int SATSolver::unitPropagate() {
                 if ((curr_block.valid_mask & (1 << i)) == 0) continue;
 
                 Lit blocker = curr_block.nodes[i].blocker;
-                output.verbose(CALL_INFO, 4, 0, "  Watch block[%d]: clause %d, blocker %d\n", 
-                    i, curr_block.nodes[i].clause_idx, toInt(blocker));
-                    
                 if (var_assigned[var(blocker)] && value(blocker) == true) {
                     // Blocker is true, skip to next watcher
-                    output.verbose(CALL_INFO, 4, 0, "    Blocker is true, skipping\n");
+                    output.verbose(CALL_INFO, 4, 0,
+                        "  Watch block[%d]: clause %d, blocker %d = True, skipping\n", 
+                        i, curr_block.nodes[i].clause_idx, toInt(blocker));
                     continue;
                 }
-
-                subPropagate(i, not_p, block_modified, curr_block);
+                
+                active_workers.push_back(false);
+                polling.push_back(false);
+                int worker_id = active_workers.size() - 1;
+                coroutines.push_back(new coro_t::pull_type(
+                    [this, i, not_p, &block_modified, &curr_block, worker_id](coro_t::push_type &yield) {
+                        yield_ptr = &yield;
+                        yield_ptrs.push_back(yield_ptr);
+                        subPropagate(i, not_p, block_modified, curr_block, worker_id);
+                    }));
             }
+            if (!active_workers.empty()) (*parent_yield_ptr)();  // yield back to IDLE
+
+            // stepping sub-coroutines
+            bool done = false;
+            while (!done) {
+                done = true;
+                // Check if any worker is active
+                for (size_t j = 0; j < active_workers.size(); j++) {
+                    output.verbose(CALL_INFO, 7, 0, "Worker %zu: active=%d, polling=%d\n",
+                        j, (bool)active_workers[j], (bool)polling[j]);
+                    if (active_workers[j]) {
+                        yield_ptr = yield_ptrs[j];
+                        (*coroutines[j])();
+                        active_workers[j] = false;
+                        if ((*coroutines[j])) {
+                            done = false;
+                        } else {
+                            delete coroutines[j];
+                            coroutines[j] = nullptr;
+                            yield_ptrs[j] = nullptr;
+                        }
+                    } else if (coroutines[j]) done = false;
+                }
+
+                // since the polling workers never get triggered,
+                // we need to check them after completing the active workers
+                for (size_t j = 0; j < polling.size(); j++) {
+                    if (polling[j]) {
+                        yield_ptr = yield_ptrs[j];
+                        (*coroutines[j])();
+                    }
+                }
+
+                if (!done) (*parent_yield_ptr)();  // yield back to IDLE
+            }
+
+            // finished all sub-coroutines
+            active_workers.clear();
+            polling.clear();
+            coroutines.clear();
+            yield_ptrs.clear();
+            yield_ptr = parent_yield_ptr;
             output.verbose(CALL_INFO, 4, 0, "  Finished processing a watch block\n");
             
             // After processing all nodes in the block, check if we need to write it back
@@ -869,16 +913,19 @@ void SATSolver::subPropagate(
     int i,
     Lit not_p,
     bool& block_modified,
-    WatcherBlock& curr_block
+    WatcherBlock& curr_block,
+    int worker_id
 ) {
     // Need to inspect the clause
     int clause_idx = curr_block.nodes[i].clause_idx;
-    ClauseMetaData cmd = clauses.getMetaData(clause_idx);
-    Clause c = clauses.readClause(cmd);
-
+    ClauseMetaData cmd = clauses.getMetaData(clause_idx, worker_id);
+    Clause c = clauses.readClause(cmd, worker_id);
+    
     // Print clause for debugging
-    output.verbose(CALL_INFO, 4, 0, "    Clause %d: %s\n",
-                   clause_idx, printClause(c).c_str());
+    output.verbose(CALL_INFO, 4, 0,
+        "  Watch block[%d]: blocker:%d, clause %d: %s\n", 
+        i, toInt(curr_block.nodes[i].blocker), 
+        curr_block.nodes[i].clause_idx, printClause(c).c_str());
 
     // Make sure the false literal (~p) is at position 1
     if (c.literals[0] == not_p) {
@@ -909,8 +956,14 @@ void SATSolver::subPropagate(
                 "    Found new watch: literal %d at position %zu\n", 
                 toInt(c[1]), k);
             
+            while (watches.isBusy(toWatchIndex(~c[1]))) {
+                polling[worker_id] = true;
+                (*yield_ptr)();  // Yield to allow other workers to process
+            }
+            polling[worker_id] = false;
+
             output.verbose(CALL_INFO, 4, 0, "    Start watchlist insertion\n");
-            watches.insertWatcher(toWatchIndex(~c[1]), clause_idx, first);
+            watches.insertWatcher(toWatchIndex(~c[1]), clause_idx, first, worker_id);
             
             // Mark this node as invalid in the current block
             curr_block.valid_mask &= ~(1 << i);

@@ -254,8 +254,8 @@ def save_comparison_to_csv(df_merged, output_file='comparison_results.csv'):
         return
     
     # Create a summary dataframe for CSV output
-    metrics = ['decisions', 'propagations', 'conflicts', 'learned', 'removed', 
-               'db_reductions', 'minimized', 'restarts', 'sim_time_ms']
+    metrics = ['sim_time_ms', 'decisions', 'propagations', 'conflicts', 'learned', 'removed', 
+               'db_reductions', 'minimized', 'restarts']
     
     # Start with problem names
     csv_data = df_merged[['problem']].copy()

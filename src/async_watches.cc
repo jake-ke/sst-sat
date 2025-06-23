@@ -168,6 +168,11 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
 
 // Insert a new watcher for a literal - simplified to only check the first block
 void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker_id) {
+    if (busy.find(lit_idx) != busy.end()) {
+        output.fatal(CALL_INFO, -1, "Watches: Already busy with var %d\n", lit_idx/2);
+    }
+    busy.insert(lit_idx);
+
     // Read current head pointer
     uint64_t head = readHeadPointer(lit_idx, worker_id);
 
@@ -179,10 +184,11 @@ void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker
         new_block.valid_mask = 0x01;  // First node is valid
         writeBlock(new_block_addr, new_block);
         writeHeadPointer(lit_idx, new_block_addr);
-        
+
+        busy.erase(lit_idx);
         output.verbose(CALL_INFO, 7, 0, 
-            "Inserted watcher for clause %d at var %d in new block 0x%lx\n", 
-            clause_idx, lit_idx/2, new_block_addr);
+            "Worker[%d] Inserted watcher in empty head, clause %d, var %d\n", 
+            worker_id, clause_idx, lit_idx/2);
         return;
     }
     
@@ -200,9 +206,10 @@ void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker
                 first_block.valid_mask |= (1 << i);
                 writeBlock(head, first_block);
                 
+                busy.erase(lit_idx);
                 output.verbose(CALL_INFO, 7, 0, 
-                    "Inserted watcher for clause %d at var %d in existing block 0x%lx slot %zu\n", 
-                    clause_idx, lit_idx/2, head, i);
+                    "Worker[%d] Inserted watcher in slot %zu, clause %d, var %d\n", 
+                    worker_id, i, clause_idx, lit_idx/2);
                 return;
             }
         }
@@ -217,13 +224,16 @@ void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker
     writeBlock(new_block_addr, new_block);
     writeHeadPointer(lit_idx, new_block_addr);
     
+    busy.erase(lit_idx);
     output.verbose(CALL_INFO, 7, 0, 
-        "Inserted watcher for clause %d at var %d in new block 0x%lx\n", 
-        clause_idx, lit_idx/2, new_block_addr);
+        "Worker[%d] Inserted watcher in new block, clause %d, var %d\n", 
+        worker_id, clause_idx, lit_idx/2);
 }
 
 // Remove a watcher with given clause index
 void Watches::removeWatcher(int lit_idx, int clause_idx, int worker_id) {
+    output.verbose(CALL_INFO, 7, 0, 
+        "Removing watcher for clause %d at var %d\n", clause_idx, lit_idx/2);
     // Read head pointer
     uint64_t head = readHeadPointer(lit_idx, worker_id);
     if (head == 0) output.fatal(CALL_INFO, -1, "Empty watch list for var %d\n", lit_idx/2);
