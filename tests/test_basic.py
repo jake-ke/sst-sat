@@ -295,7 +295,7 @@ sst.enableStatisticsForComponentName("solver", [
     "restarts"
 ], {
     "type": "sst.AccumulatorStatistic",
-    "rate": "1ms"
+    "rate": "1s"
 })
 
 # Enable cache statistics for the L1 cache
@@ -304,7 +304,7 @@ sst.enableStatisticsForComponentType("memHierarchy.Cache", [
     "CacheMisses",
 ], {
     "type": "sst.AccumulatorStatistic",
-    "rate": "1ms"
+    "rate": "1s"
 })
 
 sst.enableStatisticsForComponentType("satsolver.CacheProfiler", [
@@ -322,7 +322,7 @@ sst.enableStatisticsForComponentType("satsolver.CacheProfiler", [
     "cla_activity_misses",
 ], {
     "type": "sst.AccumulatorStatistic",
-    "rate": "1ms"
+    "rate": "1s"
 })
 
 # Set statistics output to CSV file

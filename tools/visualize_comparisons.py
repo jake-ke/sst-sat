@@ -242,10 +242,40 @@ def create_scatter_plots(df_merged):
             ax.set_title(f'{metric.replace("_", " ").title()}', fontsize=12)
     
     plt.tight_layout()
-    plt.savefig('/home/jakeke/sst/scratch/src/sst-sat/src/performance_scatter_plots.png', 
+    plt.savefig('performance_scatter_plots.png', 
                 dpi=300, bbox_inches='tight')
-    print("\nScatter plots saved to: performance_scatter_plots.png")
+    print("\nScatter plots saved to: ./performance_scatter_plots.png")
     plt.show()
+
+def save_comparison_to_csv(df_merged, output_file='comparison_results.csv'):
+    """Save the comparison results to a CSV file."""
+    if df_merged.empty:
+        print("No data to save to CSV")
+        return
+    
+    # Create a summary dataframe for CSV output
+    metrics = ['decisions', 'propagations', 'conflicts', 'learned', 'removed', 
+               'db_reductions', 'minimized', 'restarts', 'sim_time_ms']
+    
+    # Start with problem names
+    csv_data = df_merged[['problem']].copy()
+    
+    # Add current and backup values for each metric
+    for metric in metrics:
+        current_col = f'{metric}_current'
+        backup_col = f'{metric}_backup'
+        
+        if current_col in df_merged.columns and backup_col in df_merged.columns:
+            csv_data[f'{metric}_current'] = df_merged[current_col]
+            csv_data[f'{metric}_backup'] = df_merged[backup_col]
+            
+            # Calculate difference
+            csv_data[f'{metric}_diff'] = df_merged[current_col] - df_merged[backup_col]
+    
+    # Save to CSV
+    csv_data.to_csv(output_file, index=False)
+    print(f"\nComparison data saved to: {output_file}")
+    print(f"Saved {len(csv_data)} problem comparisons with detailed metrics")
 
 def print_summary_stats(df_merged):
     """Print summary statistics for the comparison."""
@@ -322,6 +352,7 @@ def main():
     if not df_merged.empty:
         create_scatter_plots(df_merged)
         print_summary_stats(df_merged)
+        save_comparison_to_csv(df_merged)
     else:
         print("No data available for comparison!")
 

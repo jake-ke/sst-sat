@@ -285,25 +285,28 @@ safe_read_line() {
     fi
 }
 
-# Function to run tests for a given directory
+# Function to run tests for both SAT and UNSAT directories together
 run_tests_for_directory() {
-    local dir=$1
-    local dir_type=$2
-    local passed_var="${dir_type}_passed"
-    local timedout_var="${dir_type}_timedout"
-    local failed_var="${dir_type}_failed"
-    local total_var="${dir_type}_total"
+    local sat_dir=$1
+    local unsat_dir=$2
     
-    log_message "Testing files from: $dir (${dir_type})"
+    log_message "Testing files from both directories:"
+    log_message "  SAT: $sat_dir"
+    log_message "  UNSAT: $unsat_dir"
     log_message "==============================================="
     
-    # Store files in an array (handling spaces in filenames)
+    # Store files in arrays (handling spaces in filenames)
     setopt extended_glob nullglob
-    local files=($dir/**/*(.))  # (.) qualifier matches regular files
-    eval "${total_var}=\${#files}"
+    local sat_files=($sat_dir/**/*(.))  # (.) qualifier matches regular files
+    local unsat_files=($unsat_dir/**/*(.))
     
-    log_message "Found ${#files} files to test"
-    echo "[$dir_type] Starting tests (0/${#files})"
+    # Set totals
+    sat_total=${#sat_files}
+    unsat_total=${#unsat_files}
+    local total_files=$((sat_total + unsat_total))
+    
+    log_message "Found $sat_total SAT files and $unsat_total UNSAT files to test ($total_files total)"
+    echo "Starting tests (0/$total_files)"
     
     # Create temporary files for results and progress tracking
     local temp_result_file=$(mktemp)
@@ -325,7 +328,7 @@ run_tests_for_directory() {
                     if [[ "$action" == "START" ]]; then
                         # Extract start time
                         start_time=$remaining
-                        echo "[$dir_type] LAUNCHED: $filename"
+                        echo "LAUNCHED: $filename"
                     elif [[ "$action" == "DONE" ]]; then
                         # Extract result and times
                         IFS='|' read -r result start_time end_time <<< "$remaining"
@@ -335,8 +338,8 @@ run_tests_for_directory() {
                         
                         # Log the result to the main log with color for console
                         local colored_result=$(colorize_result "$result")
-                        local plain_message="[$dir_type] $filename: $result ($start_time-$end_time) ($completed/${#files})"
-                        local colored_message="[$dir_type] $filename: $colored_result ($start_time-$end_time) ($completed/${#files})"
+                        local plain_message="$filename: $result ($start_time-$end_time) ($completed/$total_files)"
+                        local colored_message="$filename: $colored_result ($start_time-$end_time) ($completed/$total_files)"
                         log_message_with_color "$plain_message" "$colored_message"
                     fi
                 fi
@@ -345,7 +348,7 @@ run_tests_for_directory() {
             sleep 0.1
             
             # Check if all tests are complete
-            [[ $completed -eq ${#files} ]] && break
+            [[ $completed -eq $total_files ]] && break
         done
     } &
     local monitor_pid=$!
@@ -356,21 +359,29 @@ run_tests_for_directory() {
     local job_pids=()
     local test_map=() # Maps PIDs to test names
     
-    for file in "${files[@]}"; do
-        # Check if we reached the maximum number of parallel jobs
-        if (( running_jobs >= MAX_JOBS )); then
-            # Wait for any job to finish using a compatible approach
-            wait ${job_pids[1]} 2>/dev/null || true
-            
-            # Remove the first PID from arrays
-            if [[ ${#job_pids[@]} -gt 0 ]]; then
-                # Remove this PID from tracking arrays
-                ALL_PIDS=("${(@)ALL_PIDS:#${job_pids[1]}}")
-                unset "test_map[${job_pids[1]}]"
-                job_pids[1]=()
-                running_jobs=$((running_jobs - 1))
-            fi
-        fi
+    # Combine all files with their types for processing
+    local all_files=()
+    local file_types=()
+    
+    # Add SAT files
+    for file in "${sat_files[@]}"; do
+        all_files+=("$file")
+        file_types+=("sat")
+    done
+    
+    # Add UNSAT files
+    for file in "${unsat_files[@]}"; do
+        all_files+=("$file")
+        file_types+=("unsat")
+    done
+    
+    # Process all files together with dynamic job management
+    local file_index=1
+    
+    # Launch initial batch of jobs up to MAX_JOBS
+    while (( file_index <= ${#all_files[@]} && running_jobs < MAX_JOBS )); do
+        local file="${all_files[$file_index]}"
+        local dir_type="${file_types[$file_index]}"
         
         # Run the test in the background
         run_single_test "$file" "$dir_type" "$temp_result_file" "$progress_file" &
@@ -381,6 +392,54 @@ run_tests_for_directory() {
         test_map[$pid]=$(basename "$file")
         ALL_PIDS+=($pid)
         running_jobs=$((running_jobs + 1))
+        file_index=$((file_index + 1))
+    done
+    
+    # Continue launching jobs as others complete
+    while (( running_jobs > 0 )); do
+        # Wait for any job to complete (non-blocking check)
+        local completed_pid=""
+        local new_job_pids=()
+        
+        # Check which jobs are still running
+        for pid in "${job_pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                # Job is still running
+                new_job_pids+=($pid)
+            else
+                # Job has completed
+                if [[ -z "$completed_pid" ]]; then
+                    completed_pid=$pid
+                fi
+                # Clean up tracking for this PID
+                ALL_PIDS=("${(@)ALL_PIDS:#$pid}")
+                unset "test_map[$pid]"
+                running_jobs=$((running_jobs - 1))
+            fi
+        done
+        
+        # Update job_pids array to only include running jobs
+        job_pids=("${new_job_pids[@]}")
+        
+        # Launch new job if we have capacity and more files to process
+        if (( file_index <= ${#all_files[@]} && running_jobs < MAX_JOBS )); then
+            local file="${all_files[$file_index]}"
+            local dir_type="${file_types[$file_index]}"
+            
+            # Run the test in the background
+            run_single_test "$file" "$dir_type" "$temp_result_file" "$progress_file" &
+            local pid=$!
+            
+            # Track this job
+            job_pids+=($pid)
+            test_map[$pid]=$(basename "$file")
+            ALL_PIDS+=($pid)
+            running_jobs=$((running_jobs + 1))
+            file_index=$((file_index + 1))
+        fi
+        
+        # Small sleep to avoid busy waiting
+        sleep 0.1
     done
     
     # Wait for all background jobs to complete
@@ -398,15 +457,32 @@ run_tests_for_directory() {
     
     # Process results from temporary file for statistics
     while IFS="|" read -r filename type start_time end_time result; do
-        case "$result" in
-            "PASSED")
-                eval "$passed_var=\$(($passed_var + 1))"
+        case "$type" in
+            "sat")
+                case "$result" in
+                    "PASSED")
+                        sat_passed=$((sat_passed + 1))
+                        ;;
+                    "TIMEOUT")
+                        sat_timedout=$((sat_timedout + 1))
+                        ;;
+                    "FAILED")
+                        sat_failed=$((sat_failed + 1))
+                        ;;
+                esac
                 ;;
-            "TIMEOUT")
-                eval "$timedout_var=\$(($timedout_var + 1))"
-                ;;
-            "FAILED")
-                eval "$failed_var=\$(($failed_var + 1))"
+            "unsat")
+                case "$result" in
+                    "PASSED")
+                        unsat_passed=$((unsat_passed + 1))
+                        ;;
+                    "TIMEOUT")
+                        unsat_timedout=$((unsat_timedout + 1))
+                        ;;
+                    "FAILED")
+                        unsat_failed=$((unsat_failed + 1))
+                        ;;
+                esac
                 ;;
         esac
     done < "$temp_result_file"
@@ -416,14 +492,11 @@ run_tests_for_directory() {
     rm -f "$progress_file"
     
     # Display completion message
-    log_message "Completed all $dir_type tests: ${(P)passed_var} passed, ${(P)timedout_var} timed out, ${(P)failed_var} failed"
+    log_message "Completed all tests: SAT($sat_passed passed, $sat_timedout timed out, $sat_failed failed) UNSAT($unsat_passed passed, $unsat_timedout timed out, $unsat_failed failed)"
 }
 
-# Run tests for SAT directory
-run_tests_for_directory "$SAT_DIR" "sat"
-
-# Run tests for UNSAT directory
-run_tests_for_directory "$UNSAT_DIR" "unsat"
+# Run tests for both SAT and UNSAT directories together
+run_tests_for_directory "$SAT_DIR" "$UNSAT_DIR"
 
 # Calculate totals
 total=$((sat_total + unsat_total))
