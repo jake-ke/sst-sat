@@ -300,7 +300,6 @@ void SATSolver::parseDIMACS(const std::string& content) {
                 while (clause_iss >> dimacs_lit && dimacs_lit != 0) {
                     Lit lit = toLit(dimacs_lit);
                     clause.literals.push_back(lit);
-                    Var v = var(lit);
                 }
                 
                 assert (!clause.literals.empty());
@@ -314,6 +313,12 @@ void SATSolver::parseDIMACS(const std::string& content) {
                         // Sort literals in the clause
                         std::sort(clause.literals.begin(), clause.literals.end());
                     }
+
+                    // remove duplicates
+                    clause.literals.erase(
+                        std::unique(clause.literals.begin(), clause.literals.end()),
+                        clause.literals.end());
+
                     parsed_clauses.push_back(clause);
 
                     // debugging outputs

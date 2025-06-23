@@ -85,6 +85,10 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
     for (int ci = 0; ci < clauses.size(); ci++) {
         Clause& c = clauses[ci];
         if (c.size() >= 2) {
+            // needs to be distinct for parallel propagation
+            // cannot have two watchers for the same literal
+            assert(c.literals[0] != c.literals[1]);
+
             // Watch the first two literals
             int idx0 = toWatchIndex(~c.literals[0]);
             int idx1 = toWatchIndex(~c.literals[1]);
