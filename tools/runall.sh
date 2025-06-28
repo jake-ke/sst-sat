@@ -188,6 +188,31 @@ run_single_test() {
         echo -e "\nWarning: Statistics file not found at $stats_file" >> "$log_file"
     fi
     
+    # Extract and verify solution for SAT cases
+    local verifier_status=1  # Default to failed
+    
+    if [ "$dir_type" = "sat" ] && [ $exit_status -eq 0 ] && grep -q "SATISFIABLE: All variables assigned" "$log_file"; then
+        # Create a temporary solution file
+        local solution_file=$(mktemp)
+        
+        # Extract the solution line after "SATISFIABLE: All variables assigned"
+        grep -A 2 "SATISFIABLE: All variables assigned" "$log_file" | grep -E 'x[0-9]+=' > "$solution_file"
+        
+        # Run the verifier if we got a solution
+        if [ -s "$solution_file" ]; then
+            python3 ./tools/verifier.py "$solution_file" "$file" > /dev/null 2>&1
+            verifier_status=$?
+            
+            # If verification failed, log the output
+            if [ $verifier_status -ne 0 ]; then
+                echo -e "\nVerification FAILED." >> "$log_file"
+            fi
+        fi
+        
+        # Clean up the temporary file
+        rm -f "$solution_file"
+    fi
+    
     local end_time=$(date +"%H:%M:%S")
     local result=""
     
@@ -196,19 +221,30 @@ run_single_test() {
         # Check if the result matches the expected SAT/UNSAT status
         if [ "$dir_type" = "sat" ]; then
             expected="SATISFIABLE"
+            
+            # Check for errors first
+            error_count=$(grep -i -c -E "error|fault" "$log_file")
+            if [ $error_count -gt 0 ]; then
+                result="FAILED"
+            # Then check if expected result is present and verification passed
+            elif grep -q -w "$expected" "$log_file" && [ $verifier_status -eq 0 ]; then
+                result="PASSED"
+            else
+                result="FAILED"
+            fi
         else
             expected="UNSATISFIABLE"
-        fi
-        
-        # Check for errors first
-        error_count=$(grep -i -c -E "error|fault" "$log_file")
-        if [ $error_count -gt 0 ]; then
-            result="FAILED"
-        # Then check if expected result is present
-        elif ! grep -q -w "$expected" "$log_file"; then
-            result="FAILED"
-        else
-            result="PASSED"
+            
+            # Check for errors first
+            error_count=$(grep -i -c -E "error|fault" "$log_file")
+            if [ $error_count -gt 0 ]; then
+                result="FAILED"
+            # Then check if expected result is present
+            elif ! grep -q -w "$expected" "$log_file"; then
+                result="FAILED"
+            else
+                result="PASSED"
+            fi
         fi
     elif [ $exit_status -eq 124 ] || [ $exit_status -eq 142 ]; then
         # 124 and 142 are timeout's exit codes
