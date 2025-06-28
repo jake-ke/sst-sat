@@ -23,108 +23,145 @@ Heap::Heap(SST::ComponentId_t id, SST::Params& params,
     
     // Set up VarActivity to use our heap_sink_ptr
     var_activity.setHeapSinkPtr(&heap_sink_ptr);
+    var_activity.setReorderBuffer(&reorder_buffer);
 }
 
 bool Heap::tick(SST::Cycle_t cycle) {
     switch (state) {
         case IDLE: break;
         case WAIT: break;
-        output.verbose(CALL_INFO, 7, 0, "Tick %lu: state %d, OP: %d\n", cycle, state, current_op);
-        case START:
-            switch(current_op) {
-                case HeapReqEvent::INSERT:
-                    heap_source = new coro_t::pull_type(
-                        [this](coro_t::push_type &heap_sink) { 
-                            heap_sink_ptr = &heap_sink; 
-                            insert(); 
-                        });
-                    break;
-                case HeapReqEvent::REMOVE_MIN:
-                    heap_source = new coro_t::pull_type(
-                        [this](coro_t::push_type &heap_sink) { 
-                            heap_sink_ptr = &heap_sink; 
-                            removeMin(); 
-                        });
-                    break;
-                case HeapReqEvent::IN_HEAP:
-                    heap_source = new coro_t::pull_type(
-                        [this](coro_t::push_type &heap_sink) { 
-                            heap_sink_ptr = &heap_sink; 
-                            inHeap(); 
-                        });
-                    break;
-                case HeapReqEvent::READ:
-                    heap_source = new coro_t::pull_type(
-                        [this](coro_t::push_type &heap_sink) { 
-                            heap_sink_ptr = &heap_sink; 
-                            readHeap(); 
-                        });
-                    break;
-                case HeapReqEvent::BUMP:
-                    heap_source = new coro_t::pull_type(
-                        [this](coro_t::push_type &heap_sink) { 
-                            heap_sink_ptr = &heap_sink; 
-                            varBump(); 
-                        });
-                    break;
-                default:
-                    output.fatal(CALL_INFO, -1, "Unknown operation: %d\n", current_op);
+        case STEP: {
+            output.verbose(CALL_INFO, 8, 0, "=== Tick %lu === \n", cycle);
+            assert(active_workers.size() <= HEAPLANES);
+            bool done = true;
+            for (size_t j = 0; j < active_workers.size(); j++) {
+                // output.verbose(CALL_INFO, 8, 0, "Worker %zu: active=%d\n", j, (bool)active_workers[j]);
+                if (active_workers[j]) {
+                    heap_sink_ptr = heap_sink_ptrs[j];
+                    (*heap_sources[j])();
+                    active_workers[j] = false;
+                    if ((*heap_sources[j])) {
+                        done = false;
+                    } else {
+                        delete heap_sources[j];
+                        heap_sources[j] = nullptr;
+                        heap_sink_ptrs[j] = nullptr;
+                    }
+                } else if (heap_sources[j]) done = false;
             }
-            state = WAIT;
-            break;
-        case STEP:
-            (*heap_source)();
-            if (*heap_source) state = WAIT;
+
+            // since the polling workers never get triggered,
+            // we need to check them after completing the active workers
+            for (size_t j = 0; j < polling.size(); j++) {
+                if (polling[j]) {
+                    heap_sink_ptr = heap_sink_ptrs[j];
+                    (*heap_sources[j])();
+                }
+            }
+
+            if (!done) state = WAIT;
             else {
-                delete heap_source;
-                heap_source = nullptr;
-                heap_sink_ptr = nullptr;  // Clear the sink pointer
-                state = IDLE;             // Operation completed
+                state = IDLE;
+                heap_sink_ptrs.clear();
+                heap_sources.clear();
+                active_workers.clear();
+                polling.clear();
             }
             break;
+        }
         default:
             output.fatal(CALL_INFO, -1, "Invalid state: %d\n", state);
+    }
+
+    // handle pending requests
+    if (!pending_requests.empty() && active_workers.size() < HEAPLANES) {
+        HeapReqEvent* req = pending_requests.front();
+        pending_requests.pop();
+        output.verbose(CALL_INFO, 7, 0, "Cycle: %lu, new op %d, arg %d\n", cycle, req->op, req->arg);
+        switch(req->op) {
+            case HeapReqEvent::INSERT:
+                active_workers.push_back(false);
+                polling.push_back(false);
+                heap_sources.push_back(new coro_t::pull_type(
+                    [this, req](coro_t::push_type &heap_sink) { 
+                        heap_sink_ptr = &heap_sink;
+                        heap_sink_ptrs.push_back(&heap_sink);
+                        insert(req->arg, active_workers.size() - 1); 
+                    }));
+                break;
+            case HeapReqEvent::REMOVE_MIN:
+                active_workers.push_back(false);
+                polling.push_back(false);
+                heap_sources.push_back(new coro_t::pull_type(
+                    [this, req](coro_t::push_type &heap_sink) { 
+                        heap_sink_ptr = &heap_sink;
+                        heap_sink_ptrs.push_back(&heap_sink);
+                        removeMin(); 
+                    }));
+                break;
+            case HeapReqEvent::READ:
+                active_workers.push_back(false);
+                polling.push_back(false);
+                heap_sources.push_back(new coro_t::pull_type(
+                    [this, req](coro_t::push_type &heap_sink) { 
+                        heap_sink_ptr = &heap_sink;
+                        heap_sink_ptrs.push_back(&heap_sink);
+                        readHeap(req->arg); 
+                    }));
+                break;
+            case HeapReqEvent::BUMP:
+                active_workers.push_back(false);
+                polling.push_back(false);
+                heap_sources.push_back(new coro_t::pull_type(
+                    [this, req](coro_t::push_type &heap_sink) { 
+                        heap_sink_ptr = &heap_sink;
+                        heap_sink_ptrs.push_back(&heap_sink);
+                        varBump(req->arg); 
+                    }));
+                break;
+            default:
+                output.fatal(CALL_INFO, -1, "Unknown operation: %d\n", req->op);
+        }
+        delete req;
     }
     return false;
 }
 
 void Heap::handleMem(SST::Interfaces::StandardMem::Request* req) {
     output.verbose(CALL_INFO, 8, 0, "handleMem for Heap\n");
-    uint64_t addr = 0;
-    if (auto* read_req = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
-        addr = read_req->pAddr;
+    if (auto* read_resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
+        int worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
+        if (active_workers.size() > 0) active_workers[worker_id] = true;
+        
+        uint64_t addr = read_resp->pAddr;
         if (addr >= var_act_base_addr) {  // VarActivity response
             var_activity.handleMem(req);
         } else {  // Heap response
-            reorder_buffer->storeResponse(req->getID(), read_req->data);
+            reorder_buffer.storeResponse(read_resp->getID(), read_resp->data);
             outstanding_mem_requests--;
         }
+
+        state = STEP;
     }
-    
-    state = STEP;
 }
 
 void Heap::handleRequest(HeapReqEvent* req) {
-    assert(state == IDLE);
-    output.verbose(CALL_INFO, 7, 0, "HandleReq: op %d, arg %d\n", req->op, req->arg);
-    
-    current_op = req->op;
-    // request arg can be key or idx depending on operation
-    key = req->arg;
-    idx = key;
-    state = START;
+    output.verbose(CALL_INFO, 4, 0, "HandleReq: op %d, arg %d\n", req->op, req->arg);
+    sst_assert(state == IDLE || req->op == HeapReqEvent::INSERT, CALL_INFO, -1, 
+        "Heap is in %d, cannot handle request %d\n", state, req->op);
+    pending_requests.push(req);
 }
 
 Var Heap::read(uint64_t addr, int worker_id) {
     auto req = new SST::Interfaces::StandardMem::Read(addr, sizeof(Var));
-    reorder_buffer->registerRequest(req->getID(), worker_id);
+    reorder_buffer.registerRequest(req->getID(), worker_id);
     memory->send(req);
     outstanding_mem_requests++;
     state = WAIT;
     (*heap_sink_ptr)();
     
     Var v;
-    memcpy(&v, reorder_buffer->getResponse(worker_id).data(), sizeof(Var));
+    memcpy(&v, reorder_buffer.getResponse(worker_id).data(), sizeof(Var));
     return v;
 }
 
@@ -138,52 +175,118 @@ void Heap::write(uint64_t addr, Var val) {
 }
 
 void Heap::complete(int res) {
-    output.verbose(CALL_INFO, 7, 0, "Completed Op %d, res %d\n", current_op, res);
-    sst_assert(outstanding_mem_requests == 0, CALL_INFO, -1, 
-               "outstanding_mem_requests: %d\n", outstanding_mem_requests);
+    output.verbose(CALL_INFO, 7, 0, "Complete: res %d\n", res);
+    
+    int active_count = 0;
+    int active_idx = 0;
+    for (size_t i = 0; i < active_workers.size(); i++) {
+        if (heap_sources[i]) {
+            active_count++;
+            active_idx = i;
+        }
+    }
+    
+    if (active_workers.size() == 1 || active_count == 1) {
+        sst_assert(outstanding_mem_requests == 0, CALL_INFO, -1,
+                   "outstanding_mem_requests: %d\n", outstanding_mem_requests);
+
+        for (auto lock : locks) {
+            sst_assert(!lock, CALL_INFO, -1, "Heap lock still held\n");
+        }
+
+        // debugging only
+        // for (int i = 0; i < heap_size; i++) {
+        //     Var v = read(heapAddr(i), active_idx);
+        //     int idx = read(indexAddr(v), active_idx);
+        //     // printf("Heap[%d]: key %d, idx %d\n", i, v, idx);
+        //     sst_assert(idx == i, CALL_INFO, -1, "Heap index mismatch: expected %d, got %d for key %d\n", i, idx, v);
+        // }
+
+        // for (Var v = 1; v <= 41; v++) {
+        //     int idx = read(indexAddr(v), active_idx);
+        //     if (idx >= 0) {
+        //         Var heap_v = read(heapAddr(idx), active_idx);
+        //         sst_assert(heap_v == v, CALL_INFO, -1, "Heap value mismatch: expected %d at index %d, got %d\n", v, idx, heap_v);
+        //     }
+        // }
+    }
     HeapRespEvent* ev = new HeapRespEvent(res);
     response_port->send(ev);
     state = IDLE;
 }
 
-void Heap::percolateUp(int i) {
-    output.verbose(CALL_INFO, 7, 0, "PercolateUp: idx %d\n", i);
-    Var x = read(heapAddr(i));
-
+void Heap::percolateUp(int i, Var key, int worker_id) {
+    Var x;
+    if (key != var_Undef) x = key;
+    else {
+        while (isLocked(i)) {
+            polling[worker_id] = true;
+            (*heap_sink_ptr)();
+        }
+        polling[worker_id] = false;
+        x = read(heapAddr(i), worker_id);
+    }
+    output.verbose(CALL_INFO, 4, 0, "PercolateUp[%d]: idx %d, key %d\n", worker_id, i, x);
+    // printf("lock[%d]: %d\n", worker_id, i);
+    lock(i);
+    
     int p = parent(i);
-    Var heap_p = read(heapAddr(p));
+    while (isLocked(p)) {
+        polling[worker_id] = true;
+        (*heap_sink_ptr)();
+    }
+    polling[worker_id] = false;
+    // printf("lock[%d]: %d\n", worker_id, p);
+    lock(p);
+    Var heap_p = read(heapAddr(p), worker_id);
+    // printf("percolateUp[%d]: parent %d, var %d\n", worker_id, parent(i), heap_p);
 
-    while (i > 0 && lt(x, heap_p)) {
+    while (i > 0 && lt(x, heap_p, worker_id)) {
         write(heapAddr(i), heap_p);
-
         write(indexAddr(heap_p), i);
+        // printf("unlock[%d]: %d\n", worker_id, i);
+        unlock(i);
 
         i = p;
+        // printf("percolateUp[%d]: swapped, now at idx %d\n", worker_id, i);
         if (i == 0) break;  // reached root
         
         p = parent(p);
-        heap_p = read(heapAddr(p));
-
-        output.verbose(CALL_INFO, 7, 0, 
-            "PercolateUp: new idx %d, parent idx %d, parent Var %d\n", i, p, heap_p);
+        while (isLocked(p)) {
+            polling[worker_id] = true;
+            (*heap_sink_ptr)();
+        }
+        polling[worker_id] = false;
+        lock(p);
+        // printf("lock[%d]: %d\n", worker_id, p);
+        heap_p = read(heapAddr(p), worker_id);
+        // printf("percolateUp[%d]: parent %d, var %d\n", worker_id, p, heap_p);
     }
+    // printf("exit loop[%d]: i %d, p %d\n", worker_id, i, p);
 
-    output.verbose(CALL_INFO, 7, 0, "PercolateUp: final idx %d\n", i);
     write(heapAddr(i), x);
-
     write(indexAddr(x), i);
-    output.verbose(CALL_INFO, 7, 0, "PercolateUp: completed for idx %d\n", i);
+    unlock(i);
+    unlock(p);
+    // printf("unlock[%d]: %d\n", worker_id, i);
+    // printf("unlock[%d]: %d\n", worker_id, p);
+    output.verbose(CALL_INFO, 4, 0, "PercolateUp[%d]: key %d, final idx %d\n", worker_id, x, i);
 }
 
-void Heap::percolateDown(int i) {
-    Var x = read(heapAddr(i));
+void Heap::percolateDown(int i, Var key) {
+    Var x;
+    if (key != var_Undef) x = key;
+    else x = read(heapAddr(i));
 
+    // printf("percolateDown: idx %d, key %d\n", i, x);
     while (i < (int)(heap_size / 2)) {
         int child = left(i);
         Var heap_child = read(heapAddr(child));
+        // printf("percolateDown: left child %d, value %d\n", child, heap_child);
 
         if (child + 1 < (int)heap_size) {
             Var right_child = read(heapAddr(child + 1));
+            // printf("percolateDown: right child %d, value %d\n", child + 1, right_child);
             if (lt(right_child, heap_child)) {
                 child++;
                 heap_child = right_child;
@@ -193,25 +296,24 @@ void Heap::percolateDown(int i) {
         if (!lt(heap_child, x)) break;
 
         write(heapAddr(i), heap_child);
-
         write(indexAddr(heap_child), i);
-
         i = child;
+        // printf("percolateDown: swapped, now at idx %d\n", i);
     }
 
+    // printf("percolateDown: final idx %d, value %d\n", i, x);
     write(heapAddr(i), x);
-
     write(indexAddr(x), i);
 }
 
-void Heap::inHeap() {
+bool Heap::inHeap(Var key, int worker_id) {
     output.verbose(CALL_INFO, 7, 0, "InHeap: key %d\n", key);
-    int i = read(indexAddr(key));
+    int i = read(indexAddr(key), worker_id);
 
-    complete(i >= 0);
+    return i >= 0;
 }
 
-void Heap::readHeap() {
+void Heap::readHeap(int idx) {
     output.verbose(CALL_INFO, 7, 0, "Read: idx %d\n", idx);
     if (idx < 0 || idx >= heap_size) {
         complete(var_Undef);
@@ -222,37 +324,42 @@ void Heap::readHeap() {
     complete(v);
 }
 
-void Heap::decrease() {
+void Heap::decrease(Var key) {
     output.verbose(CALL_INFO, 7, 0, "Decrease: key %d\n", key);
-    idx = read(indexAddr(key));
+    int idx = read(indexAddr(key));
     
     // key not in heap or already at root
     if (idx <= 0) {
-        complete(1);
         return;
     }
     percolateUp(idx);
 }
 
-void Heap::insert() {
-    output.verbose(CALL_INFO, 7, 0, "Insert: key %d, heap size %ld\n", key, heap_size);
-    write(indexAddr(key), heap_size);
-    
-    write(heapAddr(heap_size), key);
+void Heap::insert(Var key, int worker_id) {
+    if (inHeap(key, worker_id)) {
+        output.verbose(CALL_INFO, 4, 0, "Insert[%d]: already in heap\n", worker_id);
+        complete(true);
+        return;
+    }
 
+    write(indexAddr(key), heap_size);
+    write(heapAddr(heap_size), key);
     heap_size++;
+    output.verbose(CALL_INFO, 4, 0, "Insert[%d]: key %d, heap size %ld\n",
+        worker_id, key, heap_size);
     if (heap_size == 1) {
         complete(true);
         return;
     }
-    percolateUp(heap_size - 1);
+
+    percolateUp(heap_size - 1, key, worker_id);
     complete(true);
 }
 
 void Heap::removeMin() {
     output.verbose(CALL_INFO, 7, 0, "RemoveMin, heap size %ld\n", heap_size);
     sst_assert(heap_size > 0, CALL_INFO, -1, "Heap is empty, cannot remove min\n");
-    
+
     Var min_var = read(heapAddr(0));
 
     write(indexAddr(min_var), -1);
@@ -266,12 +373,10 @@ void Heap::removeMin() {
     Var last_var = read(heapAddr(heap_size - 1));
 
     write(indexAddr(last_var), 0);
-
     write(heapAddr(0), last_var);
     
     heap_size--;
-    if (heap_size > 1)
-        percolateDown(0);
+    percolateDown(0, last_var);
     complete(min_var);
 }
 
@@ -308,20 +413,22 @@ void Heap::initHeap() {
         indices_addr, indices_data.size(), indices_data,
         true, 0x1));  // posted, and not cacheable
 
+    locks.resize(heap_size + 1, false);  // Initialize locks for all variables
+
     // Initialize var_activity
     output.verbose(CALL_INFO, 7, 0, "Intializing var_activity\n");
     var_activity.initialize(heap_size + 1, 0.0);
 }
 
-bool Heap::lt(Var x, Var y) {
-    double act_x = var_activity.readAct(x);
-    double act_y = var_activity.readAct(y);
+bool Heap::lt(Var x, Var y, int worker_id) {
+    double act_x = var_activity.readAct(x, worker_id);
+    double act_y = var_activity.readAct(y, worker_id);
     output.verbose(CALL_INFO, 7, 0, "Comparing var %d (act %.2f) with var %d (act %.2f)\n", 
                    x, act_x, y, act_y);
     return act_x > act_y;
 }
 
-void Heap::varBump() {
+void Heap::varBump(Var key) {
     output.verbose(CALL_INFO, 7, 0, "bump activity for var %d\n", key);
     double act = var_activity.readAct(key);
     
@@ -334,7 +441,7 @@ void Heap::varBump() {
         *var_inc_ptr = 1e-100;
     }
 
-    decrease();
+    decrease(key);
     
     complete(true);
 }

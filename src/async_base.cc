@@ -8,12 +8,12 @@ AsyncBase::AsyncBase(const std::string& prefix, int verbose, SST::Interfaces::St
 }
 
 void AsyncBase::read(uint64_t addr, size_t size, uint64_t worker_id) {
-    output.verbose(CALL_INFO, 8, 0, "Read at 0x%lx, size %zu, worker %lu\n", 
-                  addr, size, worker_id);
     // Create request and assign ID through the reorder buffer
     auto req = new SST::Interfaces::StandardMem::Read(addr, size);
     reorder_buffer->registerRequest(req->getID(), worker_id);
     memory->send(req);
+    output.verbose(CALL_INFO, 8, 0, "Read at 0x%lx, size %zu, worker %lu, req %lu\n", 
+                   addr, size, worker_id, req->getID());
     doYield();
 }
 

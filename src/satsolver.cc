@@ -123,7 +123,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
         global_memory, heap_base_addr, indices_base_addr
     );
     sst_assert(order_heap != nullptr, CALL_INFO, -1, "Unable to load Heap subcomponent\n");
-    order_heap->setReorderBuffer(&reorder_buffer);
+    unstalled_heap = false;
+    unstalled_cnt = 0;
 
     // Configure the link to the heap subcomponent
     heap_link = configureLink("heap_port", 
@@ -368,26 +369,33 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
     sst_assert(req != nullptr, CALL_INFO, -1, "Received null request in handleGlobalMemEvent\n");
     if (auto* read_resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
         uint64_t addr = read_resp->pAddr;
-        int worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
-        if (active_workers.size() > 0) active_workers[worker_id] = true;
-        output.verbose(CALL_INFO, 8, 0, "handleGlobalMemEvent received for 0x%lx, worker %d\n", addr, worker_id);
+
+        // only used if it is not heap's response, because heap has its own reorder buffer
+        int worker_id = -1;
 
         // Route the request to the appropriate handler based on address range
         if (addr >= clause_act_base_addr) {
+            worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
             cla_activity.handleMem(req);
             state = STEP;
         } else if (addr >= var_act_base_addr) {
             order_heap->handleMem(req);
         } else if (addr >= clauses_cmd_base_addr) {  // Clauses request
+            worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
             clauses.handleMem(req);
             state = STEP;
         } else if (addr >= watches_base_addr) {  // Watches request
+            worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
             watches.handleMem(req);
             state = STEP;
         } else if (addr >= variables_base_addr) {  // Variables request
+            worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
             variables.handleMem(req);
             state = STEP;
         } else order_heap->handleMem(req);  // Heap request
+
+        if (active_workers.size() > 0) active_workers[worker_id] = true;
+        output.verbose(CALL_INFO, 8, 0, "handleGlobalMemEvent received for 0x%lx, worker %d\n", addr, worker_id);
     }
     delete req;  // assuming no write responses are sent back
 }
@@ -395,9 +403,11 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
 void SATSolver::handleHeapResponse(SST::Event* ev) {
     HeapRespEvent* resp = dynamic_cast<HeapRespEvent*>(ev);
     sst_assert(resp != nullptr, CALL_INFO, -1, "Invalid heap response event\n");
-    output.verbose(CALL_INFO, 7, 0, "HandleHeapResponse: response %d\n", resp->result);
+    output.verbose(CALL_INFO, 8, 0, "HandleHeapResponse: response %d\n", resp->result);
     heap_resp = resp->result;
-    state = STEP;
+    if (!unstalled_heap) state = STEP;
+    else unstalled_cnt--;
+    // printf("HandleHeap: unstalled_cnt is now %d, size is %lu\n", unstalled_cnt, order_heap->heap_size);
     delete resp;
 }
 
@@ -494,7 +504,11 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
                     yield_ptr = &yield;
                     execBacktrack(); 
                 });
-            state = IDLE;
+            if (!(*coroutine)) {
+                delete coroutine;
+                coroutine = nullptr;
+                yield_ptr = nullptr;
+            } else state = IDLE;
             break;
         case REDUCE:
             coroutine = new coro_t::pull_type(
@@ -510,7 +524,37 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
                     yield_ptr = &yield;
                     execRestart(); 
                 });
-            state = IDLE;
+            if (!(*coroutine)) {
+                delete coroutine;
+                coroutine = nullptr;
+                yield_ptr = nullptr;
+            } else state = IDLE;
+            break;
+        case WAIT_HEAP:
+            assert(unstalled_cnt >= 0);
+            if (unstalled_cnt == 0) {
+                unstalled_heap = false;
+                // if not parallelizing propagation and heap insertions
+                state = PROPAGATE;
+                
+                // for parallel propagation and heap insertions
+                // if (conflict != ClauseRef_Undef) {
+                //     if (decision_output_stream.is_open()) decision_output_stream << "#Conflict" << std::endl;
+                //     output.verbose(CALL_INFO, 2, 0, "CONFLICT: clause %d\n", conflict);
+                //     conflictC++;
+                //     stat_conflicts->addData(1);
+                    
+                //     if (trail_lim.empty()) {
+                //         output.output("UNSATISFIABLE: conflict at level 0\n");
+                //         state = DONE;
+                //         // primaryComponentOKToEndSim();
+                //         return false;
+                //     }
+                //     state = ANALYZE;
+                // } else if (conflictC >= conflicts_until_restart) state = RESTART;
+                // else if (nLearnts() - nAssigns() >= max_learnts) state = REDUCE;
+                // else state = DECIDE;
+            }
             break;
         case DONE: primaryComponentOKToEndSim(); return true;
         default: output.fatal(CALL_INFO, -1, "Invalid state: %d\n", state);
@@ -532,7 +576,11 @@ void SATSolver::initialize() {
 
 void SATSolver::execPropagate() {
     conflict = unitPropagate();
+    // for parallel propagation and heap insertions
+    // analyze will use heap so need to wait for heap to finish
+    // state = WAIT_HEAP;
     
+    // if not parallelizing propagation and heap insertions
     if (conflict != ClauseRef_Undef) {
         if (decision_output_stream.is_open()) decision_output_stream << "#Conflict" << std::endl;
         output.verbose(CALL_INFO, 2, 0, "CONFLICT: clause %d\n", conflict);
@@ -667,11 +715,13 @@ void SATSolver::execBacktrack() {
         // Add the learned clause
         Clause new_clause(learnt_clause);
         int clause_idx = clauses.size();
+        output.verbose(CALL_INFO, 3, 0, 
+            "Added learnt clause %d: %s\n", 
+            clause_idx, printClause(new_clause).c_str());
         clauses.addClause(new_clause);
-        cla_activity.push(0.0);
-        attachClause(clause_idx);  
+        cla_activity.push(cla_inc);
+        attachClause(clause_idx);
         trailEnqueue(learnt_clause[0], clause_idx);
-        claBumpActivity(clause_idx);
         stat_learned->addData(1);
     }
     
@@ -689,7 +739,11 @@ void SATSolver::execBacktrack() {
             "LEARN: Adjusted max_learnts to %.0f\n", max_learnts);
     }
 
-    state = PROPAGATE;
+    // for parallel propagation and heap insertions, directly starts propagation
+    // state = PROPAGATE;
+
+    // if not parallelizing propagation and heap insertions, wait for heap to finish
+    state = WAIT_HEAP;
 }
 
 void SATSolver::execReduce() {
@@ -712,19 +766,22 @@ void SATSolver::execRestart() {
     
     output.verbose(CALL_INFO, 2, 0, "RESTART: #%d, new limit=%d\n", 
         curr_restarts, conflicts_until_restart);
-    state = PROPAGATE;
+    
+    // for parallel propagation and heap insertions, directly starts propagation
+    // state = PROPAGATE;
+    
+    // if not parallelizing propagation and heap insertions, wait for heap to finish
+    state = WAIT_HEAP;
 }
 
 void SATSolver::execDecide() {
     if (!decide()) {
         state = DONE;
         output.output("SATISFIABLE: All variables assigned\n");
-        if (output.getVerboseLevel() >= 3) {
-            for (Var v = 1; v <= (Var)num_vars; v++) {
-                output.output("x%d=%d ", v, var_value[v] ? 1 : 0);
-            }
-            output.output("\n");
+        for (Var v = 1; v <= (Var)num_vars; v++) {
+            output.output("x%d=%d ", v, var_value[v] ? 1 : 0);
         }
+        output.output("\n");
         return;
     }
     state = PROPAGATE;
@@ -848,8 +905,8 @@ int SATSolver::unitPropagate() {
                 done = true;
                 // Check if any worker is active
                 for (size_t j = 0; j < active_workers.size(); j++) {
-                    output.verbose(CALL_INFO, 7, 0, "Worker %zu: active=%d, polling=%d\n",
-                        j, (bool)active_workers[j], (bool)polling[j]);
+                    output.verbose(CALL_INFO, 7, 0, "Worker %zu: active=%d, polling=%d, done=%d\n",
+                        j, (bool)active_workers[j], (bool)polling[j], (bool)(coroutines[j] == nullptr));
                     if (active_workers[j]) {
                         yield_ptr = yield_ptrs[j];
                         (*coroutines[j])();
@@ -931,7 +988,7 @@ void SATSolver::subPropagate(
     if (c.literals[0] == not_p) {
         std::swap(c.literals[0], c.literals[1]);
         clauses.writeClause(cmd.offset, c);
-        output.verbose(CALL_INFO, 4, 0, "    Swapped literals 0 and 1\n");
+        output.verbose(CALL_INFO, 4, 0, "    [W%d]Swapped literals 0 and 1\n", worker_id);
     }
     assert(c[1] == not_p);
     
@@ -939,7 +996,7 @@ void SATSolver::subPropagate(
     Lit first = c[0];
     if (var_assigned[var(first)] && value(first) == true) {
         output.verbose(CALL_INFO, 4, 0,
-            "    First literal %d is true\n", toInt(first));
+            "    [W%d]First literal %d is true\n", worker_id, toInt(first));
         curr_block.nodes[i].blocker = first;
         block_modified = true;
         return;
@@ -953,8 +1010,8 @@ void SATSolver::subPropagate(
             std::swap(c.literals[1], c.literals[k]);
             clauses.writeClause(cmd.offset, c);
             output.verbose(CALL_INFO, 4, 0, 
-                "    Found new watch: literal %d at position %zu\n", 
-                toInt(c[1]), k);
+                "    [W%d]Found new watch: literal %d at position %zu\n", 
+                worker_id, toInt(c[1]), k);
             
             while (watches.isBusy(toWatchIndex(~c[1]))) {
                 polling[worker_id] = true;
@@ -962,7 +1019,7 @@ void SATSolver::subPropagate(
             }
             polling[worker_id] = false;
 
-            output.verbose(CALL_INFO, 4, 0, "    Start watchlist insertion\n");
+            output.verbose(CALL_INFO, 4, 0, "    [W%d]Start watchlist insertion\n", worker_id);
             watches.insertWatcher(toWatchIndex(~c[1]), clause_idx, first, worker_id);
             
             // Mark this node as invalid in the current block
@@ -973,18 +1030,18 @@ void SATSolver::subPropagate(
     }
     
     // Did not find a new watch - clause is unit or conflicting
-    output.verbose(CALL_INFO, 4, 0, "    No new watch found\n");
-    
+    output.verbose(CALL_INFO, 4, 0, "    [W%d]No new watch found\n", worker_id);
+
     // Check if first literal is false (conflict) or undefined (unit)
     if (var_assigned[var(first)] && value(first) == false) {
         // Conflict detected
         output.verbose(CALL_INFO, 3, 0,
-            "     Conflict: Clause %d has all literals false\n", clause_idx);
+            "    [W%d]Conflict: Clause %d has all literals false\n", worker_id, clause_idx);
         conflict = clause_idx;
     } else {
         // Unit clause found, propagate
         output.verbose(CALL_INFO, 3, 0,
-            "    forces literal %d (to true)\n", toInt(first));
+            "    [W%d]forces literal %d (to true)\n", worker_id, toInt(first));
         trailEnqueue(first, clause_idx);
     }
 }
@@ -1031,7 +1088,7 @@ void SATSolver::analyze() {
         
         // Debug print for current clause
         output.verbose(CALL_INFO, 4, 0,
-            "ANALYZE: Processing clause: %s\n", printClause(c).c_str());
+            "ANALYZE: Processing clause %d: %s\n", conflict, printClause(c).c_str());
 
         // For each literal in the clause
         for (size_t i = (p == lit_Undef) ? 0 : 1; i < c.size(); i++) {
@@ -1117,6 +1174,8 @@ void SATSolver::findBtLevel() {
     }
 
     output.verbose(CALL_INFO, 3, 0, "Backtrack Level = %d\n", bt_level);
+    output.verbose(CALL_INFO, 3, 0, "Final learnt clause: %s\n", 
+        printClause(learnt_clause).c_str());
     state = BACKTRACK;
 }
 
@@ -1128,6 +1187,7 @@ void SATSolver::backtrack(int backtrack_level) {
     output.verbose(CALL_INFO, 3, 0, "BACKTRACK From level %d to level %d\n", 
         current_level(), backtrack_level);
     
+    unstalled_heap = true;
     // Unassign all variables above backtrack_level using the trail
     for (int i = trail.size() - 1; i >= int(trail_lim[backtrack_level]); i--) {
         Lit p = trail[i];
@@ -1135,9 +1195,11 @@ void SATSolver::backtrack(int backtrack_level) {
         
         polarity[v] = sign(p);
         unassignVariable(v);
+
         insertVarOrder(v);
+        unstalled_cnt++;
         
-        output.verbose(CALL_INFO, 4, 0,
+        output.verbose(CALL_INFO, 5, 0,
             "BACKTRACK: Unassigning x%d, saved polarity %s\n", 
             v, polarity[v] ? "false" : "true");
     }
@@ -1145,6 +1207,7 @@ void SATSolver::backtrack(int backtrack_level) {
     qhead = trail_lim[backtrack_level];
     trail.resize(trail_lim[backtrack_level]);
     trail_lim.resize(backtrack_level);
+    output.verbose(CALL_INFO, 4, 0, "Insert %d vars in heap in parallel\n", unstalled_cnt);
 }
 
 //-----------------------------------------------------------------------------------
@@ -1312,6 +1375,8 @@ void SATSolver::unassignVariable(Var v) {
 void SATSolver::attachClause(int clause_idx) {
     const Clause& c = clauses.readClause(clause_idx);
     // Watch the first two literals in the clause, use each other as a blocker
+    output.verbose(CALL_INFO, 5, 0, "ATTACH: clause %d with literals %d and %d\n",
+        clause_idx, toInt(c.literals[0]), toInt(c.literals[1]));
     watches[toWatchIndex(~c.literals[0])].insert(clause_idx, c.literals[1]);
     watches[toWatchIndex(~c.literals[1])].insert(clause_idx, c.literals[0]);
 }
@@ -1349,6 +1414,7 @@ Lit SATSolver::chooseBranchVariable() {
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::REMOVE_MIN));
         (*yield_ptr)();
         next = heap_resp;
+        assert(next != var_Undef);
     }
 
     output.verbose(CALL_INFO, 3, 0, "DECISION: Selected lit %d \n", toInt(mkLit(next, polarity[next])));
@@ -1357,13 +1423,9 @@ Lit SATSolver::chooseBranchVariable() {
 }
 
 void SATSolver::insertVarOrder(Var v) {
-    order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::IN_HEAP, v));
-    (*yield_ptr)();
-    
-    if (!(bool)heap_resp && decision[v]) {
+    if (decision[v]) {
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INSERT, v));
-        (*yield_ptr)();
-        output.verbose(CALL_INFO, 4, 0, "Inserted var %d into order heap\n", v);
+        output.verbose(CALL_INFO, 7, 0, "Insert var %d into order heap\n", v);
     }
 }
 
@@ -1418,8 +1480,8 @@ bool SATSolver::locked(int clause_idx) {
 
 void SATSolver::minimizeL2_sub(std::vector<bool>& redundant, int worker_id) {
     for (size_t i = worker_id + 1; i < learnt_clause.size(); i += MINIMIZERS) {
-        output.verbose(CALL_INFO, 4, 0, 
-            "MINIMIZE[%d]: Checking literal %d at position %zu\n", 
+        output.verbose(CALL_INFO, 5, 0, 
+            "MIN[%d]: Checking literal %d at position %zu\n", 
             worker_id, toInt(learnt_clause[i]), i);
         
         redundant[i] = litRedundant(learnt_clause[i], worker_id);
@@ -1428,7 +1490,6 @@ void SATSolver::minimizeL2_sub(std::vector<bool>& redundant, int worker_id) {
 
 // Check if 'p' can be removed from a conflict clause
 bool SATSolver::litRedundant(Lit p, int worker_id) {
-    output.verbose(CALL_INFO, 5, 0, "MIN[%d]: Checking literal %d\n", worker_id, toInt(p));
     enum { seen_undef = 0, seen_source = 1, seen_removable = 2, seen_failed = 3 };
     int reason = variables.getReason(var(p), worker_id);
 
@@ -1479,7 +1540,7 @@ bool SATSolver::litRedundant(Lit p, int worker_id) {
             if (seen[var(p)] == seen_undef) {
                 seen[var(p)] = seen_removable;
                 analyze_toclear.push_back(p);
-                output.verbose(CALL_INFO, 5, 0, "MIN[%d]: Marked %d as removable\n", worker_id, toInt(p));
+                output.verbose(CALL_INFO, 7, 0, "MIN[%d]: Marked %d as removable\n", worker_id, toInt(p));
             }
             
             // If stack is empty, we're done

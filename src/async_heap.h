@@ -6,6 +6,7 @@
 #include <sst/core/interfaces/stdMem.h>
 #include <sst/core/event.h>
 #include <boost/coroutine2/all.hpp>
+#include <queue>
 #include "structs.h"
 #include "async_var_activity.h"
 #include "reorder_buffer.h"
@@ -13,7 +14,7 @@
 // Events for heap operations
 class HeapReqEvent : public SST::Event {
 public:
-    enum OpType { INSERT, REMOVE_MIN, IN_HEAP, READ, BUMP };
+    enum OpType { INSERT, REMOVE_MIN, READ, BUMP };
     OpType op;
     int arg;
     HeapReqEvent() : op(HeapReqEvent::READ), arg(0) {}
@@ -81,7 +82,7 @@ public:
     size_t size() const { return heap_size; }
     bool empty() const { return heap_size == 0; }
     
-    enum State { IDLE, WAIT, START, STEP };
+    enum State { IDLE, WAIT, STEP };
     State state;
     int outstanding_mem_requests;  // Track outstanding memory requests
     
@@ -90,19 +91,24 @@ private:
     SST::Link* response_port;
     SST::Interfaces::StandardMem* memory;
     uint64_t heap_addr, indices_addr;
-    HeapReqEvent::OpType current_op;
-    coro_t::pull_type* heap_source;
+    std::vector<coro_t::pull_type*> heap_sources;
+    std::vector<coro_t::push_type*> heap_sink_ptrs;
     coro_t::push_type* heap_sink_ptr;  // Pointer to current coroutine sink
-    Var key;
-    int idx;
     size_t line_size;
     
     VarActivity var_activity;
     uint64_t var_act_base_addr;  // Base address for variable activity array
-    bool lt(Var x, Var y);  // Comparison method using var_activity directly
+    bool lt(Var x, Var y, int worker_id = 0);  // Comparison method using var_activity directly
+
+    std::queue<HeapReqEvent*> pending_requests;
 
     // Reorder buffer for managing parallel memory requests
-    ReorderBuffer* reorder_buffer;
+    ReorderBuffer reorder_buffer;
+
+    // parallel execution support
+    std::vector<bool> active_workers;
+    std::vector<bool> polling;
+    std::vector<bool> locks;
 
     // Helper methods
     inline int parent(int i) { return (i - 1) >> 1; }
@@ -115,22 +121,21 @@ private:
     void write(uint64_t addr, Var val);
     void complete(int res);
 
-    void percolateUp(int i);
-    void percolateDown(int i);
-    void readHeap();
-    void inHeap();
-    void insert();
-    void decrease();
+    void lock(Var x) { locks[x] = true; }
+    void unlock(Var x) { locks[x] = false; }
+    bool isLocked(Var x) const { return locks[x]; }
+
+    void percolateUp(int i, Var key=var_Undef, int worker_id = 0);
+    void percolateDown(int i, Var key=var_Undef);
+    void readHeap(int idx);
+    bool inHeap(Var key, int worker_id = 0);
+    void insert(Var key, int worker_id = 0);
+    void decrease(Var key);
     void removeMin();
-    void varBump();
+    void varBump(Var key);
 
 public:
     void setLineSize(size_t size) { line_size = size; var_activity.setLineSize(size); }
-
-    void setReorderBuffer(ReorderBuffer* rb) { 
-        reorder_buffer = rb;
-        var_activity.setReorderBuffer(rb);
-    }
 };
 
 #endif

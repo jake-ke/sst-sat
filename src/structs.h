@@ -7,7 +7,8 @@
 
 using coro_t = boost::coroutines2::coroutine<void>;
 
-const int MINIMIZERS = 2; // Number of minimizers
+const int MINIMIZERS = 2;  // Number of minimizers
+const int HEAPLANES = 8;  // Number of heap lanes for parallel execution
 
 // Define types for variables and literals
 typedef int Var;

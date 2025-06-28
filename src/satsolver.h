@@ -21,18 +21,19 @@
 
 // Unified state machine combining high-level states and detailed operations
 enum SolverState { 
-    IDLE,
-    INIT,
-    STEP,
-    PROPAGATE,
-    DECIDE,
-    ANALYZE,
-    MINIMIZE,
-    BTLEVEL,
-    BACKTRACK,
-    REDUCE,
-    RESTART,
-    DONE 
+    IDLE,       // 0
+    INIT,       // 1
+    STEP,       // 2
+    PROPAGATE,  // 3
+    DECIDE,     // 4
+    ANALYZE,    // 5
+    MINIMIZE,   // 6
+    BTLEVEL,    // 7
+    BACKTRACK,  // 8
+    REDUCE,     // 9
+    RESTART,    // 10
+    WAIT_HEAP,  // 11
+    DONE,       // 12
 };
 
 //-----------------------------------------------------------------------------------
@@ -230,7 +231,6 @@ private:
     // Variable related
     std::vector<bool> polarity;         // Saved phase (polarity) for each variable
     std::vector<bool> decision;         // Whether variable is eligible for decisions
-    Heap* order_heap;                   // Heap of variables ordered by activity
     double var_inc;                     // Amount to bump variable activity by
     double var_decay;                   // Variable activity decay factor
     double random_var_freq;             // Frequency of random decisions
@@ -239,6 +239,11 @@ private:
     uint64_t heap_base_addr;            // Base address for heap memory
     uint64_t indices_base_addr;         // Base address for indices memory
     uint64_t var_act_base_addr;         // Base address for variable activity array
+    
+    // external heap
+    Heap* order_heap;                   // Heap of variables ordered by activity
+    bool unstalled_heap;                // Whether the heap has been unstalled
+    int unstalled_cnt;                  // Number of unstalled heap responses to receive
 
     // external memory controller for struct Variable
     Variables variables;                // Replaces std::vector<Variable> variables
