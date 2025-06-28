@@ -873,7 +873,8 @@ int SATSolver::unitPropagate() {
             // spawn sub-coroutines
             parent_yield_ptr = yield_ptr;
             
-            // Process all valid nodes in the current block
+            // Collect valid nodes that need processing
+            std::vector<int> valid_nodes;
             for (int i = 0; i < watches.getNodesPerBlock(); i++) {
                 // Skip invalid nodes
                 if ((curr_block.valid_mask & (1 << i)) == 0) continue;
@@ -887,14 +888,24 @@ int SATSolver::unitPropagate() {
                     continue;
                 }
                 
+                valid_nodes.push_back(i);
+            }
+            
+            // Process valid nodes in batches, limited by PROPAGATORS
+            int workers = std::min(PROPAGATORS, (int)valid_nodes.size());
+            for (int worker_id = 0; worker_id < workers; worker_id++) {
                 active_workers.push_back(false);
                 polling.push_back(false);
-                int worker_id = active_workers.size() - 1;
                 coroutines.push_back(new coro_t::pull_type(
-                    [this, i, not_p, &block_modified, &curr_block, worker_id](coro_t::push_type &yield) {
+                    [this, worker_id, &valid_nodes, not_p, &block_modified, &curr_block](coro_t::push_type &yield) {
                         yield_ptr = &yield;
                         yield_ptrs.push_back(yield_ptr);
-                        subPropagate(i, not_p, block_modified, curr_block, worker_id);
+                        // Process nodes assigned to this worker
+                        for (size_t node_idx = worker_id; node_idx < valid_nodes.size(); node_idx += PROPAGATORS) {
+                            int i = valid_nodes[node_idx];
+                            subPropagate(i, not_p, block_modified, curr_block, worker_id);
+                            if (conflict != ClauseRef_Undef) break; // Early exit on conflict
+                        }
                     }));
             }
             if (!active_workers.empty()) (*parent_yield_ptr)();  // yield back to IDLE
