@@ -5,7 +5,7 @@ Heap::Heap(SST::ComponentId_t id, SST::Params& params,
            SST::Interfaces::StandardMem* mem, uint64_t heap_base_addr, uint64_t indices_base_addr) 
     : SST::SubComponent(id), memory(mem), state(IDLE), heap_size(0),
       outstanding_mem_requests(0), heap_addr(heap_base_addr), indices_addr(indices_base_addr),
-      heap_sink_ptr(nullptr),
+      heap_sink_ptr(nullptr), need_rescale(false),
       var_activity(params.find<int>("verbose", 0), mem, 
                    params.find<uint64_t>("var_act_base_addr", 0x70000000), this) {
     
@@ -32,14 +32,14 @@ bool Heap::tick(SST::Cycle_t cycle) {
         case WAIT: break;
         case STEP: {
             output.verbose(CALL_INFO, 8, 0, "=== Tick %lu === \n", cycle);
-            assert(active_workers.size() <= HEAPLANES);
+            assert(heap_active_workers.size() <= HEAPLANES);
             bool done = true;
-            for (size_t j = 0; j < active_workers.size(); j++) {
-                // output.verbose(CALL_INFO, 8, 0, "Worker %zu: active=%d\n", j, (bool)active_workers[j]);
-                if (active_workers[j]) {
+            for (size_t j = 0; j < heap_active_workers.size(); j++) {
+                // output.verbose(CALL_INFO, 8, 0, "Worker %zu: active=%d\n", j, (bool)heap_active_workers[j]);
+                if (heap_active_workers[j]) {
                     heap_sink_ptr = heap_sink_ptrs[j];
                     (*heap_sources[j])();
-                    active_workers[j] = false;
+                    heap_active_workers[j] = false;
                     if ((*heap_sources[j])) {
                         done = false;
                     } else {
@@ -48,12 +48,18 @@ bool Heap::tick(SST::Cycle_t cycle) {
                         heap_sink_ptrs[j] = nullptr;
                     }
                 } else if (heap_sources[j]) done = false;
+                else if (!pending_requests.empty() && !need_rescale) {
+                    // Start a new worker immediately if we have empty slots
+                    startNewWorker(j);
+                    done = false;
+                }
             }
 
             // since the polling workers never get triggered,
             // we need to check them after completing the active workers
-            for (size_t j = 0; j < polling.size(); j++) {
-                if (polling[j]) {
+            for (size_t j = 0; j < heap_polling.size(); j++) {
+                if (heap_polling[j]) {
+                    heap_polling[j] = false;
                     heap_sink_ptr = heap_sink_ptrs[j];
                     (*heap_sources[j])();
                 }
@@ -64,74 +70,104 @@ bool Heap::tick(SST::Cycle_t cycle) {
                 state = IDLE;
                 heap_sink_ptrs.clear();
                 heap_sources.clear();
-                active_workers.clear();
-                polling.clear();
+                heap_active_workers.clear();
+                heap_polling.clear();
+
+                // if (heap_active_workers.size() > 1) state = DEBUG;
             }
             break;
         }
+        case DEBUG:
+            heap_active_workers.push_back(false);
+            heap_polling.push_back(false);
+            heap_sources.push_back(nullptr);
+            heap_sink_ptrs.push_back(nullptr);
+            heap_sources[0] = new coro_t::pull_type(
+                [this](coro_t::push_type &heap_sink) { 
+                    heap_sink_ptr = &heap_sink;
+                    heap_sink_ptrs[0] = &heap_sink;
+                    debug_heap(0);
+                });
+            state = WAIT;
+            break;
         default:
             output.fatal(CALL_INFO, -1, "Invalid state: %d\n", state);
     }
 
-    // handle pending requests
-    if (!pending_requests.empty() && active_workers.size() < HEAPLANES) {
-        HeapReqEvent* req = pending_requests.front();
-        pending_requests.pop();
-        output.verbose(CALL_INFO, 7, 0, "Cycle: %lu, new op %d, arg %d\n", cycle, req->op, req->arg);
-        switch(req->op) {
-            case HeapReqEvent::INSERT:
-                active_workers.push_back(false);
-                polling.push_back(false);
-                heap_sources.push_back(new coro_t::pull_type(
-                    [this, req](coro_t::push_type &heap_sink) { 
-                        heap_sink_ptr = &heap_sink;
-                        heap_sink_ptrs.push_back(&heap_sink);
-                        insert(req->arg, active_workers.size() - 1); 
-                    }));
-                break;
-            case HeapReqEvent::REMOVE_MIN:
-                active_workers.push_back(false);
-                polling.push_back(false);
-                heap_sources.push_back(new coro_t::pull_type(
-                    [this, req](coro_t::push_type &heap_sink) { 
-                        heap_sink_ptr = &heap_sink;
-                        heap_sink_ptrs.push_back(&heap_sink);
-                        removeMin(); 
-                    }));
-                break;
-            case HeapReqEvent::READ:
-                active_workers.push_back(false);
-                polling.push_back(false);
-                heap_sources.push_back(new coro_t::pull_type(
-                    [this, req](coro_t::push_type &heap_sink) { 
-                        heap_sink_ptr = &heap_sink;
-                        heap_sink_ptrs.push_back(&heap_sink);
-                        readHeap(req->arg); 
-                    }));
-                break;
-            case HeapReqEvent::BUMP:
-                active_workers.push_back(false);
-                polling.push_back(false);
-                heap_sources.push_back(new coro_t::pull_type(
-                    [this, req](coro_t::push_type &heap_sink) { 
-                        heap_sink_ptr = &heap_sink;
-                        heap_sink_ptrs.push_back(&heap_sink);
-                        varBump(req->arg); 
-                    }));
-                break;
-            default:
-                output.fatal(CALL_INFO, -1, "Unknown operation: %d\n", req->op);
-        }
-        delete req;
+    // handle pending requests - start new workers if we have available slots
+    if (!pending_requests.empty() && heap_active_workers.size() < HEAPLANES 
+        && !need_rescale && state != DEBUG) {
+        size_t idx = heap_active_workers.size();
+        startNewWorker(idx);
     }
+
     return false;
+}
+
+// Helper method to start a new worker with a request
+void Heap::startNewWorker(size_t idx) {
+    HeapReqEvent* req = pending_requests.front();
+    pending_requests.pop();
+    output.verbose(CALL_INFO, 7, 0, "Starting new worker %zu for op %d, arg %d\n", 
+                   idx, req->op, req->arg);
+    
+    // If idx is beyond current size, we need to extend the vectors
+    if (idx >= heap_active_workers.size()) {
+        heap_active_workers.push_back(false);
+        heap_polling.push_back(false);
+        heap_sources.push_back(nullptr);
+        heap_sink_ptrs.push_back(nullptr);
+    } else {  // We're reusing a slot that was freed
+        assert(heap_active_workers[idx] == false);
+        assert(heap_polling[idx] == false);
+        assert(heap_sources[idx] == nullptr);
+        assert(heap_sink_ptrs[idx] == nullptr);
+    }
+    
+    switch(req->op) {
+        case HeapReqEvent::INSERT:
+            heap_sources[idx] = new coro_t::pull_type(
+                [this, req, idx](coro_t::push_type &heap_sink) { 
+                    heap_sink_ptr = &heap_sink;
+                    heap_sink_ptrs[idx] = &heap_sink;
+                    insert(req->arg, idx);
+                });
+            break;
+        case HeapReqEvent::REMOVE_MIN:
+            heap_sources[idx] = new coro_t::pull_type(
+                [this, req, idx](coro_t::push_type &heap_sink) { 
+                    heap_sink_ptr = &heap_sink;
+                    heap_sink_ptrs[idx] = &heap_sink;
+                    removeMin(); 
+                });
+            break;
+        case HeapReqEvent::READ:
+            heap_sources[idx] = new coro_t::pull_type(
+                [this, req, idx](coro_t::push_type &heap_sink) { 
+                    heap_sink_ptr = &heap_sink;
+                    heap_sink_ptrs[idx] = &heap_sink;
+                    readHeap(req->arg); 
+                });
+            break;
+        case HeapReqEvent::BUMP:
+            heap_sources[idx] = new coro_t::pull_type(
+                [this, req, idx](coro_t::push_type &heap_sink) { 
+                    heap_sink_ptr = &heap_sink;
+                    heap_sink_ptrs[idx] = &heap_sink;
+                    varBump(req->arg, idx); 
+                });
+            break;
+        default:
+            output.fatal(CALL_INFO, -1, "Unknown operation: %d\n", req->op);
+    }
+    delete req;
 }
 
 void Heap::handleMem(SST::Interfaces::StandardMem::Request* req) {
     output.verbose(CALL_INFO, 8, 0, "handleMem for Heap\n");
     if (auto* read_resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
         int worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
-        if (active_workers.size() > 0) active_workers[worker_id] = true;
+        if (heap_active_workers.size() > 0) heap_active_workers[worker_id] = true;
         
         uint64_t addr = read_resp->pAddr;
         if (addr >= var_act_base_addr) {  // VarActivity response
@@ -146,9 +182,9 @@ void Heap::handleMem(SST::Interfaces::StandardMem::Request* req) {
 }
 
 void Heap::handleRequest(HeapReqEvent* req) {
-    output.verbose(CALL_INFO, 4, 0, "HandleReq: op %d, arg %d\n", req->op, req->arg);
-    sst_assert(state == IDLE || req->op == HeapReqEvent::INSERT, CALL_INFO, -1, 
-        "Heap is in %d, cannot handle request %d\n", state, req->op);
+    output.verbose(CALL_INFO, 7, 0, "HandleReq: op %d, arg %d\n", req->op, req->arg);
+    sst_assert(state == IDLE || req->op == HeapReqEvent::INSERT || req->op == HeapReqEvent::BUMP,
+        CALL_INFO, -1, "Heap is in %d, cannot handle request %d\n", state, req->op);
     pending_requests.push(req);
 }
 
@@ -174,68 +210,60 @@ void Heap::write(uint64_t addr, Var val) {
     // (*heap_sink_ptr)();
 }
 
-void Heap::complete(int res) {
-    output.verbose(CALL_INFO, 7, 0, "Complete: res %d\n", res);
-    
-    int active_count = 0;
-    int active_idx = 0;
-    for (size_t i = 0; i < active_workers.size(); i++) {
-        if (heap_sources[i]) {
-            active_count++;
-            active_idx = i;
-        }
-    }
-    
-    if (active_workers.size() == 1 || active_count == 1) {
+void Heap::complete(int res, int worker_id) {
+    output.verbose(CALL_INFO, 7, 0, "Complete[%d]: res %d\n", worker_id, res);
+
+    if (heap_active_workers.size() == 1) {
         sst_assert(outstanding_mem_requests == 0, CALL_INFO, -1,
                    "outstanding_mem_requests: %d\n", outstanding_mem_requests);
-
-        for (auto lock : locks) {
-            sst_assert(!lock, CALL_INFO, -1, "Heap lock still held\n");
-        }
-
-        // debugging only
-        // for (int i = 0; i < heap_size; i++) {
-        //     Var v = read(heapAddr(i), active_idx);
-        //     int idx = read(indexAddr(v), active_idx);
-        //     // printf("Heap[%d]: key %d, idx %d\n", i, v, idx);
-        //     sst_assert(idx == i, CALL_INFO, -1, "Heap index mismatch: expected %d, got %d for key %d\n", i, idx, v);
-        // }
-
-        // for (Var v = 1; v <= 41; v++) {
-        //     int idx = read(indexAddr(v), active_idx);
-        //     if (idx >= 0) {
-        //         Var heap_v = read(heapAddr(idx), active_idx);
-        //         sst_assert(heap_v == v, CALL_INFO, -1, "Heap value mismatch: expected %d at index %d, got %d\n", v, idx, heap_v);
-        //     }
-        // }
     }
+
     HeapRespEvent* ev = new HeapRespEvent(res);
     response_port->send(ev);
     state = IDLE;
 }
 
-void Heap::percolateUp(int i, Var key, int worker_id) {
-    Var x;
-    if (key != var_Undef) x = key;
-    else {
-        while (isLocked(i)) {
-            polling[worker_id] = true;
-            (*heap_sink_ptr)();
-        }
-        polling[worker_id] = false;
-        x = read(heapAddr(i), worker_id);
+// debugging only
+void Heap::debug_heap(int worker_id) {
+    printf("start debugging\n");
+    sst_assert(outstanding_mem_requests == 0, CALL_INFO, -1,
+               "outstanding_mem_requests: %d\n", outstanding_mem_requests);
+
+    for (auto lock : locks) {
+        sst_assert(!lock, CALL_INFO, -1, "Heap lock still held\n");
     }
-    output.verbose(CALL_INFO, 4, 0, "PercolateUp[%d]: idx %d, key %d\n", worker_id, i, x);
+
+    for (int i = 0; i < heap_size; i++) {
+        Var v = read(heapAddr(i), worker_id);
+        int idx = read(indexAddr(v), worker_id);
+        sst_assert(idx == i, CALL_INFO, -1, "Heap index mismatch: expected %d, got %d for key %d\n", i, idx, v);
+    }
+
+    // for (Var v = 1; v <= 41; v++) {  // change the range as needed
+    //     int idx = read(indexAddr(v), worker_id);
+    //     if (idx >= 0) {
+    //         Var heap_v = read(heapAddr(idx), worker_id);
+    //         sst_assert(heap_v == v, CALL_INFO, -1, "Heap value mismatch: expected %d at index %d, got %d\n", v, idx, heap_v);
+    //     }
+    // }
+
+    state = IDLE;
+    heap_sink_ptrs.clear();
+    heap_sources.clear();
+    heap_active_workers.clear();
+    heap_polling.clear();
+}
+
+void Heap::percolateUp(int i, Var x, int worker_id) {
+    output.verbose(CALL_INFO, 7, 0, "PercolateUp[%d]: idx %d, key %d\n", worker_id, i, x);
     // printf("lock[%d]: %d\n", worker_id, i);
     lock(i);
-    
+
     int p = parent(i);
     while (isLocked(p)) {
-        polling[worker_id] = true;
+        heap_polling[worker_id] = true;
         (*heap_sink_ptr)();
     }
-    polling[worker_id] = false;
     // printf("lock[%d]: %d\n", worker_id, p);
     lock(p);
     Var heap_p = read(heapAddr(p), worker_id);
@@ -253,10 +281,9 @@ void Heap::percolateUp(int i, Var key, int worker_id) {
         
         p = parent(p);
         while (isLocked(p)) {
-            polling[worker_id] = true;
+            heap_polling[worker_id] = true;
             (*heap_sink_ptr)();
         }
-        polling[worker_id] = false;
         lock(p);
         // printf("lock[%d]: %d\n", worker_id, p);
         heap_p = read(heapAddr(p), worker_id);
@@ -270,7 +297,7 @@ void Heap::percolateUp(int i, Var key, int worker_id) {
     unlock(p);
     // printf("unlock[%d]: %d\n", worker_id, i);
     // printf("unlock[%d]: %d\n", worker_id, p);
-    output.verbose(CALL_INFO, 4, 0, "PercolateUp[%d]: key %d, final idx %d\n", worker_id, x, i);
+    output.verbose(CALL_INFO, 7, 0, "PercolateUp[%d]: key %d, final idx %d\n", worker_id, x, i);
 }
 
 void Heap::percolateDown(int i, Var key) {
@@ -324,36 +351,52 @@ void Heap::readHeap(int idx) {
     complete(v);
 }
 
-void Heap::decrease(Var key) {
-    output.verbose(CALL_INFO, 7, 0, "Decrease: key %d\n", key);
-    int idx = read(indexAddr(key));
-    
-    // key not in heap or already at root
-    if (idx <= 0) {
-        return;
+void Heap::decrease(Var key, int worker_id) {
+    output.verbose(CALL_INFO, 7, 0, "Decrease[%d]: key %d\n", worker_id, key);
+    int idx;
+    while (true) {
+        idx = read(indexAddr(key), worker_id);
+
+        // key not in heap or already at root
+        if (idx <= 0) {
+            return;
+        }
+        
+        // check if the key has been swapped while reading its index
+        while (isLocked(idx)) {
+            heap_polling[worker_id] = true;
+            (*heap_sink_ptr)();
+        }
+        lock(idx);
+        Var heap_key = read(heapAddr(idx), worker_id);
+
+        if (heap_key == key) break;  // run percolateUp directly
+        else unlock(idx);  // has been swapped; read the new index
     }
-    percolateUp(idx);
+
+    percolateUp(idx, key, worker_id);
 }
 
 void Heap::insert(Var key, int worker_id) {
     if (inHeap(key, worker_id)) {
-        output.verbose(CALL_INFO, 4, 0, "Insert[%d]: already in heap\n", worker_id);
-        complete(true);
+        output.verbose(CALL_INFO, 7, 0, "Insert[%d]: already in heap\n", worker_id);
+        complete(true, worker_id);
         return;
     }
 
+    // insert at the end of the heap
     write(indexAddr(key), heap_size);
     write(heapAddr(heap_size), key);
     heap_size++;
-    output.verbose(CALL_INFO, 4, 0, "Insert[%d]: key %d, heap size %ld\n",
+    output.verbose(CALL_INFO, 7, 0, "Insert[%d]: key %d, heap size %ld\n",
         worker_id, key, heap_size);
     if (heap_size == 1) {
-        complete(true);
+        complete(true, worker_id);
         return;
     }
 
     percolateUp(heap_size - 1, key, worker_id);
-    complete(true);
+    complete(true, worker_id);
 }
 
 void Heap::removeMin() {
@@ -428,20 +471,45 @@ bool Heap::lt(Var x, Var y, int worker_id) {
     return act_x > act_y;
 }
 
-void Heap::varBump(Var key) {
-    output.verbose(CALL_INFO, 7, 0, "bump activity for var %d\n", key);
-    double act = var_activity.readAct(key);
-    
+void Heap::varBump(Var key, int worker_id) {
+    output.verbose(CALL_INFO, 7, 0, "BUMP[%d] activity for var %d\n", worker_id, key);
+    double act = var_activity.readAct(key, worker_id);
+
+    if (need_rescale) {  // wait for rescale and then retry
+        pending_requests.push(new HeapReqEvent(HeapReqEvent::BUMP, key));
+        return;
+    }
+
     double new_act = act + *(var_inc_ptr);
     var_activity[key] = new_act;
 
     if (new_act > 1e100) {
-        output.verbose(CALL_INFO, 7, 0, "Rescaling variable activity\n");
-        var_activity.rescaleAll(1e-100);
-        *var_inc_ptr = 1e-100;
+        output.verbose(CALL_INFO, 4, 0, "BUMP[%d] need to rescale variable activity\n", worker_id);
+        need_rescale = true;
+        // wait for all workers to finish before rescaling
+        while (true) {
+            int active_workers = 0;
+            int active_idx = 0;
+            for (size_t i = 0; i < heap_sources.size(); i++) {
+                if (heap_sources[i]) {
+                    active_workers++;
+                    active_idx = i;
+                }
+            }
+
+            if (active_workers == 1 && active_idx == worker_id) break;
+            else {
+                heap_polling[worker_id] = true;
+                (*heap_sink_ptr)();
+            }
+        }
+
+        var_activity.rescaleAll(1e-100, worker_id);
+        *var_inc_ptr *= 1e-100;
+        need_rescale = false;
     }
 
-    decrease(key);
+    decrease(key, worker_id);
     
-    complete(true);
+    complete(true, worker_id);
 }

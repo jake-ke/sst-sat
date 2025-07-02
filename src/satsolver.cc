@@ -394,7 +394,9 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
             state = STEP;
         } else order_heap->handleMem(req);  // Heap request
 
-        if (active_workers.size() > 0) active_workers[worker_id] = true;
+        if (active_workers.size() > 0 && worker_id >= 0 && worker_id < (int)active_workers.size()) {
+            active_workers[worker_id] = true;
+        }
         output.verbose(CALL_INFO, 8, 0, "handleGlobalMemEvent received for 0x%lx, worker %d\n", addr, worker_id);
     }
     delete req;  // assuming no write responses are sent back
@@ -488,7 +490,10 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
         case BTLEVEL:
             if (learnt_clause.size() == 1) {
                 bt_level = 0;
-                state = BACKTRACK;
+                if (OVERLAP_HEAP_BUMP) {
+                    state = WAIT_HEAP;
+                    next_state = BACKTRACK;
+                } else state = BACKTRACK;
             } else {
                 coroutine = new coro_t::pull_type(
                     [this](coro_t::push_type &yield) {
@@ -534,26 +539,7 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
             assert(unstalled_cnt >= 0);
             if (unstalled_cnt == 0) {
                 unstalled_heap = false;
-                // if not parallelizing propagation and heap insertions
-                state = PROPAGATE;
-                
-                // for parallel propagation and heap insertions
-                // if (conflict != ClauseRef_Undef) {
-                //     if (decision_output_stream.is_open()) decision_output_stream << "#Conflict" << std::endl;
-                //     output.verbose(CALL_INFO, 2, 0, "CONFLICT: clause %d\n", conflict);
-                //     conflictC++;
-                //     stat_conflicts->addData(1);
-                    
-                //     if (trail_lim.empty()) {
-                //         output.output("UNSATISFIABLE: conflict at level 0\n");
-                //         state = DONE;
-                //         // primaryComponentOKToEndSim();
-                //         return false;
-                //     }
-                //     state = ANALYZE;
-                // } else if (conflictC >= conflicts_until_restart) state = RESTART;
-                // else if (nLearnts() - nAssigns() >= max_learnts) state = REDUCE;
-                // else state = DECIDE;
+                state = next_state;
             }
             break;
         case DONE: primaryComponentOKToEndSim(); return true;
@@ -576,9 +562,6 @@ void SATSolver::initialize() {
 
 void SATSolver::execPropagate() {
     conflict = unitPropagate();
-    // for parallel propagation and heap insertions
-    // analyze will use heap so need to wait for heap to finish
-    // state = WAIT_HEAP;
     
     // if not parallelizing propagation and heap insertions
     if (conflict != ClauseRef_Undef) {
@@ -593,16 +576,24 @@ void SATSolver::execPropagate() {
             primaryComponentOKToEndSim();
             return;
         }
-        // learn from the conflict
-        state = ANALYZE;
+        state = ANALYZE;  // learn from the conflict
     } else if (conflictC >= conflicts_until_restart) state = RESTART;
     else if (nLearnts() - nAssigns() >= max_learnts) state = REDUCE;
     else state = DECIDE;
+
+    if (OVERLAP_HEAP_INSERT) {
+        next_state = state;
+        state = WAIT_HEAP;
+    }
 }
 
 void SATSolver::execAnalyze() {
     analyze();
-    state = MINIMIZE;
+    if (OVERLAP_HEAP_BUMP) state = MINIMIZE;
+    else {
+        state = WAIT_HEAP;
+        next_state = MINIMIZE;
+    }
 }
 
 void SATSolver::execMinimize() {
@@ -739,11 +730,11 @@ void SATSolver::execBacktrack() {
             "LEARN: Adjusted max_learnts to %.0f\n", max_learnts);
     }
 
-    // for parallel propagation and heap insertions, directly starts propagation
-    // state = PROPAGATE;
-
-    // if not parallelizing propagation and heap insertions, wait for heap to finish
-    state = WAIT_HEAP;
+    if (OVERLAP_HEAP_INSERT) state = PROPAGATE;
+    else {
+        state = WAIT_HEAP;
+        next_state = PROPAGATE;
+    }
 }
 
 void SATSolver::execReduce() {
@@ -766,12 +757,12 @@ void SATSolver::execRestart() {
     
     output.verbose(CALL_INFO, 2, 0, "RESTART: #%d, new limit=%d\n", 
         curr_restarts, conflicts_until_restart);
-    
-    // for parallel propagation and heap insertions, directly starts propagation
-    // state = PROPAGATE;
-    
-    // if not parallelizing propagation and heap insertions, wait for heap to finish
-    state = WAIT_HEAP;
+
+    if (OVERLAP_HEAP_INSERT) state = PROPAGATE;
+    else {
+        state = WAIT_HEAP;
+        next_state = PROPAGATE;
+    }
 }
 
 void SATSolver::execDecide() {
@@ -1098,7 +1089,7 @@ void SATSolver::analyze() {
             claBumpActivity(conflict);
         
         // Debug print for current clause
-        output.verbose(CALL_INFO, 4, 0,
+        output.verbose(CALL_INFO, 5, 0,
             "ANALYZE: Processing clause %d: %s\n", conflict, printClause(c).c_str());
 
         // For each literal in the clause
@@ -1113,7 +1104,8 @@ void SATSolver::analyze() {
 
             if (!seen[v] && v_data.level > 0) {
                 order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::BUMP, v));
-                (*yield_ptr)();
+                unstalled_heap = true;
+                unstalled_cnt++;
 
                 seen[v] = 1;
                 output.verbose(CALL_INFO, 5, 0,
@@ -1141,7 +1133,7 @@ void SATSolver::analyze() {
         seen[var(p)] = 0;
         pathC--;
         
-        output.verbose(CALL_INFO, 4, 0,
+        output.verbose(CALL_INFO, 5, 0,
             "ANALYZE: Selected trail literal %d, index %d, reason=%d, pathC=%d\n", 
             toInt(p), index, conflict, pathC);
         
@@ -1187,7 +1179,10 @@ void SATSolver::findBtLevel() {
     output.verbose(CALL_INFO, 3, 0, "Backtrack Level = %d\n", bt_level);
     output.verbose(CALL_INFO, 3, 0, "Final learnt clause: %s\n", 
         printClause(learnt_clause).c_str());
-    state = BACKTRACK;
+    if (OVERLAP_HEAP_BUMP) {
+        state = WAIT_HEAP;
+        next_state = BACKTRACK;
+    } else state = BACKTRACK;
 }
 
 //-----------------------------------------------------------------------------------

@@ -31,9 +31,9 @@ void Activity::push(double value) {
     size_++;
 }
 
-void Activity::rescaleAll(double factor) {
-    std::vector<double> values = readBurstAct(0, size_);
-    
+void Activity::rescaleAll(double factor, int worker_id) {
+    std::vector<double> values = readBurstAct(0, size_, worker_id);
+
     for (size_t i = 0; i < size_; i++) {
         values[i] *= factor;
     }

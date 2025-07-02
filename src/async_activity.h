@@ -35,7 +35,7 @@ public:
     double readAct(uint64_t addr, int worker_id = 0);
     std::vector<double> readBurstAct(size_t start, size_t count, int worker_id = 0);
     void push(double value);
-    void rescaleAll(double factor);
+    void rescaleAll(double factor, int worker_id = 0);
     void reduceDB(const std::vector<double>& activities, const std::vector<bool>& to_remove);
 
 protected:

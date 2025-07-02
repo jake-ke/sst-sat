@@ -10,6 +10,8 @@ using coro_t = boost::coroutines2::coroutine<void>;
 const int MINIMIZERS = 2;  // Number of minimizers
 const int PROPAGATORS = 7;  // Number of propagators
 const int HEAPLANES = 8;  // Number of heap lanes for parallel execution
+const bool OVERLAP_HEAP_INSERT = false;  // overlaps heap insertions (backtracking) with propagation
+const bool OVERLAP_HEAP_BUMP = false;  // overlaps heap bumping with clause minimization and find bt level
 
 // Define types for variables and literals
 typedef int Var;

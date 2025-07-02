@@ -82,7 +82,7 @@ public:
     size_t size() const { return heap_size; }
     bool empty() const { return heap_size == 0; }
     
-    enum State { IDLE, WAIT, STEP };
+    enum State { IDLE, WAIT, STEP, DEBUG };
     State state;
     int outstanding_mem_requests;  // Track outstanding memory requests
     
@@ -106,9 +106,11 @@ private:
     ReorderBuffer reorder_buffer;
 
     // parallel execution support
-    std::vector<bool> active_workers;
-    std::vector<bool> polling;
-    std::vector<bool> locks;
+    std::vector<bool> heap_active_workers;
+    std::vector<bool> heap_polling;
+    std::vector<bool> locks;  // locks for heap indices
+    bool need_rescale;  // need to pause and rescale all variable activities
+    void startNewWorker(size_t idx);
 
     // Helper methods
     inline int parent(int i) { return (i - 1) >> 1; }
@@ -119,20 +121,21 @@ private:
     
     Var read(uint64_t addr, int worker_id = 0);
     void write(uint64_t addr, Var val);
-    void complete(int res);
+    void complete(int res, int worker_id = 0);
+    void debug_heap(int worker_id = 0);  // debugging only
 
-    void lock(Var x) { locks[x] = true; }
-    void unlock(Var x) { locks[x] = false; }
-    bool isLocked(Var x) const { return locks[x]; }
+    void lock(int x) { locks[x] = true; }
+    void unlock(int x) { locks[x] = false; }
+    bool isLocked(int x) const { return locks[x]; }
 
-    void percolateUp(int i, Var key=var_Undef, int worker_id = 0);
+    void percolateUp(int i, Var x, int worker_id = 0);
     void percolateDown(int i, Var key=var_Undef);
     void readHeap(int idx);
     bool inHeap(Var key, int worker_id = 0);
     void insert(Var key, int worker_id = 0);
-    void decrease(Var key);
+    void decrease(Var key, int worker_id = 0);
     void removeMin();
-    void varBump(Var key);
+    void varBump(Var key, int worker_id = 0);
 
 public:
     void setLineSize(size_t size) { line_size = size; var_activity.setLineSize(size); }
