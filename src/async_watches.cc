@@ -192,27 +192,33 @@ void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker
         return;
     }
     
-    // Case 2: Try to insert into the first block
-    WatcherBlock first_block = readBlock(head, worker_id);
+    // Case 2: Search all blocks for a free slot
+    uint64_t curr_addr = head;
     
-    // Check if this block has a free slot
-    uint8_t full_mask = (1 << nodes_per_block) - 1;  // All bits set for nodes_per_block
-    if (first_block.valid_mask != full_mask) {
-        // Find the first free slot
-        for (size_t i = 0; i < nodes_per_block; i++) {
-            if ((first_block.valid_mask & (1 << i)) == 0) {
-                // Found a free slot
-                first_block.nodes[i] = WatcherNode(clause_idx, blocker);
-                first_block.valid_mask |= (1 << i);
-                writeBlock(head, first_block);
-                
-                busy.erase(lit_idx);
-                output.verbose(CALL_INFO, 7, 0, 
-                    "Worker[%d] Inserted watcher in slot %zu, clause %d, var %d\n", 
-                    worker_id, i, clause_idx, lit_idx/2);
-                return;
+    while (curr_addr != 0) {
+        WatcherBlock curr_block = readBlock(curr_addr, worker_id);
+        
+        // Check if this block has a free slot
+        uint8_t full_mask = (1 << nodes_per_block) - 1;  // All bits set for nodes_per_block
+        if (curr_block.valid_mask != full_mask) {
+            // Find the first free slot
+            for (size_t i = 0; i < nodes_per_block; i++) {
+                if ((curr_block.valid_mask & (1 << i)) == 0) {
+                    // Found a free slot
+                    curr_block.nodes[i] = WatcherNode(clause_idx, blocker);
+                    curr_block.valid_mask |= (1 << i);
+                    writeBlock(curr_addr, curr_block);
+                    
+                    busy.erase(lit_idx);
+                    output.verbose(CALL_INFO, 7, 0, 
+                        "Worker[%d] Inserted watcher in slot %zu, clause %d, var %d\n", 
+                        worker_id, i, clause_idx, lit_idx/2);
+                    return;
+                }
             }
         }
+        
+        curr_addr = curr_block.next_block;
     }
 
     // Case 3: First block is full - add a new block at front
