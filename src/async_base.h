@@ -27,8 +27,9 @@ public:
     void writeUntimed(uint64_t addr, size_t size, const std::vector<uint8_t>& data);
     
     // Cache-aware burst operations
-    void readBurst(uint64_t start_addr, size_t element_size, size_t count, uint64_t worker_id = 0);
-    void writeBurst(uint64_t start_addr, size_t element_size, const std::vector<uint8_t>& data);
+    void readBurst(uint64_t start_addr, size_t total_size, uint64_t worker_id = 0);
+    void writeBurst(uint64_t start_addr, const std::vector<uint8_t>& data);
+    void readBurst2D(uint64_t start_addr, uint64_t offset, size_t element_size, size_t count, uint64_t worker_id = 0);
     
     // Memory response handling
     virtual void handleMem(SST::Interfaces::StandardMem::Request* req);
@@ -58,10 +59,11 @@ protected:
     // Per-worker burst read state tracking
     struct BurstReadState {
         uint64_t start_addr;        // Starting address of burst read
+        uint64_t offset;            // Offset within the burst read
         size_t pending_read_count;  // Number of pending reads
         bool completed;             // Flag to indicate completion
-        
-        BurstReadState() : start_addr(0), pending_read_count(0), completed(false) {}
+
+        BurstReadState() : start_addr(0), offset(0), pending_read_count(0), completed(false) {}
     };
     
     // Member variables

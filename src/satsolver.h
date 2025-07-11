@@ -70,7 +70,6 @@ public:
         {"indices_base_addr", "Base address for indices memory", "0x10000000"},
         {"variables_base_addr", "Base address for variables memory", "0x20000000"},
         {"var_act_base_addr", "Base address for variable activity memory", "0x70000000"},
-        {"clause_act_base_addr", "Base address for clause activity memory", "0x80000000"},
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -152,9 +151,9 @@ public:
     
     // Clause Activity
     void claDecayActivity();
-    void claBumpActivity(int clause_idx);
+    void claBumpActivity(Cref clause_addr, float act);
     void reduceDB();               // Reduce the learnt clause database
-    bool locked(int clause_idx);   // Check if clause is locked (reason for assignment)
+    bool locked(Cref clause_addr);   // Check if clause is locked (reason for assignment)
 
     // Clause Minimization
     void minimizeL2_sub(std::vector<bool>& redundant, int worker_id = 0);  // coroutine function
@@ -172,8 +171,7 @@ public:
     uint64_t getStatCount(Statistic<uint64_t>* stat);
     inline int nAssigns() const { return trail.size(); }
     inline int nLearnts() const { return clauses.size() - num_clauses; }
-    inline bool isLearnt(int clause_idx) const { return clause_idx >= num_clauses; }
-    std::string printClause(const Clause& c);
+    const char* printClause(const std::vector<Lit>& literals);
     void loadDecisionSequence(const std::string& filename);  // user-defined decision sequence
     void dumpDecision(Lit lit);
 
@@ -204,7 +202,7 @@ private:
     std::vector<Clause> parsed_clauses;         // Temporary storage during parsing
     
     // SAT solver state
-    Clauses clauses;                    // Replaces std::vector<Clause> clauses
+    Clauses clauses;                    // all clauses stored in external memory
     std::vector<bool> var_assigned;     // Whether each variable is assigned
     std::vector<bool> var_value;        // Value of each variable
     
@@ -249,9 +247,7 @@ private:
     Variables variables;                // Replaces std::vector<Variable> variables
     uint64_t variables_base_addr;       // Base address for variables memory
     
-    // Clause activity
-    Activity cla_activity;              // Replace std::vector<double> cla_activity
-    uint64_t clause_act_base_addr;      // Base address for clause activity
+    // Clause activity now stored in the Clause memory
     double clause_decay;
     double cla_inc;
 

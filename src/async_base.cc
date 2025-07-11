@@ -47,8 +47,7 @@ std::vector<AsyncBase::CacheChunk> AsyncBase::calculateCacheChunks(uint64_t star
     return chunks;
 }
 
-void AsyncBase::readBurst(uint64_t start_addr, size_t element_size, size_t count, uint64_t worker_id) {
-    size_t total_size = count * element_size;
+void AsyncBase::readBurst(uint64_t start_addr, size_t total_size, uint64_t worker_id) {
     auto chunks = calculateCacheChunks(start_addr, total_size);
     
     // Create/update burst state for this worker
@@ -61,21 +60,12 @@ void AsyncBase::readBurst(uint64_t start_addr, size_t element_size, size_t count
     reorder_buffer->startBurst(worker_id, total_size);
 
     for (const auto& chunk : chunks) {
-        // Try to align to element boundaries when possible
-        size_t aligned_size = chunk.size;
-        if (chunk.size % element_size != 0 && chunk.offset_in_data + chunk.size < total_size) {
-            size_t elements_in_chunk = chunk.size / element_size;
-            if (elements_in_chunk > 0) {
-                aligned_size = elements_in_chunk * element_size;
-            }
-        }
-        
         output.verbose(CALL_INFO, 8, 0, 
             "ReadBurst chunk: addr=0x%lx, size=%zu, offset=%zu, worker=%lu\n", 
-            chunk.addr, aligned_size, chunk.offset_in_data, worker_id);
+            chunk.addr, chunk.size, chunk.offset_in_data, worker_id);
 
         // Create request and register with reorder buffer
-        auto req = new SST::Interfaces::StandardMem::Read(chunk.addr, aligned_size);
+        auto req = new SST::Interfaces::StandardMem::Read(chunk.addr, chunk.size);
         uint64_t req_id = req->getID();
         reorder_buffer->registerRequest(req_id, worker_id);
         memory->send(req);
@@ -90,33 +80,53 @@ void AsyncBase::readBurst(uint64_t start_addr, size_t element_size, size_t count
     burst_states.erase(worker_id);
     
     output.verbose(CALL_INFO, 7, 0, "ReadBurst: All %zu read requests completed for worker %lu\n", 
-                  chunks.size(), worker_id);
+                   chunks.size(), worker_id);
 }
 
-void AsyncBase::writeBurst(uint64_t start_addr, size_t element_size, const std::vector<uint8_t>& data) {
+void AsyncBase::writeBurst(uint64_t start_addr, const std::vector<uint8_t>& data) {
     auto chunks = calculateCacheChunks(start_addr, data.size());
     
     for (const auto& chunk : chunks) {
-        // Try to align to element boundaries when possible
-        size_t aligned_size = chunk.size;
-        if (chunk.size % element_size != 0 && chunk.offset_in_data + chunk.size < data.size()) {
-            size_t elements_in_chunk = chunk.size / element_size;
-            if (elements_in_chunk > 0) {
-                aligned_size = elements_in_chunk * element_size;
-            }
-        }
-        
         output.verbose(CALL_INFO, 8, 0, 
             "WriteBurst chunk: addr=0x%lx, size=%zu, offset=%zu\n", 
-            chunk.addr, aligned_size, chunk.offset_in_data);
+            chunk.addr, chunk.size, chunk.offset_in_data);
         
-        std::vector<uint8_t> chunk_data(aligned_size);
-        memcpy(chunk_data.data(), data.data() + chunk.offset_in_data, aligned_size);
+        std::vector<uint8_t> chunk_data(chunk.size);
+        memcpy(chunk_data.data(), data.data() + chunk.offset_in_data, chunk.size);
         
         memory->send(new SST::Interfaces::StandardMem::Write(
-            chunk.addr, aligned_size, chunk_data, false));
+            chunk.addr, chunk.size, chunk_data, false));
         // doYield();
     }
+}
+
+void AsyncBase::readBurst2D(uint64_t start_addr, uint64_t offset, size_t element_size, size_t count, uint64_t worker_id) {
+    // Create/update burst state for this worker
+    BurstReadState& worker_state = burst_states[worker_id];
+    worker_state.start_addr = start_addr;
+    worker_state.offset = offset;
+    worker_state.pending_read_count = count;
+    worker_state.completed = false;
+    
+    // Initialize buffer for the complete burst read
+    reorder_buffer->startBurst(worker_id, count * element_size);
+
+    uint64_t addr = start_addr;
+    for (int i = 0; i < count; i++) {
+        auto req = new SST::Interfaces::StandardMem::Read(addr, element_size);
+        uint64_t req_id = req->getID();
+        reorder_buffer->registerRequest(req_id, worker_id);
+        memory->send(req);  // without stalling
+        addr += offset + element_size;
+    }
+    
+    // Wait for this worker's burst read to complete
+    while (!worker_state.completed) {
+        doYield();
+    }
+    
+    // Clean up burst state for this worker
+    burst_states.erase(worker_id);
 }
 
 void AsyncBase::handleMem(SST::Interfaces::StandardMem::Request* req) {
@@ -133,7 +143,7 @@ void AsyncBase::handleMem(SST::Interfaces::StandardMem::Request* req) {
         if (burst_it != burst_states.end()) {
             // This response belongs to a burst read
             BurstReadState& state = burst_it->second;
-            uint64_t offset_in_buffer = addr - state.start_addr;
+            uint64_t offset_in_buffer = addr - state.start_addr - state.offset;
             reorder_buffer->storeResponse(req_id, resp->data, true, offset_in_buffer);
             
             if (--state.pending_read_count == 0) state.completed = true;

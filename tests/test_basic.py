@@ -91,7 +91,6 @@ params = {
     "clauses_cmd_base_addr" : hex(clauses_cmd_base_addr),
     "clauses_base_addr" : hex(clauses_base_addr),
     "var_act_base_addr" : hex(var_act_base_addr),
-    "clause_act_base_addr" : hex(clause_act_base_addr),
     "random_var_freq": str(args.random_var_freq),
     "var_decay": str(args.var_decay),
     "clause_decay": str(args.clause_decay)

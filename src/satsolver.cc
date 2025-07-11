@@ -67,7 +67,6 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     clauses_cmd_base_addr = std::stoull(params.find<std::string>("clauses_cmd_base_addr", "0x50000000"), nullptr, 0);
     clauses_base_addr = std::stoull(params.find<std::string>("clauses_base_addr", "0x60000000"), nullptr, 0);
     var_act_base_addr = std::stoull(params.find<std::string>("var_act_base_addr", "0x70000000"), nullptr, 0);
-    clause_act_base_addr = std::stoull(params.find<std::string>("clause_act_base_addr", "0x80000000"), nullptr, 0);
     
     // Load decision sequence if provided
     std::string decision_file = params.find<std::string>("decision_file", "");
@@ -112,10 +111,6 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     // Create Clauses object
     clauses = Clauses(verbose, global_memory, clauses_cmd_base_addr, clauses_base_addr, &yield_ptr);
     clauses.setReorderBuffer(&reorder_buffer);
-    
-    // Create Activity objects
-    cla_activity = Activity("CLA_ACT->", verbose, global_memory, clause_act_base_addr, &yield_ptr);
-    cla_activity.setReorderBuffer(&reorder_buffer);
     
     // Load the heap subcomponent
     order_heap = loadUserSubComponent<Heap>("order_heap",
@@ -215,7 +210,6 @@ void SATSolver::setup() {
     // Propagate cache line size to all memory-using components
     watches.setLineSize(line_size);
     clauses.setLineSize(line_size);
-    cla_activity.setLineSize(line_size);
     order_heap->setLineSize(line_size);
 }
 
@@ -320,11 +314,12 @@ void SATSolver::parseDIMACS(const std::string& content) {
                         std::unique(clause.literals.begin(), clause.literals.end()),
                         clause.literals.end());
 
+                    clause.num_lits = clause.literals.size();
                     parsed_clauses.push_back(clause);
 
                     // debugging outputs
                     output.verbose(CALL_INFO, 6, 0, "Added clause %lu: %s\n",
-                                   parsed_clauses.size() - 1, printClause(clause).c_str());
+                                   parsed_clauses.size() - 1, printClause(clause.literals));
                 }
                 break;
             }
@@ -374,11 +369,7 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
         int worker_id = -1;
 
         // Route the request to the appropriate handler based on address range
-        if (addr >= clause_act_base_addr) {
-            worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
-            cla_activity.handleMem(req);
-            state = STEP;
-        } else if (addr >= var_act_base_addr) {
+        if (addr >= var_act_base_addr) {
             order_heap->handleMem(req);
         } else if (addr >= clauses_cmd_base_addr) {  // Clauses request
             worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
@@ -566,7 +557,7 @@ void SATSolver::execPropagate() {
     // if not parallelizing propagation and heap insertions
     if (conflict != ClauseRef_Undef) {
         if (decision_output_stream.is_open()) decision_output_stream << "#Conflict" << std::endl;
-        output.verbose(CALL_INFO, 2, 0, "CONFLICT: clause %d\n", conflict);
+        output.verbose(CALL_INFO, 2, 0, "CONFLICT: clause 0x%x\n", conflict);
         conflictC++;
         stat_conflicts->addData(1);
         
@@ -605,7 +596,7 @@ void SATSolver::execMinimize() {
     int i, j;
     output.verbose(CALL_INFO, 3, 0,
         "ANALYZE: Minimizing clause (size %zu): %s\n", learnt_clause.size(),
-        printClause(learnt_clause).c_str());
+        printClause(learnt_clause));
 
     if (ccmin_mode == 2) {
         // Deep minimization (more thorough)
@@ -668,8 +659,8 @@ void SATSolver::execMinimize() {
             if (var_data.reason == ClauseRef_Undef)
                 learnt_clause[j++] = learnt_clause[i];
             else {
-                const Clause& c = clauses.readClause(var_data.reason);
-                for (size_t k = 1; k < c.size(); k++) {
+                Clause c = clauses.readClause(var_data.reason);
+                for (size_t k = 1; k < c.litSize(); k++) {
                     Var l = var(c[k]);
                     if (!seen[l] && var_data.level > 0) {
                         learnt_clause[j++] = learnt_clause[i];
@@ -689,8 +680,7 @@ void SATSolver::execMinimize() {
         stat_minimized_literals->addDataNTimes(i - j, 1);
         output.verbose(CALL_INFO, 3, 0, 
             "MINIMIZE: removed %d literals\n", i - j);
-        output.verbose(CALL_INFO, 3, 0, "MINIMIZE: Final minimized clause: %s\n", 
-            printClause(learnt_clause).c_str());
+        output.verbose(CALL_INFO, 3, 0, "MINIMIZE: Final minimized clause: %s\n", printClause(learnt_clause));
     }
 
     state = BTLEVEL;
@@ -704,15 +694,13 @@ void SATSolver::execBacktrack() {
         trailEnqueue(learnt_clause[0]);
     } else {
         // Add the learned clause
-        Clause new_clause(learnt_clause);
-        int clause_idx = clauses.size();
+        Clause new_clause(learnt_clause, cla_inc);
         output.verbose(CALL_INFO, 3, 0, 
-            "Added learnt clause %d: %s\n", 
-            clause_idx, printClause(new_clause).c_str());
-        clauses.addClause(new_clause);
-        cla_activity.push(cla_inc);
-        attachClause(clause_idx);
-        trailEnqueue(learnt_clause[0], clause_idx);
+            "Added learnt clause %ld: %s\n", 
+            clauses.size(), printClause(new_clause.literals));
+        Cref addr = clauses.addClause(new_clause);
+        attachClause(addr);
+        trailEnqueue(learnt_clause[0], addr);
         stat_learned->addData(1);
     }
     
@@ -874,8 +862,8 @@ int SATSolver::unitPropagate() {
                 if (var_assigned[var(blocker)] && value(blocker) == true) {
                     // Blocker is true, skip to next watcher
                     output.verbose(CALL_INFO, 4, 0,
-                        "  Watch block[%d]: clause %d, blocker %d = True, skipping\n", 
-                        i, curr_block.nodes[i].clause_idx, toInt(blocker));
+                        "  Watch block[%d]: clause 0x%x, blocker %d = True, skipping\n", 
+                        i, curr_block.nodes[i].clause_addr, toInt(blocker));
                     continue;
                 }
                 
@@ -907,7 +895,7 @@ int SATSolver::unitPropagate() {
                 done = true;
                 // Check if any worker is active
                 for (size_t j = 0; j < active_workers.size(); j++) {
-                    output.verbose(CALL_INFO, 7, 0, "Worker %zu: active=%d, polling=%d, done=%d\n",
+                    output.verbose(CALL_INFO, 8, 0, "Worker %zu: active=%d, polling=%d, done=%d\n",
                         j, (bool)active_workers[j], (bool)polling[j], (bool)(coroutines[j] == nullptr));
                     if (active_workers[j]) {
                         yield_ptr = yield_ptrs[j];
@@ -976,20 +964,19 @@ void SATSolver::subPropagate(
     int worker_id
 ) {
     // Need to inspect the clause
-    int clause_idx = curr_block.nodes[i].clause_idx;
-    ClauseMetaData cmd = clauses.getMetaData(clause_idx, worker_id);
-    Clause c = clauses.readClause(cmd, worker_id);
-    
+    Cref clause_addr = curr_block.nodes[i].clause_addr;
+    Clause c = clauses.readClause(clause_addr, worker_id);
+
     // Print clause for debugging
     output.verbose(CALL_INFO, 4, 0,
-        "  Watch block[%d]: blocker:%d, clause %d: %s\n", 
-        i, toInt(curr_block.nodes[i].blocker), 
-        curr_block.nodes[i].clause_idx, printClause(c).c_str());
+        "  Watch block[%d]: blocker:%d, clause 0x%x: %s\n",
+        i, toInt(curr_block.nodes[i].blocker),
+        curr_block.nodes[i].clause_addr, printClause(c.literals));
 
     // Make sure the false literal (~p) is at position 1
-    if (c.literals[0] == not_p) {
+    if (c[0] == not_p) {
         std::swap(c.literals[0], c.literals[1]);
-        clauses.writeClause(cmd.offset, c);
+        clauses.writeClause(clause_addr, c);
         output.verbose(CALL_INFO, 4, 0, "    [W%d]Swapped literals 0 and 1\n", worker_id);
     }
     assert(c[1] == not_p);
@@ -1005,12 +992,12 @@ void SATSolver::subPropagate(
     }
     
     // Look for a new literal to watch
-    for (size_t k = 2; k < c.size(); k++) {
+    for (size_t k = 2; k < c.litSize(); k++) {
         Lit lit = c[k];
         if (!var_assigned[var(lit)] || value(lit) == true) {
             // Swap to position 1 and update watcher
             std::swap(c.literals[1], c.literals[k]);
-            clauses.writeClause(cmd.offset, c);
+            clauses.writeClause(clause_addr, c);
             output.verbose(CALL_INFO, 4, 0, 
                 "    [W%d]Found new watch: literal %d at position %zu\n", 
                 worker_id, toInt(c[1]), k);
@@ -1022,7 +1009,7 @@ void SATSolver::subPropagate(
             polling[worker_id] = false;
 
             output.verbose(CALL_INFO, 4, 0, "    [W%d]Start watchlist insertion\n", worker_id);
-            watches.insertWatcher(toWatchIndex(~c[1]), clause_idx, first, worker_id);
+            watches.insertWatcher(toWatchIndex(~c[1]), clause_addr, first, worker_id);
             
             // Mark this node as invalid in the current block
             curr_block.valid_mask &= ~(1 << i);
@@ -1038,13 +1025,13 @@ void SATSolver::subPropagate(
     if (var_assigned[var(first)] && value(first) == false) {
         // Conflict detected
         output.verbose(CALL_INFO, 3, 0,
-            "    [W%d]Conflict: Clause %d has all literals false\n", worker_id, clause_idx);
-        conflict = clause_idx;
+            "    [W%d]Conflict: Clause 0x%x has all literals false\n", worker_id, conflict);
+        conflict = clause_addr;
     } else {
         // Unit clause found, propagate
         output.verbose(CALL_INFO, 3, 0,
             "    [W%d]forces literal %d (to true)\n", worker_id, toInt(first));
-        trailEnqueue(first, clause_idx);
+        trailEnqueue(first, clause_addr);
     }
 }
 
@@ -1055,7 +1042,7 @@ void SATSolver::subPropagate(
 
 void SATSolver::analyze() {
     output.verbose(CALL_INFO, 3, 0,
-        "ANALYZE: Starting conflict analysis of clause %d\n", conflict);
+        "ANALYZE: Starting conflict analysis of clause 0x%x\n", conflict);
     
     // Debug print for trail
     if (output.getVerboseLevel() >= 3) {
@@ -1085,15 +1072,15 @@ void SATSolver::analyze() {
         const Clause& c = clauses.readClause(conflict);
         
         // Bump activity for learnt clauses
-        if (isLearnt(conflict))
-            claBumpActivity(conflict);
+        if (clauses.isLearnt(conflict))
+            claBumpActivity(conflict, c.act());
         
         // Debug print for current clause
-        output.verbose(CALL_INFO, 5, 0,
-            "ANALYZE: Processing clause %d: %s\n", conflict, printClause(c).c_str());
+        output.verbose(CALL_INFO, 5, 0, "ANALYZE: current clause (0x%x): %s\n",
+            conflict, printClause(c.literals));
 
         // For each literal in the clause
-        for (size_t i = (p == lit_Undef) ? 0 : 1; i < c.size(); i++) {
+        for (size_t i = (p == lit_Undef) ? 0 : 1; i < c.litSize(); i++) {
             Lit q = c[i];
             Var v = var(q);
             output.verbose(CALL_INFO, 5, 0,
@@ -1134,7 +1121,7 @@ void SATSolver::analyze() {
         pathC--;
         
         output.verbose(CALL_INFO, 5, 0,
-            "ANALYZE: Selected trail literal %d, index %d, reason=%d, pathC=%d\n", 
+            "ANALYZE: Selected trail literal %d, index %d, reason=0x%x, pathC=%d\n",
             toInt(p), index, conflict, pathC);
         
     } while (pathC > 0);
@@ -1143,7 +1130,7 @@ void SATSolver::analyze() {
     learnt_clause[0] = ~p;
 
     // Print learnt clause for debug
-    output.verbose(CALL_INFO, 3, 0, "ANALYZE: learnt: %s\n", printClause(learnt_clause).c_str());
+    output.verbose(CALL_INFO, 3, 0, "ANALYZE: learnt: %s\n", printClause(learnt_clause));
 }
 
 //-----------------------------------------------------------------------------------
@@ -1177,8 +1164,7 @@ void SATSolver::findBtLevel() {
     }
 
     output.verbose(CALL_INFO, 3, 0, "Backtrack Level = %d\n", bt_level);
-    output.verbose(CALL_INFO, 3, 0, "Final learnt clause: %s\n", 
-        printClause(learnt_clause).c_str());
+    output.verbose(CALL_INFO, 3, 0, "Final learnt clause: %s\n", printClause(learnt_clause));
     if (OVERLAP_HEAP_BUMP) {
         state = WAIT_HEAP;
         next_state = BACKTRACK;
@@ -1227,18 +1213,19 @@ void SATSolver::reduceDB() {
     output.verbose(CALL_INFO, 3, 0, "REDUCEDB: Starting clause database reduction\n");
     
     size_t nl = nLearnts();
-    std::vector<double> activities = cla_activity.readBurstAct(0, nl);
-    
+    std::vector<Cref> learnts_addr = clauses.readAllAddr();
+    std::vector<float> activities = clauses.readAllAct(learnts_addr);
+
     // Create pairs of (idx, activity) for sorting
-    std::vector<std::pair<int, double>> learnts(nl);
-    for (size_t i = 0; i < nl; i++) {
-        learnts[i] = std::make_pair(i + num_clauses, activities[i]);
+    std::vector<std::pair<Cref, float>> learnts(nl);
+    for (uint32_t i = 0; i < nl; i++) {
+        learnts[i] = std::make_pair(learnts_addr[i], activities[i]);
     }
     
     // 2. Sort learnt clauses by activity
     std::sort(learnts.begin(), learnts.end(), [&](const auto& a, const auto& b) {
-        int i = a.first, j = b.first;
-        return clauses.getSize(i) > 2 && (clauses.getSize(j) == 2 || a.second < b.second);
+        Cref i = a.first, j = b.first;
+        return clauses.getClauseSize(i) > 2 && (clauses.getClauseSize(j) == 2 || a.second < b.second);
     });
     
     // 3. Extra activity limit for removal
@@ -1248,56 +1235,43 @@ void SATSolver::reduceDB() {
         "REDUCEDB: Found %zu learnt clauses, extra_lim = %f\n", 
         learnts.size(), extra_lim);
     
-    // 4. First pass: mark clauses for removal
-    std::vector<bool> to_remove(clauses.size(), false);
+    // 4. mark for removal
+    std::vector<Cref> to_keep;
     int removed = 0;
-    
     for (size_t i = 0; i < learnts.size(); i++) {
-        int idx = learnts[i].first;
-        size_t cls_size = clauses.getSize(idx);
-        
+        Cref addr = learnts[i].first;
+        float act = learnts[i].second;
+        uint32_t cls_size = clauses.getClauseSize(addr);
+
         // Only remove non-binary, unlocked clauses
-        if (cls_size > 2 && !locked(idx) && 
-            (i < learnts.size() / 2 || cla_activity.readAct(idx - num_clauses) < extra_lim)) {
+        if (cls_size > 2 && !locked(addr) && (i < learnts.size() / 2 || act < extra_lim)) {
             output.verbose(CALL_INFO, 4, 0, 
-                "REDUCEDB: Marking clause %d for removal\n", idx);
-                
-            // Mark for removal and detach from watch lists
-            sst_assert(idx >= num_clauses, CALL_INFO, -1, 
-                "REDUCEDB: Trying to remove original clause %d\n", idx);
-            to_remove[idx] = true;
-            detachClause(idx);
+                "REDUCEDB: Marking clause 0x%x for removal\n", addr);
+
+            // remove watchers
+            detachClause(addr);
             removed++;
         }
+        else to_keep.push_back(addr);
     }
-    
-    // 5. Build clause map (old index -> new index)
-    std::vector<int> clause_map(clauses.size());
-    int i, j;
-    for (i = j = 0; i < num_clauses; i++)  // original clauses
-        clause_map[i] = j++;
-    
-    for (i = j = num_clauses; i < clauses.size(); i++) {
-        if (!to_remove[i]) clause_map[i] = j++;
-        else clause_map[i] = ClauseRef_Undef;
-    }
-    
+
+    // 5. Compact clauses by moving non-removed learnt clauses forward
+    std::unordered_map<Cref, Cref> clause_map = clauses.reduceDB(to_keep);
+
     // 6. Update reasons for assigned variables in trail
     for (int i = 0; i < trail.size(); i++) {
         Var v = var(trail[i]);
         Variable var_data = variables.readVar(v);
 
-        int old_reason = var_data.reason;
+        Cref old_reason = var_data.reason;
         // skip original clauses and decision variables
-        if (old_reason >= num_clauses && old_reason != ClauseRef_Undef) {
-            // Fatal error: trying to remove a locked clause referenced by a var
-            assert(!to_remove[old_reason]);
+        if (clause_map.find(old_reason) != clause_map.end() && old_reason != ClauseRef_Undef) {
             // Update the reason, but also wasted bw to update level
             var_data.reason = clause_map[old_reason];
             variables[v] = var_data;
             
             output.verbose(CALL_INFO, 5, 0, 
-                "REDUCEDB: Updated var %d reason from %d to %d\n", 
+                "REDUCEDB: Updated var %d reason from 0x%x to 0x%x\n", 
                 v, old_reason, var_data.reason);
         }
     }
@@ -1317,16 +1291,15 @@ void SATSolver::reduceDB() {
                 // Check if this node is valid
                 if ((curr_block.valid_mask & (1 << j)) == 0) continue;
                 
-                int old_idx = curr_block.nodes[j].clause_idx;
+                Cref old_addr = curr_block.nodes[j].clause_addr;
                 // Only update indices for learnt clauses that aren't being removed
-                if (old_idx >= num_clauses) {
-                    assert(!to_remove[old_idx]);  // already been removed
-                    curr_block.nodes[j].clause_idx = clause_map[old_idx];
+                if (clause_map.find(old_addr) != clause_map.end()) {
+                    curr_block.nodes[j].clause_addr = clause_map[old_addr];
                     block_modified = true;
                     
                     output.verbose(CALL_INFO, 6, 0, 
-                        "REDUCEDB: Updated watcher reference from %d to %d\n",
-                        old_idx, curr_block.nodes[j].clause_idx);
+                        "REDUCEDB: Updated watcher reference from 0x%x to 0x%x\n",
+                        old_addr, curr_block.nodes[j].clause_addr);
                 }
             }
             
@@ -1334,12 +1307,7 @@ void SATSolver::reduceDB() {
             curr_addr = next_addr;
         }
     }
-    
-    // 8. Compact clauses by moving non-removed learnt clauses forward
-    clauses.reduceDB(to_remove);
-    std::vector<bool> to_remove_learned = std::vector<bool>(to_remove.begin() + num_clauses, to_remove.end());
-    cla_activity.reduceDB(activities, to_remove_learned);
-    
+
     output.verbose(CALL_INFO, 3, 0, 
         "REDUCEDB: Removed %d learnt clauses, new clause count: %zu\n", 
         removed, clauses.size());
@@ -1378,21 +1346,21 @@ void SATSolver::unassignVariable(Var v) {
 // Two-Watched Literals
 //-----------------------------------------------------------------------------------
 
-void SATSolver::attachClause(int clause_idx) {
-    const Clause& c = clauses.readClause(clause_idx);
+void SATSolver::attachClause(Cref clause_addr) {
+    const Clause& c = clauses.readClause(clause_addr);
     // Watch the first two literals in the clause, use each other as a blocker
-    output.verbose(CALL_INFO, 5, 0, "ATTACH: clause %d with literals %d and %d\n",
-        clause_idx, toInt(c.literals[0]), toInt(c.literals[1]));
-    watches[toWatchIndex(~c.literals[0])].insert(clause_idx, c.literals[1]);
-    watches[toWatchIndex(~c.literals[1])].insert(clause_idx, c.literals[0]);
+    output.verbose(CALL_INFO, 5, 0, "ATTACH: clause 0x%x with literals %d and %d\n",
+        clause_addr, toInt(c[0]), toInt(c[1]));
+    watches[toWatchIndex(~c[0])].insert(clause_addr, c[1]);
+    watches[toWatchIndex(~c[1])].insert(clause_addr, c[0]);
 }
 
-void SATSolver::detachClause(int clause_idx) {
-    const Clause& c = clauses.readClause(clause_idx);
-    output.verbose(CALL_INFO, 6, 0, "DETACH: clause %d from watcher %d and %d\n",
-        clause_idx, toInt(~c.literals[0]), toInt(~c.literals[1]));
-    watches[toWatchIndex(~c.literals[0])].remove(clause_idx);
-    watches[toWatchIndex(~c.literals[1])].remove(clause_idx);
+void SATSolver::detachClause(Cref clause_addr) {
+    const Clause& c = clauses.readClause(clause_addr);
+    output.verbose(CALL_INFO, 6, 0, "DETACH: clause 0x%x from watcher %d and %d\n",
+        clause_addr, toInt(~c[0]), toInt(~c[1]));
+    watches[toWatchIndex(~c[0])].remove(clause_addr);
+    watches[toWatchIndex(~c[1])].remove(clause_addr);
 }
 
 
@@ -1453,31 +1421,29 @@ void SATSolver::claDecayActivity() {
 }
 
 // Bump activity for a specific clause
-void SATSolver::claBumpActivity(int clause_idx) {
-    double act = cla_activity.readAct(clause_idx - num_clauses);
-
-    cla_activity[clause_idx - num_clauses] = act + cla_inc;
+void SATSolver::claBumpActivity(Cref clause_addr, float act) {
+    clauses.writeAct(clause_addr, act + cla_inc);
 
     if ((act + cla_inc) > 1e20) {
         // Rescale all clause activities if they get too large
         output.verbose(CALL_INFO, 3, 0, "ACTIVITY: Rescaling all clause activities\n");
-        cla_activity.rescaleAll(1e-20);
+        clauses.rescaleAllAct(1e-20);
         cla_inc *= 1e-20;
     }
-    
-    output.verbose(CALL_INFO, 4, 0, "ACTIVITY: Bumped clause %d\n", clause_idx);
+
+    output.verbose(CALL_INFO, 4, 0, "ACTIVITY: Bumped clause 0x%x\n", clause_addr);
 }
 
 // Check if a clause is "locked" -- cannot be removed
-bool SATSolver::locked(int clause_idx) {
-    const Clause& c = clauses.readClause(clause_idx);
+bool SATSolver::locked(Cref clause_addr) {
+    const Clause& c = clauses.readClause(clause_addr);
+    assert(c.litSize() != 0);
     Var v = var(c[0]);
-    if (c.size() == 0) return false;
     int reason = variables.getReason(v);
     
     return var_assigned[v] && 
-           value(c[0]) == true &&      // First literal is true
-           reason == clause_idx;                // This clause is the reason
+           value(c[0]) == true &&   // First literal is true
+           reason == clause_addr;   // This clause is the reason
 }
 
 //-----------------------------------------------------------------------------------
@@ -1494,7 +1460,7 @@ void SATSolver::minimizeL2_sub(std::vector<bool>& redundant, int worker_id) {
     }
 }
 
-// Check if 'p' can be removed from a conflict clause
+// Check if 'p' can be removed from the learnt clause
 bool SATSolver::litRedundant(Lit p, int worker_id) {
     enum { seen_undef = 0, seen_source = 1, seen_removable = 2, seen_failed = 3 };
     int reason = variables.getReason(var(p), worker_id);
@@ -1510,7 +1476,7 @@ bool SATSolver::litRedundant(Lit p, int worker_id) {
     Clause c = clauses.readClause(reason, worker_id);
     
     for (size_t i = 1; ; i++) {
-        if (i < c.size()) {
+        if (i < c.litSize()) {
             // Examining the literals in the reason clause
             Lit l = c[i];
             Var v = var(l);
@@ -1606,11 +1572,11 @@ uint64_t SATSolver::getStatCount(Statistic<uint64_t>* stat) {
     return 0; // Return 0 if the cast fails
 }
 
-std::string SATSolver::printClause(const Clause& c) {
+const char* SATSolver::printClause(const std::vector<Lit>& literals) {
     std::string clause_str = "";
-    for (const auto& lit : c.literals)
+    for (const auto& lit : literals)
         clause_str += " " + std::to_string(toInt(lit));
-    return clause_str;
+    return clause_str.c_str();
 }
 
 void SATSolver::loadDecisionSequence(const std::string& filename) {

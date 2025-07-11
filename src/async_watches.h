@@ -13,11 +13,11 @@
 
 // Node in the linked list of watchers
 struct WatcherNode {
-    int clause_idx;     // Index of the clause
+    Cref clause_addr;     // Address of the clause
     Lit blocker;        // Blocker literal
-    
-    WatcherNode() : clause_idx(ClauseRef_Undef), blocker(lit_Undef) {}
-    WatcherNode(int ci, Lit b) : clause_idx(ci), blocker(b) {}
+
+    WatcherNode() : clause_addr(ClauseRef_Undef), blocker(lit_Undef) {}
+    WatcherNode(Cref ca, Lit b) : clause_addr(ca), blocker(b) {}
 };
 
 // Block of watchers - hardcoded to 64 byte cache line!
@@ -40,8 +40,8 @@ public:
 
     public:
         WatchListProxy(Watches* p, int idx) : parent(p), lit_idx(idx) {}
-        void remove(int clause_idx) { parent->removeWatcher(lit_idx, clause_idx); }
-        void insert(int clause_idx, Lit blocker) { parent->insertWatcher(lit_idx, clause_idx, blocker); }
+        void remove(Cref clause_addr) { parent->removeWatcher(lit_idx, clause_addr); }
+        void insert(Cref clause_addr, Lit blocker) { parent->insertWatcher(lit_idx, clause_addr, blocker); }
     };
 
     Watches(int verbose = 0, SST::Interfaces::StandardMem* mem = nullptr,
@@ -75,8 +75,8 @@ public:
                      WatcherBlock& prev_block, WatcherBlock& curr_block);
 
     void initWatches(size_t watch_count, std::vector<Clause>& clauses);
-    void insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker_id = 0);
-    void removeWatcher(int lit_idx, int clause_idx, int worker_id = 0);
+    void insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worker_id = 0);
+    void removeWatcher(int lit_idx, Cref clause_addr, int worker_id = 0);
 
     // only support one worker at a time for now
     bool isBusy(int lit_idx) const { return busy.find(lit_idx) != busy.end(); }

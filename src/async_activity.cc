@@ -16,7 +16,7 @@ std::vector<double> Activity::readBurstAct(size_t start, size_t count, int worke
                         start, count, size_);
     }
     std::vector<double> result(count);
-    readBurst(calcAddr(start), sizeof(double), count, worker_id);
+    readBurst(calcAddr(start), count * sizeof(double), worker_id);
 
     memcpy(result.data(), reorder_buffer->getResponse(worker_id).data(), count * sizeof(double));
     return result;
@@ -41,7 +41,7 @@ void Activity::rescaleAll(double factor, int worker_id) {
     // Write back
     std::vector<uint8_t> buffer(size_ * sizeof(double));
     memcpy(buffer.data(), values.data(), buffer.size());
-    writeBurst(calcAddr(0), sizeof(double), buffer);
+    writeBurst(calcAddr(0), buffer);
 }
 
 void Activity::reduceDB(const std::vector<double>& activities, const std::vector<bool>& to_remove) {
@@ -54,8 +54,8 @@ void Activity::reduceDB(const std::vector<double>& activities, const std::vector
     // Bulk write compacted activities back
     std::vector<uint8_t> buffer(compacted.size() * sizeof(double));
     memcpy(buffer.data(), compacted.data(), buffer.size());
-    writeBurst(calcAddr(0), sizeof(double), buffer);
-    
+    writeBurst(calcAddr(0), buffer);
+
     size_ = compacted.size();
     output.verbose(CALL_INFO, 7, 0, "ACTIVITY: Reduced from %zu to %zu\n", activities.size(), size_);
 }

@@ -79,24 +79,26 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
     size_ = watch_count;
     
     // Create temporary data structure to build the linked lists
-    std::vector<std::vector<std::pair<int, Lit>>> tmp_watches(watch_count);
+    std::vector<std::vector<std::pair<Cref, Lit>>> tmp_watches(watch_count);
     
     // Add watchers for all clauses
+    Cref addr = 0;
     for (int ci = 0; ci < clauses.size(); ci++) {
         Clause& c = clauses[ci];
-        if (c.size() >= 2) {
+        if (c.litSize() >= 2) {
             // needs to be distinct for parallel propagation
             // cannot have two watchers for the same literal
-            assert(c.literals[0] != c.literals[1]);
+            assert(c[0] != c[1]);
 
             // Watch the first two literals
-            int idx0 = toWatchIndex(~c.literals[0]);
-            int idx1 = toWatchIndex(~c.literals[1]);
+            int idx0 = toWatchIndex(~c[0]);
+            int idx1 = toWatchIndex(~c[1]);
             
             // Add watchers to the temporary structure
-            tmp_watches[idx0].push_back(std::make_pair(ci, c.literals[1]));
-            tmp_watches[idx1].push_back(std::make_pair(ci, c.literals[0]));
+            tmp_watches[idx0].push_back(std::make_pair(addr, c[1]));
+            tmp_watches[idx1].push_back(std::make_pair(addr, c[0]));
         }
+        addr += c.size();
     }
     
     // Allocate memory for batched write operations
@@ -166,8 +168,8 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
     
 }
 
-// Insert a new watcher for a literal - simplified to only check the first block
-void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker_id) {
+// Insert a new watcher for a literal
+void Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worker_id) {
     if (busy.find(lit_idx) != busy.end()) {
         output.fatal(CALL_INFO, -1, "Watches: Already busy with var %d\n", lit_idx/2);
     }
@@ -180,15 +182,15 @@ void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker
     if (head == 0) {
         uint64_t new_block_addr = allocateBlock();
         WatcherBlock new_block;
-        new_block.nodes[0] = WatcherNode(clause_idx, blocker);
+        new_block.nodes[0] = WatcherNode(clause_addr, blocker);
         new_block.valid_mask = 0x01;  // First node is valid
         writeBlock(new_block_addr, new_block);
         writeHeadPointer(lit_idx, new_block_addr);
 
         busy.erase(lit_idx);
         output.verbose(CALL_INFO, 7, 0, 
-            "Worker[%d] Inserted watcher in empty head, clause %d, var %d\n", 
-            worker_id, clause_idx, lit_idx/2);
+            "Worker[%d] Inserted watcher in empty head, clause 0x%x, var %d\n", 
+            worker_id, clause_addr, lit_idx/2);
         return;
     }
     
@@ -205,14 +207,14 @@ void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker
             for (size_t i = 0; i < nodes_per_block; i++) {
                 if ((curr_block.valid_mask & (1 << i)) == 0) {
                     // Found a free slot
-                    curr_block.nodes[i] = WatcherNode(clause_idx, blocker);
+                    curr_block.nodes[i] = WatcherNode(clause_addr, blocker);
                     curr_block.valid_mask |= (1 << i);
                     writeBlock(curr_addr, curr_block);
                     
                     busy.erase(lit_idx);
                     output.verbose(CALL_INFO, 7, 0, 
-                        "Worker[%d] Inserted watcher in slot %zu, clause %d, var %d\n", 
-                        worker_id, i, clause_idx, lit_idx/2);
+                        "Worker[%d] Inserted watcher in slot %zu, clause 0x%x, var %d\n", 
+                        worker_id, i, clause_addr, lit_idx/2);
                     return;
                 }
             }
@@ -224,7 +226,7 @@ void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker
     // Case 3: First block is full - add a new block at front
     uint64_t new_block_addr = allocateBlock();
     WatcherBlock new_block;
-    new_block.nodes[0] = WatcherNode(clause_idx, blocker);
+    new_block.nodes[0] = WatcherNode(clause_addr, blocker);
     new_block.valid_mask = 0x01;  // First node is valid
     new_block.next_block = head;  // Link to current head
     writeBlock(new_block_addr, new_block);
@@ -232,14 +234,14 @@ void Watches::insertWatcher(int lit_idx, int clause_idx, Lit blocker, int worker
     
     busy.erase(lit_idx);
     output.verbose(CALL_INFO, 7, 0, 
-        "Worker[%d] Inserted watcher in new block, clause %d, var %d\n", 
-        worker_id, clause_idx, lit_idx/2);
+        "Worker[%d] Inserted watcher in new block, clause 0x%x, var %d\n", 
+        worker_id, clause_addr, lit_idx/2);
 }
 
-// Remove a watcher with given clause index
-void Watches::removeWatcher(int lit_idx, int clause_idx, int worker_id) {
+// Remove a watcher with given clause address
+void Watches::removeWatcher(int lit_idx, Cref clause_addr, int worker_id) {
     output.verbose(CALL_INFO, 7, 0, 
-        "Removing watcher for clause %d at var %d\n", clause_idx, lit_idx/2);
+        "Removing watcher for clause 0x%x at var %d\n", clause_addr, lit_idx/2);
     // Read head pointer
     uint64_t head = readHeadPointer(lit_idx, worker_id);
     if (head == 0) output.fatal(CALL_INFO, -1, "Empty watch list for var %d\n", lit_idx/2);
@@ -253,7 +255,7 @@ void Watches::removeWatcher(int lit_idx, int clause_idx, int worker_id) {
         
         // Search for the clause in this block
         for (size_t i = 0; i < nodes_per_block; i++) {
-            if ((curr_block.valid_mask & (1 << i)) && curr_block.nodes[i].clause_idx == clause_idx) {
+            if ((curr_block.valid_mask & (1 << i)) && curr_block.nodes[i].clause_addr == clause_addr) {
                 // Found the clause, invalidate this node
                 curr_block.valid_mask &= ~(1 << i);
                 
@@ -273,15 +275,15 @@ void Watches::removeWatcher(int lit_idx, int clause_idx, int worker_id) {
                     freeBlock(curr_addr);
                     
                     output.verbose(CALL_INFO, 7, 0, 
-                        "Removed watcher for clause %d at var %d, freed empty block 0x%lx\n", 
-                        clause_idx, lit_idx/2, curr_addr);
+                        "Removed watcher for clause 0x%x at var %d, freed empty block 0x%lx\n", 
+                        clause_addr, lit_idx/2, curr_addr);
                 } else {
                     // Block still has valid nodes, just update it
                     writeBlock(curr_addr, curr_block);
                     
                     output.verbose(CALL_INFO, 7, 0, 
-                        "Removed watcher for clause %d at var %d, updated block 0x%lx\n", 
-                        clause_idx, lit_idx/2, curr_addr);
+                        "Removed watcher for clause 0x%x at var %d, updated block 0x%lx\n", 
+                        clause_addr, lit_idx/2, curr_addr);
                 }
                 
                 return;
@@ -292,6 +294,6 @@ void Watches::removeWatcher(int lit_idx, int clause_idx, int worker_id) {
         prev_block = curr_block;
         curr_addr = curr_block.next_block;
     }
-    
-    output.fatal(CALL_INFO, -1, "Remove failed clause %d, var %d\n", clause_idx, lit_idx/2);
+
+    output.fatal(CALL_INFO, -1, "Remove failed clause 0x%x, var %d\n", clause_addr, lit_idx/2);
 }

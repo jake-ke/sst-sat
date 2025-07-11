@@ -34,6 +34,7 @@ public:
 
     Variable readVar(int var_idx, int worker_id = 0) {
         output.verbose(CALL_INFO, 7, 0, "Read variable %d\n", var_idx);
+        assert(var_idx >= 0 && var_idx < size_);
         read(varAddr(var_idx), sizeof(Variable), worker_id);
 
         Variable var;
@@ -50,6 +51,7 @@ public:
     }
 
     void writeVar(int start_idx, const std::vector<Variable>& var_data) {
+        assert(start_idx >= 0 && start_idx + var_data.size() <= size_);
         int count = var_data.size();
         std::vector<uint8_t> data(count * sizeof(Variable));
         memcpy(data.data(), &var_data[0], count * sizeof(Variable));
@@ -59,6 +61,7 @@ public:
     }
 
     void init(int num_vars) {
+        size_ = num_vars + 1;
         int total_bytes = (num_vars + 1) * sizeof(Variable);
         output.verbose(CALL_INFO, 1, 0, "Size: %d variables, %d bytes\n", num_vars, total_bytes);
         // unnecessary to initialize all variables to zero
