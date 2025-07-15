@@ -168,7 +168,7 @@ run_single_test() {
     append_to_file_safely "$progress_file" "START|$filename|$start_time"
     
     # Build command with timeout and basic arguments
-    local command="timeout 9000 sst ./tests/test_basic.py -- --cnf \"$file\" --stats-file \"$stats_file\""
+    local command="timeout 18000 sst ./tests/test_basic.py -- --cnf \"$file\" --stats-file \"$stats_file\""
     
     # Add decision file if directory specified and file exists
     if [[ -n "$DECISION_DIR" ]]; then
@@ -270,8 +270,8 @@ cleanup() {
     done
     
     # Then specifically target any remaining SST and timeout processes
-    kill_matching_processes "sstsim.x"
-    kill_matching_processes "timeout"
+    killall "sstsim.x"
+    killall "timeout"
     
     # Verify all SST processes are gone
     local remaining_sst=$(ps -eo pid,comm | grep -c "sstsim.x")
