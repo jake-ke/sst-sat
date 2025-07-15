@@ -29,7 +29,18 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     curr_restarts(0),
     conflicts_until_restart(restart_first),
     conflictC(0),
-    yield_ptr(nullptr) {
+    yield_ptr(nullptr),
+    // Initialize cycle counters
+    cycles_propagate(0),
+    cycles_analyze(0),
+    cycles_minimize(0),
+    cycles_backtrack(0),
+    cycles_decision(0),
+    cycles_reduce(0),
+    cycles_restart(0),
+    // Initialize cycle tracking
+    prev_state(IDLE),
+    last_state_change(0) {
     
     // Initialize output
     int verbose = params.find<int>("verbose", 0);
@@ -249,6 +260,30 @@ void SATSolver::finish() {
     output.output("=========================[ Clauses Fragmentation ]=========================\n");
     clauses.printFragStats();
     output.output("===========================================================================\n");
+    
+    uint64_t total_counted = cycles_propagate + cycles_analyze + cycles_minimize +
+                            cycles_backtrack + cycles_decision + cycles_reduce + cycles_restart;
+    
+    // Calculate percentages (avoid division by zero)
+    double pct_propagate = (double)cycles_propagate * 100.0 / total_cycles;
+    double pct_analyze = (double)cycles_analyze * 100.0 / total_cycles;
+    double pct_minimize = (double)cycles_minimize * 100.0 / total_cycles;
+    double pct_backtrack = (double)cycles_backtrack * 100.0 / total_cycles;
+    double pct_decision = (double)cycles_decision * 100.0 / total_cycles;
+    double pct_reduce = (double)cycles_reduce * 100.0 / total_cycles;
+    double pct_restart = (double)cycles_restart * 100.0 / total_cycles;
+    
+    // Print cycle count statistics with percentages
+    output.output("===========================[ Cycle Statistics ]============================\n");
+    output.output("Propagate    : %.2f%% \t(%lu cycles)\n", pct_propagate, cycles_propagate);
+    output.output("Analyze      : %.2f%% \t(%lu cycles)\n", pct_analyze, cycles_analyze);
+    output.output("Minimize     : %.2f%% \t(%lu cycles)\n", pct_minimize, cycles_minimize);
+    output.output("Backtrack    : %.2f%% \t(%lu cycles)\n", pct_backtrack, cycles_backtrack);
+    output.output("Decision     : %.2f%% \t(%lu cycles)\n", pct_decision, cycles_decision);
+    output.output("Reduce DB    : %.2f%% \t(%lu cycles)\n", pct_reduce, cycles_reduce);
+    output.output("Restart      : %.2f%% \t(%lu cycles)\n", pct_restart, cycles_restart);
+    output.output("Total Counted: %lu cycles\n", total_counted);
+    output.output("===========================================================================\n");
 }
 
 //-----------------------------------------------------------------------------------
@@ -408,6 +443,52 @@ void SATSolver::handleHeapResponse(SST::Event* ev) {
 }
 
 bool SATSolver::clockTick(SST::Cycle_t cycle) {
+    // Calculate elapsed cycles since last state change if we're not in IDLE or STEP
+    if (state != IDLE && state != STEP && state != WAIT_HEAP && prev_state != state) {
+        // Update cycle counts based on previous state
+        uint64_t elapsed = cycle - last_state_change;
+        output.verbose(CALL_INFO, 8, 0,
+            "DEBUG: previous state %d, current state %d, elapsed cycles %lu\n", 
+            prev_state, state, cycle - last_state_change);
+        switch (prev_state) {
+            case PROPAGATE:
+                cycles_propagate += elapsed;
+                output.verbose(CALL_INFO, 8, 0, "DEBUG: Propagate cycles %lu\n", cycles_propagate);
+                break;
+            case ANALYZE:
+                cycles_analyze += elapsed;
+                output.verbose(CALL_INFO, 8, 0, "DEBUG: Analyze cycles %lu\n", cycles_analyze);
+                break;
+            case MINIMIZE:
+                cycles_minimize += elapsed;
+                output.verbose(CALL_INFO, 8, 0, "DEBUG: Minimize cycles %lu\n", cycles_minimize);
+                break;
+            case BTLEVEL:
+            case BACKTRACK:
+                cycles_backtrack += elapsed;
+                output.verbose(CALL_INFO, 8, 0, "DEBUG: Backtrack cycles %lu\n", cycles_backtrack);
+                break;
+            case DECIDE:
+                cycles_decision += elapsed;
+                output.verbose(CALL_INFO, 8, 0, "DEBUG: Decision cycles %lu\n", cycles_decision);
+                break;
+            case REDUCE:
+                cycles_reduce += elapsed;
+                output.verbose(CALL_INFO, 8, 0, "DEBUG: Reduce cycles %lu\n", cycles_reduce);
+                break;
+            case RESTART:
+                cycles_restart += elapsed;
+                output.verbose(CALL_INFO, 8, 0, "DEBUG: Restart cycles %lu\n", cycles_restart);
+                break;
+            default:
+                break;
+        }
+    
+        // Record the new state change
+        prev_state = state;
+        last_state_change = cycle;
+    }
+    
     switch (state) {
         case IDLE: return false; // skip prints
         case INIT: 
@@ -536,7 +617,7 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
                 state = next_state;
             }
             break;
-        case DONE: primaryComponentOKToEndSim(); return true;
+        case DONE: total_cycles = cycle; primaryComponentOKToEndSim(); return true;
         default: output.fatal(CALL_INFO, -1, "Invalid state: %d\n", state);
     }
     output.verbose(CALL_INFO, 7, 0, "=== Clock Tick %ld === State: %d\n", cycle, state);
@@ -567,7 +648,6 @@ void SATSolver::execPropagate() {
         if (trail_lim.empty()) {
             output.output("UNSATISFIABLE: conflict at level 0\n");
             state = DONE;
-            primaryComponentOKToEndSim();
             return;
         }
         state = ANALYZE;  // learn from the conflict

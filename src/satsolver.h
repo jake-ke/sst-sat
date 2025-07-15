@@ -302,6 +302,20 @@ private:
     // Decision output
     std::string decision_output_file;
     std::ofstream decision_output_stream;
+
+    // Cycle counters for performance profiling
+    uint64_t cycles_propagate;
+    uint64_t cycles_analyze;
+    uint64_t cycles_minimize;
+    uint64_t cycles_backtrack;   // includes BTLEVEL state
+    uint64_t cycles_decision;
+    uint64_t cycles_reduce;
+    uint64_t cycles_restart;
+    uint64_t total_cycles;
+    
+    // Cycle tracking
+    SolverState prev_state;
+    SST::Cycle_t last_state_change;
 };
 
 #endif // SATSOLVER_H
