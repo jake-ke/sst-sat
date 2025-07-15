@@ -171,7 +171,7 @@ public:
     uint64_t getStatCount(Statistic<uint64_t>* stat);
     inline int nAssigns() const { return trail.size(); }
     inline int nLearnts() const { return clauses.size() - num_clauses; }
-    const char* printClause(const std::vector<Lit>& literals);
+    std::string printClause(const std::vector<Lit>& literals);
     void loadDecisionSequence(const std::string& filename);  // user-defined decision sequence
     void dumpDecision(Lit lit);
 

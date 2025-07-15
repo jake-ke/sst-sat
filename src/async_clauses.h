@@ -3,13 +3,19 @@
 
 #include <unordered_map>
 #include "async_base.h"
-
+#include "memory_allocator.h"
 
 class Clauses : public AsyncBase {
 public:
     Clauses(int verbose = 0, SST::Interfaces::StandardMem* mem = nullptr, 
             uint64_t clauses_cmd_base_addr = 0, uint64_t clauses_base_addr = 0, 
             coro_t::push_type** yield_ptr = nullptr);
+
+    void setReorderBuffer(ReorderBuffer* rb) override { 
+        reorder_buffer = rb;
+        allocator.setReorderBuffer(rb);
+    }
+    void printFragStats() const { allocator.printFragStats(); }
 
     // Core operations
     Clause readClause(Cref addr, int worker_id = 0);
@@ -22,7 +28,8 @@ public:
     std::vector<Cref> readAllAddr(int worker_id = 0);
     std::vector<float> readAllAct(const std::vector<Cref>& addr, int worker_id = 0);
     void rescaleAllAct(float factor);
-    std::unordered_map<Cref, Cref> reduceDB(const std::vector<Cref>& to_keep);
+    void reduceDB(const std::vector<Cref>& to_keep);
+    void freeClause(Cref addr, uint32_t cls_size);
 
 private:
     uint64_t clauses_cmd_base_addr;
@@ -30,15 +37,20 @@ private:
 
     size_t num_orig_clauses;
     Cref learnt_offset;
-    Cref next_free_offset;
-
+    
+    // Memory allocator
+    MemoryAllocator allocator;
+    
     // Memory operations
     uint64_t cmdAddr(int idx) const {
         return clauses_cmd_base_addr + idx * sizeof(Cref); 
     }
+
     uint64_t clauseAddr(uint32_t offset) const {
-        return clauses_base_addr + offset;
+        // Handle learnt vs original clauses differently
+        return clauses_base_addr + offset + (offset >= learnt_offset ? TAG_SIZE : 0);
     }
+    
     void writeAddr(uint32_t idx, const Cref& addr);
 };
 

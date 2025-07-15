@@ -1,7 +1,5 @@
 #include <sst/core/sst_config.h>
 #include "async_clauses.h"
-#include <cstring>
-#include <algorithm>
 
 Clauses::Clauses(int verbose, SST::Interfaces::StandardMem* mem, 
                  uint64_t clauses_cmd_base_addr, uint64_t clauses_base_addr, 
@@ -9,7 +7,9 @@ Clauses::Clauses(int verbose, SST::Interfaces::StandardMem* mem,
     : AsyncBase("CLAUSES-> ", verbose, mem, yield_ptr),
       clauses_cmd_base_addr(clauses_cmd_base_addr),
       clauses_base_addr(clauses_base_addr),
-      num_orig_clauses(0), next_free_offset(0) {
+      num_orig_clauses(0), learnt_offset(0),
+      allocator(verbose, clauses_base_addr, 0x0FFFFFFF) {
+    
     output.verbose(CALL_INFO, 1, 0, "base addresses: "
         "cmd=0x%lx, data=0x%lx\n", clauses_cmd_base_addr, clauses_base_addr);
 }
@@ -61,8 +61,8 @@ void Clauses::initialize(const std::vector<Clause>& clauses) {
     size_ = clauses.size();
     output.verbose(CALL_INFO, 1, 0, "Size: %zu clause pointers, %ld bytes\n",
                    size_, size_ * sizeof(Cref));
-
-    // find the total memory required for clauses
+    
+    // Calculate total size needed for original clauses
     size_t total_memory = 0;
     std::vector<Cref> addr_array(clauses.size());
     
@@ -71,12 +71,18 @@ void Clauses::initialize(const std::vector<Clause>& clauses) {
         total_memory += clauses[i].size();
     }
 
-    // write all clause pointers in one operation
+    // Initialize allocator with the reserved area for original clauses
+    allocator.initialize(this, total_memory);
+    
+    // Set learnt offset to start after original clauses
+    learnt_offset = total_memory;
+    
+    // Write all clause pointers in one operation
     std::vector<uint8_t> addr_buffer(clauses.size() * sizeof(Cref));
     memcpy(addr_buffer.data(), addr_array.data(), addr_buffer.size());
     writeUntimed(clauses_cmd_base_addr, addr_buffer.size(), addr_buffer);
     
-    // Allocate and initialize buffer for all clause data
+    // Prepare buffer for all clause data - no headers/footers needed for original clauses
     std::vector<uint8_t> literals_buffer(total_memory);
     size_t offset = 0;
     
@@ -91,27 +97,28 @@ void Clauses::initialize(const std::vector<Clause>& clauses) {
 
     // Write all clause data to memory in one operation
     writeUntimed(clauses_base_addr, literals_buffer.size(), literals_buffer);
-
-    next_free_offset = total_memory;  // Update next available offset
-    learnt_offset = next_free_offset;  // original clauses are never deleted
     
     output.verbose(CALL_INFO, 1, 0, "Size: %zu clause structs, %ld bytes\n",
                    size_, total_memory);
 }
 
 Cref Clauses::addClause(const Clause& clause) {
-    Cref offset = next_free_offset;  // Use the next available offset
-    writeAddr(size_, offset);  // Write new metadata at index size_
+    Cref block_addr = allocator.allocateBlock(clause.size());
+    writeAddr(size_, block_addr);  // Write new ptr at index size_
     
-    // Update length and next free offset
     size_++;
-    next_free_offset += clause.size();
-    writeClause(offset, clause);  // Write literals to memory
+    writeClause(block_addr, clause);  // Write clause data to memory
     
     output.verbose(CALL_INFO, 7, 0, 
-                   "Added clause %ld with %u literals at offset %u\n", 
-                   size_ - 1, clause.size(), offset);
-    return offset;
+                  "Added clause %ld with %u literals at offset %u\n", 
+                  size_ - 1, clause.litSize(), block_addr);
+    return block_addr;
+}
+
+void Clauses::freeClause(Cref addr, uint32_t cls_size) {
+    assert(addr >= learnt_offset);
+    size_t req_size = CLAUSE_MEMBER_SIZE * 2 + cls_size * sizeof(Lit); // size + activity + literals
+    allocator.freeBlock(addr, req_size);
 }
 
 void Clauses::writeAct(Cref addr, float act) {
@@ -131,16 +138,15 @@ std::vector<Cref> Clauses::readAllAddr(int worker_id) {
 }
 
 std::vector<float> Clauses::readAllAct(const std::vector<Cref>& addr, int worker_id) {
-    size_t totalBytes = next_free_offset - learnt_offset;
-    readBurst(clauseAddr(learnt_offset), totalBytes, worker_id);
-    const uint8_t* data_ptr = reorder_buffer->getResponse(worker_id).data();
-
+    // We'll read each activity individually since clauses are now scattered in memory
     std::vector<float> result(addr.size());
-    for (size_t i = 0; i < result.size(); i++) {
-        const float* act_ptr = reinterpret_cast<const float*>(
-            data_ptr + (addr[i] - learnt_offset) + sizeof(uint32_t));
-        result[i] = *act_ptr;
+    
+    // TODO: parallelize by using non blocking reads with different worker IDs
+    for (size_t i = 0; i < addr.size(); i++) {
+        read(clauseAddr(addr[i] + sizeof(uint32_t)), sizeof(float), worker_id);
+        memcpy(&result[i], reorder_buffer->getResponse(worker_id).data(), sizeof(float));
     }
+    
     return result;
 }
 
@@ -154,40 +160,10 @@ void Clauses::rescaleAllAct(float factor) {
     }
 }
 
-std::unordered_map<Cref, Cref> Clauses::reduceDB(const std::vector<Cref>& to_keep) {
-    std::unordered_map<Cref, Cref> clause_map;
-
-    // Compact clauses
-    Cref newOffset = learnt_offset;
-    std::vector<Cref> newAddr;
-    std::vector<uint8_t> newClauseData;
-
-    const uint8_t* data_ptr = reorder_buffer->getResponse(0).data();
-    for (const Cref& addr : to_keep) {
-        assert(addr >= learnt_offset);
-        clause_map[addr] = newOffset;  // Map old address to new offset
-
-        newAddr.push_back(newOffset);
-
-        // read and copy the clause size
-        uint32_t num_lits = getClauseSize(addr);
-        newClauseData.insert(newClauseData.end(), data_ptr, data_ptr + sizeof(uint32_t));
-
-        // read and copy activity and literals
-        uint32_t read_size = sizeof(float) + num_lits * sizeof(Lit);
-        readBurst(clauseAddr(addr + sizeof(uint32_t)), CLAUSE_MEMBER_SIZE * (num_lits + 1));
-        newClauseData.insert(newClauseData.end(), data_ptr, data_ptr + read_size);
-
-        newOffset += read_size + sizeof(uint32_t);
-    }
-
+void Clauses::reduceDB(const std::vector<Cref>& to_keep) {
     std::vector<uint8_t> addr_buffer(to_keep.size() * sizeof(Cref));
-    memcpy(addr_buffer.data(), newAddr.data(), addr_buffer.size());
+    memcpy(addr_buffer.data(), to_keep.data(), addr_buffer.size());
     writeBurst(cmdAddr(num_orig_clauses), addr_buffer);
-    writeBurst(clauseAddr(learnt_offset), newClauseData);
 
     size_ = to_keep.size() + num_orig_clauses;  // Update size
-    next_free_offset = newOffset;  // Update next free offset
-
-    return clause_map;
 }

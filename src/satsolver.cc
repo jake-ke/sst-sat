@@ -246,6 +246,7 @@ void SATSolver::finish() {
         clauses.size(), 
         getStatCount(stat_learned) - getStatCount(stat_removed));
     output.output("===========================================================================\n");
+    clauses.printFragStats();
 }
 
 //-----------------------------------------------------------------------------------
@@ -319,7 +320,7 @@ void SATSolver::parseDIMACS(const std::string& content) {
 
                     // debugging outputs
                     output.verbose(CALL_INFO, 6, 0, "Added clause %lu: %s\n",
-                                   parsed_clauses.size() - 1, printClause(clause.literals));
+                                   parsed_clauses.size() - 1, printClause(clause.literals).c_str());
                 }
                 break;
             }
@@ -596,7 +597,7 @@ void SATSolver::execMinimize() {
     int i, j;
     output.verbose(CALL_INFO, 3, 0,
         "ANALYZE: Minimizing clause (size %zu): %s\n", learnt_clause.size(),
-        printClause(learnt_clause));
+        printClause(learnt_clause).c_str());
 
     if (ccmin_mode == 2) {
         // Deep minimization (more thorough)
@@ -680,7 +681,8 @@ void SATSolver::execMinimize() {
         stat_minimized_literals->addDataNTimes(i - j, 1);
         output.verbose(CALL_INFO, 3, 0, 
             "MINIMIZE: removed %d literals\n", i - j);
-        output.verbose(CALL_INFO, 3, 0, "MINIMIZE: Final minimized clause: %s\n", printClause(learnt_clause));
+        output.verbose(CALL_INFO, 3, 0, "MINIMIZE: Final minimized clause: %s\n",
+            printClause(learnt_clause).c_str());
     }
 
     state = BTLEVEL;
@@ -695,10 +697,10 @@ void SATSolver::execBacktrack() {
     } else {
         // Add the learned clause
         Clause new_clause(learnt_clause, cla_inc);
-        output.verbose(CALL_INFO, 3, 0, 
-            "Added learnt clause %ld: %s\n", 
-            clauses.size(), printClause(new_clause.literals));
         Cref addr = clauses.addClause(new_clause);
+        output.verbose(CALL_INFO, 3, 0, 
+            "Added learnt clause 0x%x: %s\n", 
+            addr, printClause(new_clause.literals).c_str());
         attachClause(addr);
         trailEnqueue(learnt_clause[0], addr);
         stat_learned->addData(1);
@@ -971,7 +973,7 @@ void SATSolver::subPropagate(
     output.verbose(CALL_INFO, 4, 0,
         "  Watch block[%d]: blocker:%d, clause 0x%x: %s\n",
         i, toInt(curr_block.nodes[i].blocker),
-        curr_block.nodes[i].clause_addr, printClause(c.literals));
+        curr_block.nodes[i].clause_addr, printClause(c.literals).c_str());
 
     // Make sure the false literal (~p) is at position 1
     if (c[0] == not_p) {
@@ -1077,7 +1079,7 @@ void SATSolver::analyze() {
         
         // Debug print for current clause
         output.verbose(CALL_INFO, 5, 0, "ANALYZE: current clause (0x%x): %s\n",
-            conflict, printClause(c.literals));
+            conflict, printClause(c.literals).c_str());
 
         // For each literal in the clause
         for (size_t i = (p == lit_Undef) ? 0 : 1; i < c.litSize(); i++) {
@@ -1130,7 +1132,8 @@ void SATSolver::analyze() {
     learnt_clause[0] = ~p;
 
     // Print learnt clause for debug
-    output.verbose(CALL_INFO, 3, 0, "ANALYZE: learnt: %s\n", printClause(learnt_clause));
+    output.verbose(CALL_INFO, 3, 0, "ANALYZE: learnt: %s\n",
+        printClause(learnt_clause).c_str());
 }
 
 //-----------------------------------------------------------------------------------
@@ -1164,7 +1167,8 @@ void SATSolver::findBtLevel() {
     }
 
     output.verbose(CALL_INFO, 3, 0, "Backtrack Level = %d\n", bt_level);
-    output.verbose(CALL_INFO, 3, 0, "Final learnt clause: %s\n", printClause(learnt_clause));
+    output.verbose(CALL_INFO, 3, 0, "Final learnt clause: %s\n",
+        printClause(learnt_clause).c_str());
     if (OVERLAP_HEAP_BUMP) {
         state = WAIT_HEAP;
         next_state = BACKTRACK;
@@ -1250,63 +1254,14 @@ void SATSolver::reduceDB() {
 
             // remove watchers
             detachClause(addr);
+            clauses.freeClause(addr, cls_size);
             removed++;
         }
         else to_keep.push_back(addr);
     }
 
     // 5. Compact clauses by moving non-removed learnt clauses forward
-    std::unordered_map<Cref, Cref> clause_map = clauses.reduceDB(to_keep);
-
-    // 6. Update reasons for assigned variables in trail
-    for (int i = 0; i < trail.size(); i++) {
-        Var v = var(trail[i]);
-        Variable var_data = variables.readVar(v);
-
-        Cref old_reason = var_data.reason;
-        // skip original clauses and decision variables
-        if (clause_map.find(old_reason) != clause_map.end() && old_reason != ClauseRef_Undef) {
-            // Update the reason, but also wasted bw to update level
-            var_data.reason = clause_map[old_reason];
-            variables[v] = var_data;
-            
-            output.verbose(CALL_INFO, 5, 0, 
-                "REDUCEDB: Updated var %d reason from 0x%x to 0x%x\n", 
-                v, old_reason, var_data.reason);
-        }
-    }
-    
-    // 7. Update all watch lists with new indices
-    for (size_t i = 0; i < watches.size(); i++) {
-        // Get the watch list for this literal
-        uint64_t curr_addr = watches.readHeadPointer(i);
-        
-        if (curr_addr == 0) continue;  // Skip empty watch lists
-        while (curr_addr != 0) {  // Traverse the linked list of blocks
-            WatcherBlock curr_block = watches.readBlock(curr_addr);
-            uint64_t next_addr = curr_block.next_block;
-            bool block_modified = false;
-            
-            for (size_t j = 0; j < watches.getNodesPerBlock(); j++) {
-                // Check if this node is valid
-                if ((curr_block.valid_mask & (1 << j)) == 0) continue;
-                
-                Cref old_addr = curr_block.nodes[j].clause_addr;
-                // Only update indices for learnt clauses that aren't being removed
-                if (clause_map.find(old_addr) != clause_map.end()) {
-                    curr_block.nodes[j].clause_addr = clause_map[old_addr];
-                    block_modified = true;
-                    
-                    output.verbose(CALL_INFO, 6, 0, 
-                        "REDUCEDB: Updated watcher reference from 0x%x to 0x%x\n",
-                        old_addr, curr_block.nodes[j].clause_addr);
-                }
-            }
-            
-            if (block_modified)  watches.writeBlock(curr_addr, curr_block);
-            curr_addr = next_addr;
-        }
-    }
+    clauses.reduceDB(to_keep);
 
     output.verbose(CALL_INFO, 3, 0, 
         "REDUCEDB: Removed %d learnt clauses, new clause count: %zu\n", 
@@ -1572,11 +1527,12 @@ uint64_t SATSolver::getStatCount(Statistic<uint64_t>* stat) {
     return 0; // Return 0 if the cast fails
 }
 
-const char* SATSolver::printClause(const std::vector<Lit>& literals) {
+std::string SATSolver::printClause(const std::vector<Lit>& literals) {
     std::string clause_str = "";
-    for (const auto& lit : literals)
+    for (const auto& lit : literals) {
         clause_str += " " + std::to_string(toInt(lit));
-    return clause_str.c_str();
+    }
+    return clause_str;
 }
 
 void SATSolver::loadDecisionSequence(const std::string& filename) {

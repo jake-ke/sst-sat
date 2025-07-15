@@ -37,7 +37,7 @@ public:
     // Configuration
     void setLineSize(size_t size) { line_size = size; }
     void setPreYieldCallback(PreYieldCallback cb) { pre_yield_callback = cb; }
-    void setReorderBuffer(ReorderBuffer* rb) { reorder_buffer = rb; }
+    virtual void setReorderBuffer(ReorderBuffer* rb) { reorder_buffer = rb; }
     size_t size() const { return size_; }
     bool empty() const { return size_ == 0; }
 
