@@ -246,7 +246,9 @@ void SATSolver::finish() {
         clauses.size(), 
         getStatCount(stat_learned) - getStatCount(stat_removed));
     output.output("===========================================================================\n");
+    output.output("=========================[ Clauses Fragmentation ]=========================\n");
     clauses.printFragStats();
+    output.output("===========================================================================\n");
 }
 
 //-----------------------------------------------------------------------------------

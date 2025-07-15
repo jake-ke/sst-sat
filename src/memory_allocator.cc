@@ -220,8 +220,6 @@ Cref MemoryAllocator::allocateBlock(uint32_t size) {
     // Update internal fragmentation stats
     req_mem += size;
     alloc_mem += block_size;
-    printf("req_size %u, block_size %u, wasted %u bytes\n", 
-           size, block_size, block_size - size);
     updateFragStats();
     
     output.verbose(CALL_INFO, 5, 0, "Fragmentation: req=%lu alloc=%lu ratio=%.2f%%\n",
@@ -280,7 +278,6 @@ void MemoryAllocator::updateFragStats() {
 }
 
 void MemoryAllocator::printFragStats() const {
-    output.output("Clauses fragmentation Stats:\n");
     output.output("  Heap: %lu bytes, Reserved: %u bytes\n", heap_size, reserved_size);
     output.output("  Requested: %lu bytes\n", req_mem);
     output.output("  Allocated: %lu bytes\n", alloc_mem);
