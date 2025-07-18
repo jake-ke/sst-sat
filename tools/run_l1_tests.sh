@@ -1,46 +1,29 @@
 #!/bin/zsh
 
-# Check for mandatory L1_SIZE argument as first parameter
-if [[ $# -eq 0 ]]; then
-    echo "Error: L1_SIZE is required as the first argument"
-    echo "Usage: $0 L1_SIZE [folder_name] [-j jobs] [decision_dir]"
-    echo "Example: $0 32KiB logs_test -j 4 ~/decisions"
-    exit 1
+# Check if help is requested or show usage
+show_usage() {
+    echo "Usage: $0 [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--folder FOLDER] [-j jobs] [--decision-dir DIR]"
+    echo "Options:"
+    echo "  --l1-size SIZE        L1 cache size"
+    echo "  --l1-latency LATENCY  L1 cache latency cycles"
+    echo "  --mem-latency LATENCY External memory latency"
+    echo "  --folder FOLDER       Name for the logs folder (default: logs)"
+    echo "  -j, --jobs JOBS       Number of parallel jobs"
+    echo "  --decision-dir DIR    Directory containing decision files"
+    echo "Example: $0 --l1-size 32KiB --l1-latency 2 --mem-latency 200ns --folder logs_test -j 4 --decision-dir ~/decisions"
+}
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    show_usage
+    exit 0
 fi
 
-L1_SIZE="$1"
-shift
-
-# Parse folder name argument (default to 'logs')
+# Optional values (no defaults - let Python script handle defaults)
+L1_SIZE=""
+L1_LATENCY=""
+MEM_LATENCY=""
 FOLDER_NAME="logs"
-if [[ $# -gt 0 && "$1" != -* ]]; then
-    FOLDER_NAME="$1"
-    shift
-fi
-
-# Create logs directory if it doesn't exist
-LOGS_DIR="./runs/$FOLDER_NAME"
-mkdir -p "$LOGS_DIR"
-
-# Create a timestamp for this run
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-LOG_FILE="$LOGS_DIR/summary_$TIMESTAMP.log"
-
-# Initialize counters
-sat_passed=0
-sat_timedout=0
-sat_failed=0
-sat_total=0
-
-unsat_passed=0
-unsat_timedout=0
-unsat_failed=0
-unsat_total=0
-
-# Define directories
-SAT_DIR=~/michael_sat_solver/SAT_test_cases/sat
-UNSAT_DIR=~/michael_sat_solver/SAT_test_cases/unsat
-DECISION_DIR="" # Default to empty
+DECISION_DIR=""
 
 # Default number of parallel jobs (use available CPU cores)
 MAX_JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
@@ -69,6 +52,56 @@ colorize_result() {
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --l1-size)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                L1_SIZE="$2"
+                shift 2
+            else
+                echo "Error: --l1-size requires a size argument"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --l1-latency)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                L1_LATENCY="$2"
+                shift 2
+            else
+                echo "Error: --l1-latency requires a latency argument"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --mem-latency)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                MEM_LATENCY="$2"
+                shift 2
+            else
+                echo "Error: --mem-latency requires a latency argument"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --folder)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                FOLDER_NAME="$2"
+                shift 2
+            else
+                echo "Error: --folder requires a folder name argument"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --decision-dir)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                DECISION_DIR="$2"
+                shift 2
+            else
+                echo "Error: --decision-dir requires a directory argument"
+                show_usage
+                exit 1
+            fi
+            ;;
         -j|--jobs)
             if [[ "$2" =~ ^[0-9]+$ ]]; then
                 MAX_JOBS=$2
@@ -78,19 +111,62 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        -*)
+            echo "Error: Unknown option $1"
+            show_usage
+            exit 1
+            ;;
         *)
-            DECISION_DIR="$1"
-            shift
+            echo "Error: Unexpected argument '$1'. Use --folder for folder name and --decision-dir for decision directory."
+            show_usage
+            exit 1
             ;;
     esac
 done
 
-echo "Starting tests at $(date)"
-echo "Logs will be saved to $LOGS_DIR"
-echo "Summary will be saved to $LOG_FILE"
-echo "Using L1 cache size: $L1_SIZE"
-echo "Running with $MAX_JOBS parallel jobs"
-[[ -n "$DECISION_DIR" ]] && echo "Using decision files from $DECISION_DIR"
+# Create logs directory if it doesn't exist
+LOGS_DIR="./runs/$FOLDER_NAME"
+mkdir -p "$LOGS_DIR"
+
+# Create a timestamp for this run
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+LOG_FILE="$LOGS_DIR/summary_$TIMESTAMP.log"
+
+# Initialize counters
+sat_passed=0
+sat_timedout=0
+sat_failed=0
+sat_total=0
+
+unsat_passed=0
+unsat_timedout=0
+unsat_failed=0
+unsat_total=0
+
+# Define directories
+SAT_DIR=~/michael_sat_solver/SAT_test_cases/sat
+UNSAT_DIR=~/michael_sat_solver/SAT_test_cases/unsat
+
+# Color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
+
+# Function to colorize result text
+colorize_result() {
+    local result=$1
+    case "$result" in
+        "PASSED")
+            echo "${GREEN}${result}${NC}"
+            ;;
+        "FAILED"|"TIMEOUT")
+            echo "${RED}${result}${NC}"
+            ;;
+        *)
+            echo "$result"
+            ;;
+    esac
+}
 
 # Function to log messages to both console and log file
 log_message() {
@@ -107,7 +183,13 @@ log_message_with_color() {
 }
 
 # Write header to log file
+log_message "==============================================="
 log_message "Test run started at $(date)"
+log_message "Output directory: $LOGS_DIR"
+log_message "Parallel jobs: $MAX_JOBS"
+log_message "L1 cache size: ${L1_SIZE:-default}"
+log_message "L1 cache latency: ${L1_LATENCY:-default}"
+log_message "Memory latency: ${MEM_LATENCY:-default}"
 log_message "==============================================="
 
 # Array to store all child PIDs for cleanup
@@ -180,12 +262,17 @@ run_single_test() {
     append_to_file_safely "$progress_file" "START|$filename|$start_time"
     
     # Build command with timeout and basic arguments
-    local command="timeout 18000 sst ./tests/test_one_level.py -- --l1-size $L1_SIZE --cnf \"$file\" --stats-file \"$stats_file\""
+    local command="timeout 18000 sst ./tests/test_one_level.py -- --cnf \"$file\" --stats-file \"$stats_file\""
+    
+    # Add optional cache/memory parameters only if provided
+    [[ -n "$L1_SIZE" ]] && command+=" --l1-size $L1_SIZE"
+    [[ -n "$L1_LATENCY" ]] && command+=" --l1-latency $L1_LATENCY"
+    [[ -n "$MEM_LATENCY" ]] && command+=" --mem-latency $MEM_LATENCY"
     
     # Add decision file if directory specified and file exists
     if [[ -n "$DECISION_DIR" ]]; then
         local decision_file="${DECISION_DIR}/${filename}.dec"
-        [[ -f "$decision_file" ]] && command+=" --dec \"$decision_file\""
+        [[ -f "$decision_file" ]] && command+=" --decisions-in \"$decision_file\""
     fi
 
     # Run the test with proper command

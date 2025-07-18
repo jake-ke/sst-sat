@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
+from unified_parser import parse_log_file as parse_satsolver_log
+
 
 def detect_log_format(content):
     """Detect whether this is a minisat or satsolver log."""
@@ -24,9 +26,49 @@ def detect_log_format(content):
     else:
         return 'unknown'
 
+
+def parse_minisat_log(filepath):
+    """Parse minisat format log file."""
+    stats = {}
+    try:
+        with open(filepath, 'r') as f:
+            content = f.read()
+        
+        # Extract problem name from filename for minisat logs
+        basename = os.path.basename(filepath)
+        # Remove timestamp pattern and .log extension
+        problem_name = re.sub(r'_(sat|unsat)_\d+.*\.log$', '', basename)
+        stats['problem'] = problem_name
+        
+        # Extract statistics using regex for minisat format
+        minisat_patterns = {
+            'decisions': r'decisions\s*:\s*(\d+)',
+            'propagations': r'propagations\s*:\s*(\d+)',
+            'conflicts': r'conflicts\s*:\s*(\d+)',
+            'learned': r'learned\s*:\s*(\d+)',
+            'removed': r'removed\s*:\s*(\d+)',
+            'db_reductions': r'db_reductions\s*:\s*(\d+)',
+            'minimized': r'minimized\s*:\s*(\d+)',
+            'restarts': r'restarts\s*:\s*(\d+)',
+        }
+        
+        for stat, pattern in minisat_patterns.items():
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                stats[stat] = int(match.group(1))
+        
+        # Minisat doesn't have simulation time, but we can estimate from CPU time if available
+        # For now, we'll leave it as None to avoid comparison issues
+        
+    except Exception as e:
+        print(f"Error parsing minisat log {filepath}: {e}")
+        return None
+    
+    return stats
+
+
 def parse_log_file(filepath):
     """Parse a single log file and extract statistics."""
-    stats = {}
     try:
         with open(filepath, 'r') as f:
             content = f.read()
@@ -34,81 +76,38 @@ def parse_log_file(filepath):
         log_format = detect_log_format(content)
         
         if log_format == 'satsolver':
-            # Extract filename for satsolver logs
-            filename_match = re.search(r'Using CNF file: .*/([^/\n]+)', content)
-            if filename_match:
-                stats['problem'] = filename_match.group(1)
-            else:
-                return None
-            
-            # Extract statistics using regex for satsolver format
-            stat_patterns = {
-                'decisions': r'Decisions\s*:\s*(\d+)',
-                'propagations': r'Propagations\s*:\s*(\d+)',
-                'conflicts': r'Conflicts\s*:\s*(\d+)', 
-                'learned': r'Learned\s*:\s*(\d+)',
-                'removed': r'Removed\s*:\s*(\d+)',
-                'db_reductions': r'DB_Reductions\s*:\s*(\d+)',
-                'minimized': r'Minimized\s*:\s*(\d+)',
-                'restarts': r'Restarts\s*:\s*(\d+)',
-            }
-            
-            for stat, pattern in stat_patterns.items():
-                match = re.search(pattern, content)
-                if match:
-                    stats[stat] = int(match.group(1))
-            
-            # Extract simulation time
-            time_match = re.search(r'Simulation is complete, simulated time: ([\d.]+)\s*(\w+)', content)
-            if time_match:
-                time_val = float(time_match.group(1))
-                time_unit = time_match.group(2)
-                # Convert to milliseconds
-                if time_unit == 'us':
-                    time_val *= 0.001
-                elif time_unit == 's':
-                    time_val *= 1000
-                stats['sim_time_ms'] = time_val
+            # Use unified parser for satsolver logs
+            result = parse_satsolver_log(filepath)
+            if result:
+                # Convert to expected format
+                stats = {
+                    'problem': result['test_case'],
+                    'decisions': result.get('decisions', 0),
+                    'propagations': result.get('propagations', 0),
+                    'conflicts': result.get('conflicts', 0),
+                    'learned': result.get('learned', 0),
+                    'removed': result.get('removed', 0),
+                    'db_reductions': result.get('db_reductions', 0),
+                    'minimized': result.get('minimized', 0),
+                    'restarts': result.get('restarts', 0),
+                    'sim_time_ms': result.get('sim_time_ms', 0)
+                }
+                return stats
+            return None
                 
         elif log_format == 'minisat':
-            # Extract problem name from filename for minisat logs
-            basename = os.path.basename(filepath)
-            # Remove timestamp pattern and .log extension
-            problem_name = re.sub(r'_(sat|unsat)_\d+.*\.log$', '', basename)
-            stats['problem'] = problem_name
-            
-            # Extract statistics using regex for minisat format
-            minisat_patterns = {
-                'decisions': r'decisions\s*:\s*(\d+)',
-                'propagations': r'propagations\s*:\s*(\d+)',
-                'conflicts': r'conflicts\s*:\s*(\d+)',
-                'learned': r'learned\s*:\s*(\d+)',
-                'removed': r'removed\s*:\s*(\d+)',
-                'db_reductions': r'db_reductions\s*:\s*(\d+)',
-                'minimized': r'minimized\s*:\s*(\d+)',
-                'restarts': r'restarts\s*:\s*(\d+)',
-            }
-            
-            for stat, pattern in minisat_patterns.items():
-                match = re.search(pattern, content, re.IGNORECASE)
-                if match:
-                    stats[stat] = int(match.group(1))
-            
-            # Minisat doesn't have simulation time, but we can estimate from CPU time if available
-            # For now, we'll leave it as None to avoid comparison issues
+            return parse_minisat_log(filepath)
             
         else:
             # Unknown format - try to extract filename from filepath
             basename = os.path.basename(filepath)
             problem_name = re.sub(r'_(sat|unsat)_\d+.*\.log$', '', basename)
-            stats['problem'] = problem_name
-            return None
+            return {'problem': problem_name}
             
     except Exception as e:
         print(f"Error parsing {filepath}: {e}")
         return None
-    
-    return stats
+
 
 def load_all_logs(logs_dir):
     """Load and parse all log files in a directory."""

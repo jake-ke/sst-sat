@@ -41,8 +41,14 @@ def parse_args():
                         default="stats.csv",
                         help='Output file for statistics')
     parser.add_argument('--l1-size', dest='l1_size',
-                        type=str, default="8KiB",
+                        type=str, default="64KiB",
                         help='L1 cache size')
+    parser.add_argument('--l1-latency', dest='l1_latency',
+                        type=str, default="1",
+                        help='L1 cache latency cycles (1GHz)')
+    parser.add_argument('--mem-latency', dest='mem_latency',
+                        type=str, default="100ns",
+                        help='External Memory latency')
                         
     args = parser.parse_args()
     
@@ -63,6 +69,10 @@ if args.decision_path:
     print(f"Using decision file: {args.decision_path}")
 if args.decision_output_path:
     print(f"Will output decisions to: {args.decision_output_path}")
+print(f"L1 cache size: {args.l1_size}")
+print(f"L1 cache latency: {args.l1_latency} cycles")
+print(f"External memory latency: {args.mem_latency}")
+print()
 
 # Create the SAT solver component
 solver = sst.Component("solver", "satsolver.SATSolver")
@@ -147,7 +157,7 @@ global_cache.addParams({
     "cache_size"         : args.l1_size,
     "cache_line_size"    : "64",
     "associativity"      : "8",
-    "access_latency_cycles" : "1",
+    "access_latency_cycles" : args.l1_latency,
     "max_requests_per_cycle" : "-1",
     "L1"                 : "1",
     "replacement_policy" : "lru",
@@ -188,7 +198,7 @@ global_memctrl.addParams({
 # Create memory backend for global operations
 global_memory = global_memctrl.setSubComponent("backend", "memHierarchy.simpleMem")
 global_memory.addParams({
-    "access_time" : "10ns",
+    "access_time" : args.mem_latency,
     "mem_size" : "4GiB",
 })
 
@@ -204,9 +214,9 @@ cnf_mem_link.connect((cnf_iface, "lowlink", "1ns"), (cnf_memctrl, "highlink", "1
 cpu_to_cache_link = sst.Link("cpu_to_cache_link")
 cpu_to_cache_link.connect((global_iface, "lowlink", "1ns"), (global_cache, "highlink", "1ns"))
 
-# Connect L1 cache to L2 cache
+# Connect L1 cache to mem
 l1_to_mem_link = sst.Link("l1_to_mem_link")
-l1_to_mem_link.connect((global_cache, "lowlink", "50ps"), (global_memctrl, "highlink", "50ps"))
+l1_to_mem_link.connect((global_cache, "lowlink", "1ns"), (global_memctrl, "highlink", "1ns"))
 
 # Enable statistics - different types for different stats
 sst.setStatisticLoadLevel(7)
