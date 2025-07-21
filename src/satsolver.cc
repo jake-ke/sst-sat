@@ -1,6 +1,7 @@
 #include <sst/core/sst_config.h> // This include is REQUIRED for all implementation files
 #include "satsolver.h"
 #include <sst/core/interfaces/stdMem.h>
+#include "sst/core/statapi/stathistogram.h"
 #include "sst/core/statapi/stataccumulator.h"
 #include <algorithm>  // For std::sort
 #include <cmath>      // For pow function
@@ -160,7 +161,9 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_db_reductions = registerStatistic<uint64_t>("db_reductions");
     stat_minimized_literals = registerStatistic<uint64_t>("minimized_literals");
     stat_restarts = registerStatistic<uint64_t>("restarts");
-    
+    stat_para_watchers = registerStatistic<uint64_t>("para_watchers");
+    stat_para_vars = registerStatistic<uint64_t>("para_vars");
+
     // Component should not end simulation until solution is found
     registerAsPrimaryComponent();
     primaryComponentDoNotEndSim();
@@ -256,6 +259,13 @@ void SATSolver::finish() {
     output.output("Clauses      : %lu (Total), %lu (Learned)\n", 
         clauses.size(), 
         getStatCount(stat_learned) - getStatCount(stat_removed));
+    output.output("===========================================================================\n");
+    
+    output.output("=========================[ Parallel Watchers Histogram ]=================\n");
+    printHist(stat_para_watchers);
+    output.output("===========================================================================\n");
+    output.output("=========================[ Parallel Variables Histogram ]================\n");
+    printHist(stat_para_vars);
     output.output("===========================================================================\n");
     output.output("=========================[ Clauses Fragmentation ]=========================\n");
     clauses.printFragStats();
@@ -908,7 +918,11 @@ bool SATSolver::decide() {
 int SATSolver::unitPropagate() {
     output.verbose(CALL_INFO, 3, 0, "PROPAGATE: Starting unit propagation\n");
     conflict = ClauseRef_Undef;
-
+    
+    // Track the current batch of variables that can be processed in parallel
+    size_t batch_start = qhead;
+    size_t batch_end = trail.size();
+    
     while (qhead < trail.size()) {
         stat_propagations->addData(1);
         Lit p = trail[qhead++];
@@ -916,14 +930,16 @@ int SATSolver::unitPropagate() {
         int watch_idx = toWatchIndex(p);
         uint64_t head_addr = watches.readHeadPointer(watch_idx);
 
-        if (head_addr == 0) continue; // Empty watch list
-            
         output.verbose(CALL_INFO, 3, 0,
             "PROPAGATE: Processing watchers for literal %d\n", toInt(p));
-            
+
+        // if (head_addr == 0) continue; // Empty watch list
         uint64_t curr_addr = head_addr;
         uint64_t prev_addr = 0;
         WatcherBlock prev_block;
+        
+        // Counter for watchers inspected in this propagation
+        uint64_t para_watchers = 0;
         
         // Traverse the linked list
         while (curr_addr != 0) {
@@ -939,6 +955,7 @@ int SATSolver::unitPropagate() {
             // Collect valid nodes that need processing
             std::vector<int> valid_nodes;
             for (int i = 0; i < watches.getNodesPerBlock(); i++) {
+                assert(curr_block.valid_mask != 0 && "Invalid watch block with no valid nodes");
                 // Skip invalid nodes
                 if ((curr_block.valid_mask & (1 << i)) == 0) continue;
 
@@ -953,6 +970,9 @@ int SATSolver::unitPropagate() {
                 
                 valid_nodes.push_back(i);
             }
+            
+            // Count the watchers inspected in this block
+            para_watchers += valid_nodes.size();
             
             // Process valid nodes in batches, limited by PROPAGATORS
             int workers = std::min(PROPAGATORS, (int)valid_nodes.size());
@@ -1020,6 +1040,10 @@ int SATSolver::unitPropagate() {
                 watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block);
 
             if (conflict != ClauseRef_Undef) {
+                // Record watchers inspected up to the conflict point
+                stat_para_watchers->addData(para_watchers);
+                stat_para_vars->addData(qhead - batch_start);
+
                 qhead = trail.size();
                 return conflict;
             }
@@ -1033,6 +1057,17 @@ int SATSolver::unitPropagate() {
             // Move to next block
             curr_addr = next_addr;
             block_modified = false;
+        }
+        
+        // Record total watchers inspected for this literal (entire linked list traversed)
+        if (para_watchers > 0) stat_para_watchers->addData(para_watchers);
+        
+        // Check if the current batch of vars has been fully processed
+        if (qhead == batch_end) {
+            stat_para_vars->addData(batch_end - batch_start);
+            // Start tracking a new batch
+            batch_end = trail.size();
+            batch_start = qhead;
         }
     }
     
@@ -1615,6 +1650,34 @@ std::string SATSolver::printClause(const std::vector<Lit>& literals) {
         clause_str += " " + std::to_string(toInt(lit));
     }
     return clause_str;
+}
+
+void SATSolver::printHist(Statistic<uint64_t>* stat_hist) {
+    if (auto* hist_stat = dynamic_cast<HistogramStatistic<uint64_t>*>(stat_hist)) {
+        uint64_t total_count = hist_stat->getCollectionCount();
+        uint64_t total_binned = hist_stat->getItemsBinnedCount();
+        uint64_t bin_width = hist_stat->getBinWidth();
+        uint64_t num_bins = hist_stat->getNumBins();
+        uint64_t min_value = hist_stat->getBinsMinValue();
+
+        output.output("Total samples: %lu\n", total_count);
+        for (uint64_t bin = 0; bin < num_bins; bin++) {
+            uint64_t bin_start = min_value + (bin * bin_width);
+            uint64_t bin_end = bin_start + bin_width - 1;
+            uint64_t bin_count = hist_stat->getBinCountByBinStart(bin_start);
+            double percentage = total_count > 0 ? (double)bin_count * 100.0 / total_count : 0.0;
+            
+            if (bin_count > 0) {  // Only print non-empty bins
+                output.output("Bin [%2lu-%2lu]: %8lu samples (%.2f%%)\n", 
+                    bin_start, bin_end, bin_count, percentage);
+            }
+        }
+        if (total_count - total_binned > 0) {
+            output.output("Out of bounds: %6lu samples (%.2f%%)\n", 
+                total_count - total_binned, 
+                (double)(total_count - total_binned) * 100.0 / total_count);
+        }
+    }
 }
 
 void SATSolver::loadDecisionSequence(const std::string& filename) {

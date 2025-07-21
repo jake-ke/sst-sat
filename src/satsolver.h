@@ -83,6 +83,8 @@ public:
         {"db_reductions", "Number of clause database reductions", "count", 1},
         {"minimized_literals", "Number of literals removed by clause minimization", "count", 1},
         {"restarts", "Number of restarts", "count", 1},
+        {"para_watchers", "Number of watchers inspected per propagation", "count", 1},
+        {"para_vars", "Number of variables processed per unitPropagate before conflict", "count", 1},
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -168,10 +170,11 @@ public:
     void ensureVarCapacity(Var v);
     double drand(uint64_t& seed);                  // Random number generator
     int irand(uint64_t& seed, int size);           // Integer random in range [0,size-1]
-    uint64_t getStatCount(Statistic<uint64_t>* stat);
     inline int nAssigns() const { return trail.size(); }
     inline int nLearnts() const { return clauses.size() - num_clauses; }
+    uint64_t getStatCount(Statistic<uint64_t>* stat);
     std::string printClause(const std::vector<Lit>& literals);
+    void printHist(Statistic<uint64_t>* stat_hist);
     void loadDecisionSequence(const std::string& filename);  // user-defined decision sequence
     void dumpDecision(Lit lit);
 
@@ -294,6 +297,8 @@ private:
     Statistic<uint64_t>* stat_db_reductions;
     Statistic<uint64_t>* stat_minimized_literals;
     Statistic<uint64_t>* stat_restarts;
+    Statistic<uint64_t>* stat_para_watchers;
+    Statistic<uint64_t>* stat_para_vars;
 
     // User-defined decision sequence
     std::vector<std::pair<Var, bool>> decision_sequence; // (variable, sign) pairs

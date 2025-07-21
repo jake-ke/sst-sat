@@ -176,6 +176,95 @@ def parse_cycle_statistics(content):
     return cycle_stats
 
 
+def parse_parallel_histograms(content):
+    """Parse Parallel Watchers and Variables Histogram sections."""
+    histogram_stats = {}
+    
+    # Parse Watchers Histogram
+    watchers_section = re.search(
+        r'=+\[ Parallel Watchers Histogram \]=+\n(.*?)\n=+',
+        content, re.DOTALL
+    )
+    
+    if watchers_section:
+        watchers_text = watchers_section.group(1)
+        
+        # Get total samples
+        total_match = re.search(r'Total samples: (\d+)', watchers_text)
+        if total_match:
+            histogram_stats['watchers_total_samples'] = int(total_match.group(1))
+        
+        # Parse each bin
+        bins = {}
+        bin_pattern = r'Bin \[\s*(\d+)-\s*(\d+)\]:\s+(\d+) samples \(([\d.]+)%\)'
+        for match in re.finditer(bin_pattern, watchers_text):
+            bin_start = int(match.group(1))
+            bin_end = int(match.group(2))
+            samples = int(match.group(3))
+            percentage = float(match.group(4))
+            
+            # Use bin start as key for single-value bins
+            if bin_start == bin_end:
+                bin_key = bin_start
+            else:
+                bin_key = f"{bin_start}-{bin_end}"
+                
+            bins[bin_key] = {'samples': samples, 'percentage': percentage}
+        
+        # Parse out of bounds
+        out_of_bounds_match = re.search(r'Out of bounds:\s+(\d+) samples \(([\d.]+)%\)', watchers_text)
+        if out_of_bounds_match:
+            bins['out_of_bounds'] = {
+                'samples': int(out_of_bounds_match.group(1)),
+                'percentage': float(out_of_bounds_match.group(2))
+            }
+            
+        histogram_stats['watchers_bins'] = bins
+    
+    # Parse Variables Histogram
+    variables_section = re.search(
+        r'=+\[ Parallel Variables Histogram \]=+\n(.*?)\n=+',
+        content, re.DOTALL
+    )
+    
+    if variables_section:
+        variables_text = variables_section.group(1)
+        
+        # Get total samples
+        total_match = re.search(r'Total samples: (\d+)', variables_text)
+        if total_match:
+            histogram_stats['variables_total_samples'] = int(total_match.group(1))
+        
+        # Parse each bin
+        bins = {}
+        bin_pattern = r'Bin \[\s*(\d+)-\s*(\d+)\]:\s+(\d+) samples \(([\d.]+)%\)'
+        for match in re.finditer(bin_pattern, variables_text):
+            bin_start = int(match.group(1))
+            bin_end = int(match.group(2))
+            samples = int(match.group(3))
+            percentage = float(match.group(4))
+            
+            # Use bin start as key for single-value bins
+            if bin_start == bin_end:
+                bin_key = bin_start
+            else:
+                bin_key = f"{bin_start}-{bin_end}"
+                
+            bins[bin_key] = {'samples': samples, 'percentage': percentage}
+        
+        # Parse out of bounds
+        out_of_bounds_match = re.search(r'Out of bounds:\s+(\d+) samples \(([\d.]+)%\)', variables_text)
+        if out_of_bounds_match:
+            bins['out_of_bounds'] = {
+                'samples': int(out_of_bounds_match.group(1)),
+                'percentage': float(out_of_bounds_match.group(2))
+            }
+            
+        histogram_stats['variables_bins'] = bins
+    
+    return histogram_stats
+
+
 def parse_log_file(log_file_path):
     """
     Parse a single log file and extract all relevant information.
@@ -188,6 +277,7 @@ def parse_log_file(log_file_path):
     - Fragmentation: heap_bytes, reserved_bytes, etc.
     - Cycles: propagate_cycles, analyze_cycles, etc.
     - Timing: sim_time_ms
+    - Histogram data: watchers and variables histograms
     """
     result = {
         'test_case': '',
@@ -273,6 +363,10 @@ def parse_log_file(log_file_path):
         
         cycle_stats = parse_cycle_statistics(content)
         result.update(cycle_stats)
+        
+        # Add histogram parsing
+        histogram_stats = parse_parallel_histograms(content)
+        result.update(histogram_stats)
         
     except Exception as e:
         print(f"Error parsing {log_file_path}: {e}")

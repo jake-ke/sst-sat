@@ -297,6 +297,32 @@ sst.enableStatisticsForComponentName("solver", [
     "rate": "1s"
 })
 
+# Enable histogram statistic for watchers inspected
+sst.enableStatisticsForComponentName("solver", [
+    "para_watchers"
+], {
+    "type": "sst.HistogramStatistic",
+    "minvalue": "0",
+    "binwidth": "1", 
+    "numbins": "20",
+    "dumpbinsonoutput": "1",
+    "includeoutofbounds": "1",
+    "rate": "1s"
+})
+
+# Enable histogram statistic for parallel variables
+sst.enableStatisticsForComponentName("solver", [
+    "para_vars"
+], {
+    "type": "sst.HistogramStatistic",
+    "minvalue": "0",
+    "binwidth": "1", 
+    "numbins": "20",
+    "dumpbinsonoutput": "1",
+    "includeoutofbounds": "1",
+    "rate": "1s"
+})
+
 # Enable cache statistics for the L1 cache
 sst.enableStatisticsForComponentType("memHierarchy.Cache", [
     "CacheHits", 
