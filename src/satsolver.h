@@ -94,7 +94,6 @@ public:
     )
     
     SST_ELI_DOCUMENT_SUBCOMPONENT_SLOTS(
-        {"cnf_memory", "Memory interface for CNF data", "SST::Interfaces::StandardMem"},
         {"global_memory", "Memory interface for Heap and Variables", "SST::Interfaces::StandardMem"},
         {"order_heap", "ordered heap for VSIDS", "Heap"}
     )
@@ -125,7 +124,7 @@ public:
     void execDecide();
     
     // Input Processing
-    void parseDIMACS(const std::string& content);
+    void parseDIMACS(const std::string& filename);
     
     // Core CDCL Algorithm
     void initialize();
@@ -189,7 +188,6 @@ private:
     // State Variables
     SolverState state, next_state;
     SST::Output output;
-    SST::Interfaces::StandardMem* cnf_memory;    // For CNF data
     SST::Interfaces::StandardMem* global_memory; // For heap and variables operations
     std::string dimacs_content;
     SST::Cycle_t currentCycle;

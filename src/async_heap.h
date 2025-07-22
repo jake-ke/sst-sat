@@ -23,8 +23,8 @@ public:
     
     void serialize_order(SST::Core::Serialization::serializer& ser) override {
         Event::serialize_order(ser);
-        ser & op;
-        ser & arg;
+        SST_SER(op);
+        SST_SER(arg);
     }
     ImplementSerializable(HeapReqEvent);
 };
@@ -37,7 +37,7 @@ public:
     
     void serialize_order(SST::Core::Serialization::serializer& ser) override {
         Event::serialize_order(ser);
-        ser & result;
+        SST_SER(result);
     }
     ImplementSerializable(HeapRespEvent);
 };

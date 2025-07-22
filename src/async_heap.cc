@@ -14,8 +14,8 @@ Heap::Heap(SST::ComponentId_t id, SST::Params& params,
                    heap_base_addr, indices_base_addr);
 
     registerClock(params.find<std::string>("clock", "1GHz"),
-        new SST::Clock::Handler<Heap>(this, &Heap::tick));
-    
+        new SST::Clock::Handler2<Heap, &Heap::tick>(this));
+
     response_port = configureLink("response");
     sst_assert( response_port != nullptr, CALL_INFO, -1, "Error: 'response_port' is not connected to a link\n");
 

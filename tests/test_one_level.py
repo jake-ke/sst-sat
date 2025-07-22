@@ -121,32 +121,6 @@ heap.addParams({
     "verbose" : str(args.verbose),
 })
 
-# Configure memory interface for CNF data
-cnf_iface = solver.setSubComponent("cnf_memory", "memHierarchy.standardInterface")
-
-# Create memory controller for CNF data
-cnf_memctrl = sst.Component("cnf_memory", "memHierarchy.MemController")
-cnf_memctrl.addParams({
-    "clock" : "1GHz",
-    "backing" : "mmap",
-    "backing_size_unit" : "1B",
-    "memory_file" : args.cnf_path,
-    "debug" : "0",
-    "debug_level" : "10",
-    "verbose" : "0",
-    "addr_range_start" : "0",
-    "addr_range_end" : "0x1FFFFFFF",
-    "mem_size" : "512MiB",
-    "initBacking" : "1",  # enable backing store initialization
-})
-
-# Create memory backend for CNF data
-cnf_memory = cnf_memctrl.setSubComponent("backend", "memHierarchy.simpleMem")
-cnf_memory.addParams({
-    "access_time" : "10ns",
-    "mem_size" : "512MiB",
-})
-
 # Configure memory interface for global operations (heap and variables)
 global_iface = solver.setSubComponent("global_memory", "memHierarchy.standardInterface")
 
@@ -205,10 +179,6 @@ global_memory.addParams({
 # Connect solver to heap
 solver_heap_link = sst.Link("solver_heap_link")
 solver_heap_link.connect((solver, "heap_port", "1ns"), (heap, "response", "1ns"))
-
-# Connect solver to CNF memory controller
-cnf_mem_link = sst.Link("cnf_mem_link")
-cnf_mem_link.connect((cnf_iface, "lowlink", "1ns"), (cnf_memctrl, "highlink", "1ns"))
 
 # Connect solver to L1 cache
 cpu_to_cache_link = sst.Link("cpu_to_cache_link")

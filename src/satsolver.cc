@@ -49,7 +49,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
 
     // Configure clock
     registerClock(params.find<std::string>("clock", "1GHz"),
-                 new SST::Clock::Handler<SATSolver>(this, &SATSolver::clockTick));
+                  new SST::Clock::Handler2<SATSolver, &SATSolver::clockTick>(this));
 
     // Get file size parameter
     filesize = params.find<size_t>("filesize", 0);
@@ -88,24 +88,12 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
         has_decision_sequence = true;
     }
 
-    // Configure CNF data memory interface
-    cnf_memory = loadUserSubComponent<SST::Interfaces::StandardMem>(
-        "cnf_memory", 
-        SST::ComponentInfo::SHARE_NONE,
-        getTimeConverter("1GHz"),  // Time base for memory interface
-        new SST::Interfaces::StandardMem::Handler<SATSolver>(this, &SATSolver::handleCnfMemEvent)
-    );
-
-    if (!cnf_memory) {
-        output.fatal(CALL_INFO, -1, "Unable to load StandardMem SubComponent for CNF data\n");
-    }
-
     // Configure global memory interface for heap and variables
     global_memory = loadUserSubComponent<SST::Interfaces::StandardMem>(
         "global_memory", 
         SST::ComponentInfo::SHARE_NONE,
         getTimeConverter("1GHz"),  // Time base for memory interface
-        new SST::Interfaces::StandardMem::Handler<SATSolver>(this, &SATSolver::handleGlobalMemEvent)
+        new SST::Interfaces::StandardMem::Handler2<SATSolver, &SATSolver::handleGlobalMemEvent>(this)
     );
 
     if (!global_memory) {
@@ -135,7 +123,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
 
     // Configure the link to the heap subcomponent
     heap_link = configureLink("heap_port", 
-        new SST::Event::Handler<SATSolver>(this, &SATSolver::handleHeapResponse));
+        new SST::Event::Handler2<SATSolver, &SATSolver::handleHeapResponse>(this));
     sst_assert( heap_link != nullptr, CALL_INFO, -1, "Error: 'heap_port' is not connected to a link\n");
     
     // Open decision output file if specified
@@ -172,23 +160,13 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
 SATSolver::~SATSolver() {}
 
 void SATSolver::init(unsigned int phase) {
-    cnf_memory->init(phase);
     global_memory->init(phase);
 
     // Only parse the file in phase 0
     if (phase == 0) {
         output.output("Reading CNF file: %s\n", cnf_file_path.c_str());
-        // Read the CNF file directly
-        std::ifstream file(cnf_file_path);
-        if (!file.is_open()) {
-            output.fatal(CALL_INFO, -1, "Failed to open CNF file: %s\n", cnf_file_path.c_str());
-        }
-
-        // Read file content into string
-        std::string content((std::istreambuf_iterator<char>(file)),
-                            (std::istreambuf_iterator<char>()));
-
-        parseDIMACS(content);  // setting num_vars and num_clauses
+        
+        parseDIMACS(cnf_file_path);
         output.verbose(CALL_INFO, 1, 0, "Parsed %u variables, %u clauses\n", num_vars, num_clauses);
         
         state = INIT;
@@ -214,7 +192,6 @@ void SATSolver::init(unsigned int phase) {
 }
 
 void SATSolver::setup() {
-    cnf_memory->setup();
     global_memory->setup();
     
     // Get cache line size from memory interface
@@ -228,12 +205,10 @@ void SATSolver::setup() {
 }
 
 void SATSolver::complete(unsigned int phase) {
-    cnf_memory->complete(phase);
     global_memory->complete(phase);
 }
 
 void SATSolver::finish() {
-    cnf_memory->finish();
     global_memory->finish();
     
     // Close decision output file if open
@@ -300,13 +275,26 @@ void SATSolver::finish() {
 // Input Processing
 //-----------------------------------------------------------------------------------
 
-void SATSolver::parseDIMACS(const std::string& content) {
-    output.output("Starting DIMACS parsing\n");
-    std::istringstream iss(content);
+void SATSolver::parseDIMACS(const std::string& filename) {
+    output.output("Starting DIMACS parsing from file: %s\n", filename.c_str());
+    
+    // Open file safely for direct reading
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        output.fatal(CALL_INFO, -1, "Failed to open CNF file: %s\n", filename.c_str());
+    }
+    
     std::string line;
-
-    while (std::getline(iss, line)) {
+    while (std::getline(file, line)) {
         // Skip empty lines
+        if (line.empty()) continue;
+        
+        // Remove any trailing carriage returns or whitespace
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ' || line.back() == '\t')) {
+            line.pop_back();
+        }
+        
+        // Skip empty lines after cleaning
         if (line.empty()) continue;
         
         // Skip whitespace at start
@@ -340,12 +328,31 @@ void SATSolver::parseDIMACS(const std::string& content) {
                 int dimacs_lit;
                 Clause clause;
                 
+                // Validate the line contains only valid DIMACS literals
+                bool valid_clause = true;
+                for (char c : line) {
+                    if (!std::isdigit(c) && c != '-' && c != ' ' && c != '\t' && c != '0') {
+                        valid_clause = false;
+                        break;
+                    }
+                }
+                
+                if (!valid_clause) {
+                    output.verbose(CALL_INFO, 4, 0, "Skipping invalid clause line: %s\n", line.c_str());
+                    continue;
+                }
+                
                 while (clause_iss >> dimacs_lit && dimacs_lit != 0) {
                     Lit lit = toLit(dimacs_lit);
                     clause.literals.push_back(lit);
                 }
                 
-                assert (!clause.literals.empty());
+                // Skip empty clauses (can happen with corrupted data)
+                if (clause.literals.empty()) {
+                    output.verbose(CALL_INFO, 4, 0, "Skipping empty clause line\n");
+                    continue;
+                }
+                
                 if (clause.literals.size() == 1) {  // Unit clause
                     initial_units.push_back(clause.literals[0]);
                     num_clauses--;
@@ -373,6 +380,9 @@ void SATSolver::parseDIMACS(const std::string& content) {
             }
         }
     }
+    
+    // Close the file explicitly to ensure clean up
+    file.close();
     
     sst_assert(parsed_clauses.size() == num_clauses, CALL_INFO, -1,
         "Parsing error: Expected %u clauses but got %zu\n", 
