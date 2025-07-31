@@ -26,11 +26,11 @@ uint64_t Watches::readHeadPointer(int lit_idx, int worker_id) {
 }
 
 void Watches::writeHeadPointer(int start_idx, const uint64_t headptr) {
+    output.verbose(CALL_INFO, 7, 0, 
+        "Write head pointers[%d], 0x%lx\n", start_idx, headptr);
     std::vector<uint8_t> data(sizeof(uint64_t));
     memcpy(data.data(), &headptr, sizeof(uint64_t));
     write(watchesAddr(start_idx), sizeof(uint64_t), data);
-    output.verbose(CALL_INFO, 7, 0, 
-        "Write head pointers[%d], 0x%lx\n", start_idx, headptr);
 }
 
 WatcherBlock Watches::readBlock(uint64_t addr, int worker_id) {

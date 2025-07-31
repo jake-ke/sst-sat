@@ -141,7 +141,7 @@ public:
     int current_level() { return trail_lim.size(); }
 
     // Two-Watched Literals
-    void attachClause(int clause_idx);
+    void attachClause(int clause_idx, const Clause& c);
     void detachClause(int clause_idx);
     
     // Decision Heuristics

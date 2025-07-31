@@ -28,6 +28,12 @@ public:
         req_to_worker.erase(req_id);  // Clean up the mapping after use
     }
     
+    // Store data directly by worker ID (for store queue forwarding)
+    void storeDataByWorkerId(int worker_id, const std::vector<uint8_t>& data, bool burst = false, uint64_t offset = 0) {
+        if (burst) std::memcpy(worker_to_data[worker_id].data() + offset, data.data(), data.size());
+        else worker_to_data[worker_id] = data;
+    }
+    
     // Retrieve response data for a specific worker ID
     const std::vector<uint8_t>& getResponse(int worker_id) const {
         auto it = worker_to_data.find(worker_id);

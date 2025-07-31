@@ -14,6 +14,8 @@ def parse_args():
     parser.add_argument('--cnf', dest='cnf_path', 
                         default=os.path.join(os.path.dirname(__file__), "test.cnf"),
                         help='Path to the CNF file')
+    parser.add_argument('--ram2-cfg', dest='ram2_config',
+                        help='Path to the ramulator2 configuration file')
     parser.add_argument('--decisions-in', dest='decision_path',
                         help='Path to input decision sequence file')
     parser.add_argument('--decisions-out', dest='decision_output_path',
@@ -71,7 +73,10 @@ if args.decision_output_path:
     print(f"Will output decisions to: {args.decision_output_path}")
 print(f"L1 cache size: {args.l1_size}")
 print(f"L1 cache latency: {args.l1_latency} cycles")
-print(f"External memory latency: {args.mem_latency}")
+if (args.ram2_config):
+    print(f"Using ramulator2 config: {args.ram2_config}")
+else:
+    print(f"Using simple memory latency: {args.mem_latency}")
 print()
 
 # Create the SAT solver component
@@ -132,7 +137,9 @@ global_cache.addParams({
     "cache_line_size"    : "64",
     "associativity"      : "8",
     "access_latency_cycles" : args.l1_latency,
-    "max_requests_per_cycle" : "-1",
+    "max_requests_per_cycle" : "2",
+    "request_link_width" : "64B",
+    "response_link_width" : "64B",
     "L1"                 : "1",
     "replacement_policy" : "lru",
     "coherence_protocol" : "MSI",
@@ -170,11 +177,24 @@ global_memctrl.addParams({
 })
 
 # Create memory backend for global operations
-global_memory = global_memctrl.setSubComponent("backend", "memHierarchy.simpleMem")
-global_memory.addParams({
-    "access_time" : args.mem_latency,
-    "mem_size" : "4GiB",
-})
+if (args.ram2_config):
+    global_memory = global_memctrl.setSubComponent("backend", "memHierarchy.ramulator2")
+    global_memory.addParams({
+        "mem_size" : "4GiB",
+        "configFile" : args.ram2_config,
+        "max_requests_per_cycle" : "1",
+        "debug_level" : "10",
+        "debug" : "0",
+        "verbose" : "10",
+    })
+else:
+    global_memory = global_memctrl.setSubComponent("backend", "memHierarchy.simpleMem")
+    global_memory.addParams({
+        "access_time" : args.mem_latency,
+        "mem_size" : "4GiB",
+        "max_requests_per_cycle" : "1",
+        "request_width" : "64",
+    })
 
 # Connect solver to heap
 solver_heap_link = sst.Link("solver_heap_link")

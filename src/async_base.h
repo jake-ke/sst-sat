@@ -29,7 +29,6 @@ public:
     // Cache-aware burst operations
     void readBurst(uint64_t start_addr, size_t total_size, uint64_t worker_id = 0);
     void writeBurst(uint64_t start_addr, const std::vector<uint8_t>& data);
-    void readBurst2D(uint64_t start_addr, uint64_t offset, size_t element_size, size_t count, uint64_t worker_id = 0);
     
     // Memory response handling
     virtual void handleMem(SST::Interfaces::StandardMem::Request* req);
@@ -66,6 +65,9 @@ protected:
         BurstReadState() : start_addr(0), offset(0), pending_read_count(0), completed(false) {}
     };
     
+    // Find a store queue entry with matching address range
+    int findStoreQueueEntry(uint64_t addr, size_t size);
+
     // Member variables
     SST::Output output;
     SST::Interfaces::StandardMem* memory;
@@ -79,6 +81,9 @@ protected:
     
     // Reorder buffer for managing parallel memory requests
     ReorderBuffer* reorder_buffer;
+
+    // Store queue for Write->Read ordering
+    std::vector<StoreQueueEntry> store_queue;
 };
 
 #endif // ASYNC_BASE_H

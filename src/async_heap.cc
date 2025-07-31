@@ -5,7 +5,7 @@ Heap::Heap(SST::ComponentId_t id, SST::Params& params,
            SST::Interfaces::StandardMem* mem, uint64_t heap_base_addr, uint64_t indices_base_addr) 
     : SST::SubComponent(id), memory(mem), state(IDLE), heap_size(0),
       outstanding_mem_requests(0), heap_addr(heap_base_addr), indices_addr(indices_base_addr),
-      heap_sink_ptr(nullptr), need_rescale(false),
+      heap_sink_ptr(nullptr), debugging(false), need_rescale(false),
       var_activity(params.find<int>("verbose", 0), mem, 
                    params.find<uint64_t>("var_act_base_addr", 0x70000000), this) {
     
@@ -33,25 +33,15 @@ bool Heap::tick(SST::Cycle_t cycle) {
         case STEP: {
             output.verbose(CALL_INFO, 8, 0, "=== Tick %lu === \n", cycle);
             assert(heap_active_workers.size() <= HEAPLANES);
-            bool done = true;
             for (size_t j = 0; j < heap_active_workers.size(); j++) {
-                // output.verbose(CALL_INFO, 8, 0, "Worker %zu: active=%d\n", j, (bool)heap_active_workers[j]);
                 if (heap_active_workers[j]) {
                     heap_sink_ptr = heap_sink_ptrs[j];
                     (*heap_sources[j])();
                     heap_active_workers[j] = false;
-                    if ((*heap_sources[j])) {
-                        done = false;
-                    } else {
-                        delete heap_sources[j];
-                        heap_sources[j] = nullptr;
-                        heap_sink_ptrs[j] = nullptr;
-                    }
-                } else if (heap_sources[j]) done = false;
-                else if (!pending_requests.empty() && !need_rescale) {
-                    // Start a new worker immediately if we have empty slots
+                } else if (heap_sources[j] == nullptr && !pending_requests.empty() 
+                    && !need_rescale && !debugging) {
+                    // Start immediately, otherwise need to wait for all workers to finish
                     startNewWorker(j);
-                    done = false;
                 }
             }
 
@@ -65,38 +55,39 @@ bool Heap::tick(SST::Cycle_t cycle) {
                 }
             }
 
+            bool done = true;
+            for (size_t j = 0; j < heap_sources.size(); j++) {
+                if (heap_sources[j] != nullptr) {
+                    // if (*heap_sources[j]) done = false;
+                    if (*heap_sources[j]) {
+                        done = false;
+                    }
+                    else {
+                        delete heap_sources[j];
+                        heap_sources[j] = nullptr;
+                        heap_sink_ptrs[j] = nullptr;
+                    }
+                }
+            }
+
             if (!done) state = WAIT;
             else {
                 state = IDLE;
+                debugging = false;
                 heap_sink_ptrs.clear();
                 heap_sources.clear();
                 heap_active_workers.clear();
                 heap_polling.clear();
-
-                // if (heap_active_workers.size() > 1) state = DEBUG;
             }
             break;
         }
-        case DEBUG:
-            heap_active_workers.push_back(false);
-            heap_polling.push_back(false);
-            heap_sources.push_back(nullptr);
-            heap_sink_ptrs.push_back(nullptr);
-            heap_sources[0] = new coro_t::pull_type(
-                [this](coro_t::push_type &heap_sink) { 
-                    heap_sink_ptr = &heap_sink;
-                    heap_sink_ptrs[0] = &heap_sink;
-                    debug_heap(0);
-                });
-            state = WAIT;
-            break;
         default:
             output.fatal(CALL_INFO, -1, "Invalid state: %d\n", state);
     }
 
     // handle pending requests - start new workers if we have available slots
     if (!pending_requests.empty() && heap_active_workers.size() < HEAPLANES 
-        && !need_rescale && state != DEBUG) {
+        && !need_rescale && !debugging) {
         size_t idx = heap_active_workers.size();
         startNewWorker(idx);
     }
@@ -107,12 +98,15 @@ bool Heap::tick(SST::Cycle_t cycle) {
 // Helper method to start a new worker with a request
 void Heap::startNewWorker(size_t idx) {
     HeapReqEvent* req = pending_requests.front();
+    if (req->op == HeapReqEvent::DEBUG_HEAP && heap_sources.size() > 0) return;
     pending_requests.pop();
-    output.verbose(CALL_INFO, 7, 0, "Starting new worker %zu for op %d, arg %d\n", 
+    output.verbose(CALL_INFO, 5, 0, "Starting new worker %zu for op %d, arg %d\n", 
                    idx, req->op, req->arg);
     
     // If idx is beyond current size, we need to extend the vectors
+    bool expanded = false;
     if (idx >= heap_active_workers.size()) {
+        expanded = true;
         heap_active_workers.push_back(false);
         heap_polling.push_back(false);
         heap_sources.push_back(nullptr);
@@ -157,8 +151,27 @@ void Heap::startNewWorker(size_t idx) {
                     varBump(req->arg, idx); 
                 });
             break;
+        case HeapReqEvent::DEBUG_HEAP:
+            debugging = true;
+            idx = 0;
+            heap_sources[idx] = new coro_t::pull_type(
+                [this, idx](coro_t::push_type &heap_sink) { 
+                    heap_sink_ptr = &heap_sink;
+                    heap_sink_ptrs[idx] = &heap_sink;
+                    debug_heap(idx);
+                });
+            break;
         default:
             output.fatal(CALL_INFO, -1, "Unknown operation: %d\n", req->op);
+    }
+
+    if (!(*heap_sources[idx]) && expanded) {
+        delete heap_sources[idx];
+        heap_active_workers.resize(idx);
+        heap_polling.resize(idx);
+        heap_sources.resize(idx);
+        heap_sink_ptrs.resize(idx);
+        output.verbose(CALL_INFO, 8, 0, "Worker %zu completed immediately\n", idx);
     }
     delete req;
 }
@@ -178,17 +191,58 @@ void Heap::handleMem(SST::Interfaces::StandardMem::Request* req) {
         }
 
         state = STEP;
+    } else if (auto* write_resp = dynamic_cast<SST::Interfaces::StandardMem::WriteResp*>(req)) {
+        assert(!write_resp->getFail() && "Write response should not fail");
+        if (!WRITE_BUFFER) return;
+
+        uint64_t addr = write_resp->pAddr;
+
+        if (addr >= var_act_base_addr) {  // VarActivity response
+            var_activity.handleMem(req);
+            return;
+        }
+        
+        // Find and remove the oldest matching store queue entry by address (front of queue)
+        for (auto it = store_queue.begin(); it != store_queue.end(); ++it) {
+            if (it->addr == addr) {
+                output.verbose(CALL_INFO, 7, 0, "Removing 0x%lx from SQ\n", it->addr);
+                store_queue.erase(it);
+                break;
+            }
+        }
     }
 }
 
 void Heap::handleRequest(HeapReqEvent* req) {
     output.verbose(CALL_INFO, 7, 0, "HandleReq: op %d, arg %d\n", req->op, req->arg);
-    sst_assert(state == IDLE || req->op == HeapReqEvent::INSERT || req->op == HeapReqEvent::BUMP,
-        CALL_INFO, -1, "Heap is in %d, cannot handle request %d\n", state, req->op);
+    sst_assert(state == IDLE || req->op == HeapReqEvent::INSERT || req->op == HeapReqEvent::BUMP || req->op == HeapReqEvent::DEBUG_HEAP,
+        CALL_INFO, -1, "Heap is in %d with %ld workers, cannot handle request %d\n", state, heap_sources.size(), req->op);
     pending_requests.push(req);
 }
 
 Var Heap::read(uint64_t addr, int worker_id) {
+    if (WRITE_BUFFER) {
+        // First check store queue for forwarding
+        int idx = findStoreQueueEntry(addr, sizeof(Var));
+        if (idx >= 0) {
+            // Store-to-load forwarding: data found in store queue
+            output.verbose(CALL_INFO, 7, 0, "Read at 0x%lx, forwarded from SQ[%d] 0x%lx\n", 
+                       addr, idx, store_queue[idx].addr);
+            
+            // Ensure the read size is less than or equal to store size
+            assert(sizeof(Var) <= store_queue[idx].size && "Read size must be <= SQ entry size");
+    
+            // Calculate offset into the stored data
+            size_t offset = addr - store_queue[idx].addr;
+            
+            // Extract the requested portion
+            Var forwarded;
+            memcpy(&forwarded, store_queue[idx].data.data() + offset, sizeof(Var));
+            return forwarded;
+        }
+    }
+
+    // Not found in store queue, create memory request
     auto req = new SST::Interfaces::StandardMem::Read(addr, sizeof(Var));
     reorder_buffer.registerRequest(req->getID(), worker_id);
     memory->send(req);
@@ -204,14 +258,42 @@ Var Heap::read(uint64_t addr, int worker_id) {
 void Heap::write(uint64_t addr, Var val) {
     std::vector<uint8_t> data(sizeof(Var));
     memcpy(data.data(), &val, sizeof(Var));
+
+    if (WRITE_BUFFER) {
+        // Always add a new entry to the store queue
+        StoreQueueEntry entry(addr, sizeof(Var), data);
+        store_queue.push_back(entry);
+        output.verbose(CALL_INFO, 7, 0, "SQ[%zu]: [0x%lx-0x%lx], data %d\n",
+            store_queue.size() - 1, addr, addr + sizeof(Var) - 1, val);
+    }
+
     memory->send(new SST::Interfaces::StandardMem::Write(addr, sizeof(Var), data));
     // outstanding_mem_requests++;
     // state = WAIT;  // Wait for response 
     // (*heap_sink_ptr)();
 }
 
+// Find a matching entry in the store queue by address range
+int Heap::findStoreQueueEntry(uint64_t addr, size_t size) {
+    // Search from newest to oldest (back to front)
+    for (int i = store_queue.size() - 1; i >= 0; i--) {
+        // Check if read address range falls completely within the store address range
+        uint64_t store_start = store_queue[i].addr;
+        uint64_t store_end = store_start + store_queue[i].size - 1;
+        uint64_t read_end = addr + size - 1;
+        
+        if (addr >= store_start && read_end <= store_end) {
+            output.verbose(CALL_INFO, 7, 0, 
+                "SQ[%d] match: read [0x%lx-0x%lx] within store [0x%lx-0x%lx]\n",
+                i, addr, read_end, store_start, store_end);
+            return i;
+        }
+    }
+    return -1; // Not found
+}
+
 void Heap::complete(int res, int worker_id) {
-    output.verbose(CALL_INFO, 7, 0, "Complete[%d]: res %d\n", worker_id, res);
+    output.verbose(CALL_INFO, 6, 0, "Complete[%d]: res %d\n", worker_id, res);
 
     if (heap_active_workers.size() == 1) {
         sst_assert(outstanding_mem_requests == 0, CALL_INFO, -1,
@@ -220,7 +302,6 @@ void Heap::complete(int res, int worker_id) {
 
     HeapRespEvent* ev = new HeapRespEvent(res);
     response_port->send(ev);
-    state = IDLE;
 }
 
 // debugging only
@@ -233,19 +314,19 @@ void Heap::debug_heap(int worker_id) {
         sst_assert(!lock, CALL_INFO, -1, "Heap lock still held\n");
     }
 
+    bool failed = false;
     for (int i = 0; i < heap_size; i++) {
         Var v = read(heapAddr(i), worker_id);
         int idx = read(indexAddr(v), worker_id);
-        sst_assert(idx == i, CALL_INFO, -1, "Heap index mismatch: expected %d, got %d for key %d\n", i, idx, v);
+        // sst_assert(idx == i, CALL_INFO, -1, "Heap index mismatch: expected %d, got %d for key %d\n", i, idx, v);
+        if (idx != i) {
+            printf("Heap index mismatch: expected %d, got %d for key %d\n", i, idx, v);
+            failed = true;
+        }
+        printf("Heap[%d]: key %d\n", i, v);
     }
 
-    // for (Var v = 1; v <= 41; v++) {  // change the range as needed
-    //     int idx = read(indexAddr(v), worker_id);
-    //     if (idx >= 0) {
-    //         Var heap_v = read(heapAddr(idx), worker_id);
-    //         sst_assert(heap_v == v, CALL_INFO, -1, "Heap value mismatch: expected %d at index %d, got %d\n", v, idx, heap_v);
-    //     }
-    // }
+    sst_assert(!failed, CALL_INFO, -1, "Heap debugging failed: index mismatch found\n");
 
     state = IDLE;
     heap_sink_ptrs.clear();
@@ -354,24 +435,27 @@ void Heap::readHeap(int idx) {
 void Heap::decrease(Var key, int worker_id) {
     output.verbose(CALL_INFO, 7, 0, "Decrease[%d]: key %d\n", worker_id, key);
     int idx;
+    // printf("Decrease[%d]: key %d\n", worker_id, key);
     while (true) {
         idx = read(indexAddr(key), worker_id);
+        // printf("Decrease[%d]: key %d, idx %d\n", worker_id, key, idx);
 
         // key not in heap or already at root
-        if (idx <= 0) {
-            return;
-        }
+        if (idx <= 0) return;
         
         // check if the key has been swapped while reading its index
         while (isLocked(idx)) {
             heap_polling[worker_id] = true;
             (*heap_sink_ptr)();
         }
+        // printf("lock[%d]: %d\n", worker_id, idx);
         lock(idx);
         Var heap_key = read(heapAddr(idx), worker_id);
+        // printf("read[%d]: idx %d, key %d\n", worker_id, idx, heap_key);
 
         if (heap_key == key) break;  // run percolateUp directly
         else unlock(idx);  // has been swapped; read the new index
+        // printf("unlock[%d]: %d\n", worker_id, idx);
     }
 
     percolateUp(idx, key, worker_id);
@@ -380,7 +464,7 @@ void Heap::decrease(Var key, int worker_id) {
 void Heap::insert(Var key, int worker_id) {
     if (inHeap(key, worker_id)) {
         output.verbose(CALL_INFO, 7, 0, "Insert[%d]: already in heap\n", worker_id);
-        complete(true, worker_id);
+        complete(key, worker_id);
         return;
     }
 
@@ -391,12 +475,12 @@ void Heap::insert(Var key, int worker_id) {
     output.verbose(CALL_INFO, 7, 0, "Insert[%d]: key %d, heap size %ld\n",
         worker_id, key, heap_size);
     if (heap_size == 1) {
-        complete(true, worker_id);
+        complete(key, worker_id);
         return;
     }
 
     percolateUp(heap_size - 1, key, worker_id);
-    complete(true, worker_id);
+    complete(key, worker_id);
 }
 
 void Heap::removeMin() {
@@ -491,9 +575,11 @@ void Heap::varBump(Var key, int worker_id) {
             int active_workers = 0;
             int active_idx = 0;
             for (size_t i = 0; i < heap_sources.size(); i++) {
-                if (heap_sources[i]) {
-                    active_workers++;
-                    active_idx = i;
+                if (heap_sources[i] != nullptr) {
+                    if (*heap_sources[i]) {
+                        active_workers++;
+                        active_idx = i;
+                    }
                 }
             }
 

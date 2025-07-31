@@ -222,8 +222,8 @@ Cref MemoryAllocator::allocateBlock(uint32_t size) {
     alloc_mem += block_size;
     updateFragStats();
     
-    output.verbose(CALL_INFO, 5, 0, "Fragmentation: req=%lu alloc=%lu ratio=%.2f%%\n",
-                  req_mem, alloc_mem, frag_ratio * 100.0);
+    output.verbose(CALL_INFO, 7, 0, "Fragmentation: req=%lu alloc=%lu ratio=%.2f%%\n",
+                   req_mem, alloc_mem, frag_ratio * 100.0);
     
     return block;
 }

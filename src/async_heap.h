@@ -14,7 +14,7 @@
 // Events for heap operations
 class HeapReqEvent : public SST::Event {
 public:
-    enum OpType { INSERT, REMOVE_MIN, READ, BUMP };
+    enum OpType { INSERT, REMOVE_MIN, READ, BUMP, DEBUG_HEAP };
     OpType op;
     int arg;
     HeapReqEvent() : op(HeapReqEvent::READ), arg(0) {}
@@ -82,7 +82,7 @@ public:
     size_t size() const { return heap_size; }
     bool empty() const { return heap_size == 0; }
     
-    enum State { IDLE, WAIT, STEP, DEBUG };
+    enum State { IDLE, WAIT, STEP };
     State state;
     int outstanding_mem_requests;  // Track outstanding memory requests
     
@@ -95,6 +95,7 @@ private:
     std::vector<coro_t::push_type*> heap_sink_ptrs;
     coro_t::push_type* heap_sink_ptr;  // Pointer to current coroutine sink
     size_t line_size;
+    bool debugging;  // reading the entire heap, no new requests
     
     VarActivity var_activity;
     uint64_t var_act_base_addr;  // Base address for variable activity array
@@ -104,6 +105,10 @@ private:
 
     // Reorder buffer for managing parallel memory requests
     ReorderBuffer reorder_buffer;
+
+    // Store queue for Write->Read ordering
+    std::vector<StoreQueueEntry> store_queue;
+    int findStoreQueueEntry(uint64_t addr, size_t size);
 
     // parallel execution support
     std::vector<bool> heap_active_workers;

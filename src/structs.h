@@ -8,10 +8,11 @@
 using coro_t = boost::coroutines2::coroutine<void>;
 
 const int MINIMIZERS = 2;  // Number of minimizers
-const int PROPAGATORS = 7;  // Number of propagators
+const int PROPAGATORS = 7;  // Number of propagators, <= 7
 const int HEAPLANES = 8;  // Number of heap lanes for parallel execution
 const bool OVERLAP_HEAP_INSERT = false;  // overlaps heap insertions (backtracking) with propagation
 const bool OVERLAP_HEAP_BUMP = false;  // overlaps heap bumping with clause minimization and find bt level
+const bool WRITE_BUFFER = true;  // enables write request buffering for improved performance
 
 // Define types for variables and literals
 typedef int Var;
@@ -61,6 +62,14 @@ struct Clause {
     Lit operator[] (size_t i) const { return literals[i]; }
 };
 
+// Store queue entry for Write->Read ordering
+struct StoreQueueEntry {
+    uint64_t addr;                // Memory address
+    size_t size;                  // Size of data in bytes
+    std::vector<uint8_t> data;    // Data to be written
+    StoreQueueEntry(uint64_t a, size_t s, const std::vector<uint8_t>& d)
+        : addr(a), size(s), data(d) {}
+};
 
 // Helper functions for literals
 inline Lit mkLit(Var var, bool sign = false) { Lit p; p.x = var + var + (int)sign; return p; }

@@ -2,8 +2,9 @@
 
 # Check if help is requested or show usage
 show_usage() {
-    echo "Usage: $0 [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--folder FOLDER] [-j jobs] [--decision-dir DIR]"
+    echo "Usage: $0 [--ram2-cfg FILE] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--folder FOLDER] [-j jobs] [--decision-dir DIR]"
     echo "Options:"
+    echo "  --ram2-cfg FILE       Ramulator2 configuration file"
     echo "  --l1-size SIZE        L1 cache size"
     echo "  --l1-latency LATENCY  L1 cache latency cycles"
     echo "  --mem-latency LATENCY External memory latency"
@@ -19,6 +20,7 @@ if [[ "$1" == "-h" || "$1" == "--help" ]]; then
 fi
 
 # Optional values (no defaults - let Python script handle defaults)
+RAM2_CFG=""
 L1_SIZE=""
 L1_LATENCY=""
 MEM_LATENCY=""
@@ -52,6 +54,16 @@ colorize_result() {
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --ram2-cfg)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                RAM2_CFG="$2"
+                shift 2
+            else
+                echo "Error: --ram2-cfg requires a configuration file argument"
+                show_usage
+                exit 1
+            fi
+            ;;
         --l1-size)
             if [[ -n "$2" && "$2" != -* ]]; then
                 L1_SIZE="$2"
@@ -187,6 +199,7 @@ log_message "==============================================="
 log_message "Test run started at $(date)"
 log_message "Output directory: $LOGS_DIR"
 log_message "Parallel jobs: $MAX_JOBS"
+log_message "RAMULATOR2 configuration: ${RAM2_CFG:-default}"
 log_message "L1 cache size: ${L1_SIZE:-default}"
 log_message "L1 cache latency: ${L1_LATENCY:-default}"
 log_message "Memory latency: ${MEM_LATENCY:-default}"
@@ -265,10 +278,11 @@ run_single_test() {
     local command="timeout 18000 sst ./tests/test_one_level.py -- --cnf \"$file\" --stats-file \"$stats_file\""
     
     # Add optional cache/memory parameters only if provided
+    [[ -n "$RAM2_CFG" ]] && command+=" --ram2-cfg $RAM2_CFG"
     [[ -n "$L1_SIZE" ]] && command+=" --l1-size $L1_SIZE"
     [[ -n "$L1_LATENCY" ]] && command+=" --l1-latency $L1_LATENCY"
     [[ -n "$MEM_LATENCY" ]] && command+=" --mem-latency $MEM_LATENCY"
-    
+
     # Add decision file if directory specified and file exists
     if [[ -n "$DECISION_DIR" ]]; then
         local decision_file="${DECISION_DIR}/${filename}.dec"
