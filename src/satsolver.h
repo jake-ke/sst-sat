@@ -56,7 +56,6 @@ public:
     SST_ELI_DOCUMENT_PARAMS(
         {"clock", "Clock frequency", "1GHz"},
         {"verbose", "Verbosity level", "0"},
-        {"filesize", "Size of CNF file to read", "0"},
         {"cnf_file", "Path to the CNF file to solve", ""},
         {"var_decay", "Variable activity decay factor", "0.95"},
         {"clause_decay", "Clause activity decay factor", "0.999"},
@@ -70,6 +69,7 @@ public:
         {"indices_base_addr", "Base address for indices memory", "0x10000000"},
         {"variables_base_addr", "Base address for variables memory", "0x20000000"},
         {"var_act_base_addr", "Base address for variable activity memory", "0x70000000"},
+        {"prefetch_enabled", "Enable prefetching", "false"},
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -90,7 +90,8 @@ public:
     SST_ELI_DOCUMENT_PORTS(
         {"cnf_mem_link", "Connection to CNF memory", {"memHierarchy.MemEventBase"}},
         {"global_mem_link", "Connection to global memory", {"memHierarchy.MemEventBase"}},
-        {"heap_port", "Link to external heap subcomponent", {"sst.Event"}}
+        {"heap_port", "Link to external heap subcomponent", {"sst.Event"}},
+        {"prefetch_port", "Port to send prefetch requests", {"SST::Event"}}
     )
     
     SST_ELI_DOCUMENT_SUBCOMPONENT_SLOTS(
@@ -195,7 +196,6 @@ private:
 
     // Parsing state
     std::string cnf_file_path;         // Path to CNF file
-    size_t filesize;
     uint32_t num_vars;
     uint32_t num_clauses;
     bool sort_clauses;
@@ -319,6 +319,11 @@ private:
     // Cycle tracking
     SolverState prev_state;
     SST::Cycle_t last_state_change;
+
+    // Prefetch support
+    bool prefetch_enabled;
+    SST::Link* prefetch_link;
+    void issuePrefetch(uint64_t addr);
 };
 
 #endif // SATSOLVER_H

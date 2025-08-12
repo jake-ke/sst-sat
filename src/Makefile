@@ -11,7 +11,7 @@ SST_ELEMENTS_INCLUDE = -I$(SST_ELEMENTS_HOME)/include
 CXXFLAGS += $(SST_ELEMENTS_INCLUDE)
 
 # Source files
-SOURCES = memory_allocator.cc cache_profiler.cc async_base.cc async_heap.cc async_watches.cc async_clauses.cc async_activity.cc async_var_activity.cc satsolver.cc
+SOURCES = memory_allocator.cc cache_profiler.cc async_base.cc async_heap.cc async_watches.cc async_clauses.cc async_activity.cc async_var_activity.cc satsolver.cc directedprefetch.cc
 OBJECTS = $(SOURCES:%.cc=$(BUILD_DIR)/%.o)
 TARGET = $(BUILD_DIR)/libsatsolver.so
 

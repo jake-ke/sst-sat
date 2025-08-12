@@ -6,6 +6,7 @@
 #include <algorithm>  // For std::sort
 #include <cmath>      // For pow function
 #include <fstream>    // For file reading
+#include "directedprefetch.h" // Include for PrefetchRequestEvent
 
 //-----------------------------------------------------------------------------------
 // Component Lifecycle Methods
@@ -14,7 +15,7 @@
 SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     SST::Component(id), 
     state(IDLE),
-    random_seed(91648253),
+    random_seed(8888),
     var_inc(1.0),
     cla_inc(1.0),
     learntsize_factor((double)1/(double)3),
@@ -50,12 +51,6 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     // Configure clock
     registerClock(params.find<std::string>("clock", "1GHz"),
                   new SST::Clock::Handler2<SATSolver, &SATSolver::clockTick>(this));
-
-    // Get file size parameter
-    filesize = params.find<size_t>("filesize", 0);
-    if (filesize == 0) {
-        output.fatal(CALL_INFO, -1, "File size parameter not provided\n");
-    }
 
     // Get CNF file path
     cnf_file_path = params.find<std::string>("cnf_file", "");
@@ -125,7 +120,13 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     heap_link = configureLink("heap_port", 
         new SST::Event::Handler2<SATSolver, &SATSolver::handleHeapResponse>(this));
     sst_assert( heap_link != nullptr, CALL_INFO, -1, "Error: 'heap_port' is not connected to a link\n");
-    
+
+    prefetch_enabled = params.find<bool>("prefetch_enabled", false);
+    if (prefetch_enabled) {
+        prefetch_link = configureLink("prefetch_port");
+        sst_assert(prefetch_link != nullptr, CALL_INFO, -1, "Error: 'prefetch_port' is not connected to a link\n");
+    }
+
     // Open decision output file if specified
     std::string decision_output_file = params.find<std::string>("decision_output_file", "");
     if (!decision_output_file.empty()) {
@@ -976,7 +977,6 @@ int SATSolver::unitPropagate() {
         output.verbose(CALL_INFO, 3, 0,
             "PROPAGATE: Processing watchers for literal %d\n", toInt(p));
 
-        // if (head_addr == 0) continue; // Empty watch list
         uint64_t curr_addr = head_addr;
         uint64_t prev_addr = 0;
         WatcherBlock prev_block;
@@ -991,7 +991,13 @@ int SATSolver::unitPropagate() {
 
             uint64_t next_addr = curr_block.next_block;
             bool block_modified = false;
-            
+
+            if (next_addr != 0) issuePrefetch(next_addr);
+            else if (qhead < trail.size()) {
+                Lit next_p = trail[qhead];
+                issuePrefetch(watches.watchesAddr(toWatchIndex(next_p)));
+            }
+
             // spawn sub-coroutines
             parent_yield_ptr = yield_ptr;
             
@@ -1207,6 +1213,13 @@ void SATSolver::subPropagate(
     }
 }
 
+// Add a new method to issue prefetches
+void SATSolver::issuePrefetch(uint64_t addr) {
+    if (prefetch_enabled) {
+        output.verbose(CALL_INFO, 4, 0, "Issuing prefetch for address 0x%lx\n", addr);
+        prefetch_link->send(new PrefetchRequestEvent(addr));
+    }
+}
 
 //-----------------------------------------------------------------------------------
 // analyze

@@ -2,6 +2,9 @@ import sst
 import os
 import sys
 import argparse
+import lzma
+import tempfile
+import atexit
 
 def parse_args():
     """Parse command line arguments"""
@@ -51,6 +54,9 @@ def parse_args():
     parser.add_argument('--mem-latency', dest='mem_latency',
                         type=str, default="100ns",
                         help='External Memory latency')
+    parser.add_argument('--prefetch', dest='enable_prefetch', 
+                        action='store_true', default=False,
+                        help='Enable directed prefetching')
                         
     args = parser.parse_args()
     
@@ -63,10 +69,68 @@ def parse_args():
     
     return args
 
+def decompress_xz_file(xz_path):
+    """
+    Decompress .xz file to a temporary file and return the path.
+    The temporary file will be automatically cleaned up on exit.
+    """
+    print(f"Decompressing .xz file: {xz_path}")
+    
+    # Create a temporary file
+    temp_fd, temp_path = tempfile.mkstemp(suffix='.cnf', prefix='sst_cnf_')
+    
+    try:
+        # Read and decompress the .xz file
+        with lzma.open(xz_path, 'rt') as xz_file:
+            with os.fdopen(temp_fd, 'w') as temp_file:
+                # Copy content in chunks to handle large files efficiently
+                while True:
+                    chunk = xz_file.read(8192)  # 8KB chunks
+                    if not chunk:
+                        break
+                    temp_file.write(chunk)
+        
+        print(f"Decompressed to temporary file: {temp_path}")
+        
+        # Register cleanup function to remove temp file on exit
+        atexit.register(lambda: os.unlink(temp_path) if os.path.exists(temp_path) else None)
+        
+        return temp_path
+        
+    except Exception as e:
+        # Clean up the temp file if decompression failed
+        try:
+            os.close(temp_fd)
+        except:
+            pass
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+        raise Exception(f"Failed to decompress {xz_path}: {e}")
+
+def get_cnf_path_and_size(original_path):
+    """
+    Get the actual CNF path and file size, handling .xz decompression if needed.
+    Returns cnf_path.
+    """
+    if original_path.endswith('.xz'):
+        # Decompress .xz file to temporary location
+        cnf_path = decompress_xz_file(original_path)
+        return cnf_path
+    else:
+        return original_path
+
+
 # Parse command line arguments
 args = parse_args()
 
+# Handle .xz decompression if needed
+actual_cnf_path = get_cnf_path_and_size(args.cnf_path)
+
 print(f"Using CNF file: {args.cnf_path}")
+if actual_cnf_path != args.cnf_path:
+    print(f"Decompressed to: {actual_cnf_path}")
 if args.decision_path:
     print(f"Using decision file: {args.decision_path}")
 if args.decision_output_path:
@@ -77,6 +141,8 @@ if (args.ram2_config):
     print(f"Using ramulator2 config: {args.ram2_config}")
 else:
     print(f"Using simple memory latency: {args.mem_latency}")
+if args.enable_prefetch:
+    print(f"Directed prefetching enabled")
 print()
 
 # Create the SAT solver component
@@ -91,16 +157,14 @@ watch_nodes_base_addr   = 0x40000000
 clauses_cmd_base_addr   = 0x50000000
 clauses_base_addr       = 0x60000000
 var_act_base_addr       = 0x70000000
-clause_act_base_addr    = 0x80000000
+# clause_act_base_addr    = 0x80000000
 
 # Get file size and pass it to solver
-file_size = os.path.getsize(args.cnf_path)
 params = {
     "clock" : "1GHz",
     "verbose" : str(args.verbose),
     "sort_clauses": args.sort_clauses,
-    "filesize" : str(file_size),
-    "cnf_file" : args.cnf_path,
+    "cnf_file" : actual_cnf_path,
     "heap_base_addr" : hex(heap_base_addr),
     "indices_base_addr" : hex(indices_base_addr),
     "variables_base_addr" : hex(variables_base_addr),
@@ -111,7 +175,8 @@ params = {
     "var_act_base_addr" : hex(var_act_base_addr),
     "random_var_freq": str(args.random_var_freq),
     "var_decay": str(args.var_decay),
-    "clause_decay": str(args.clause_decay)
+    "clause_decay": str(args.clause_decay),
+    "prefetch_enabled": str(args.enable_prefetch),
 }
 if args.decision_path:
     params["decision_file"] = args.decision_path
@@ -143,15 +208,17 @@ global_cache.addParams({
     "L1"                 : "1",
     "replacement_policy" : "lru",
     "coherence_protocol" : "MSI",
-    "verbose"            : "0",
-    "debug" : "0",
-    "debug_level" : "10",
+    "prefetch_delay_cycles" : "0",
     "statistics" : "1",           # Enable statistics for cache
     "collect_stats" : "1"         # Make sure stats are collected
 })
 
+# prefetcher1 = global_cache.setSubComponent("prefetcher", "cassini.NextBlockPrefetcher", 1)
+# prefetcher1 = global_cache.setSubComponent("prefetcher", "cassini.StridePrefetcher", 1)
+# prefetcher1 = global_cache.setSubComponent("prefetcher", "cassini.PalaPrefetcher", 1)
+
 # Add CacheProfiler to L1 cache
-global_cache_profiler = global_cache.setSubComponent("prefetcher", "satsolver.CacheProfiler")
+global_cache_profiler = global_cache.setSubComponent("prefetcher", "satsolver.CacheProfiler", 0)
 global_cache_profiler.addParams({
     "cache_level": "L1",
     "heap_base_addr": hex(heap_base_addr),
@@ -159,7 +226,6 @@ global_cache_profiler.addParams({
     "watches_base_addr": hex(watches_base_addr),
     "clauses_cmd_base_addr": hex(clauses_cmd_base_addr),
     "var_act_base_addr": hex(var_act_base_addr),
-    "clause_act_base_addr": hex(clause_act_base_addr),
     "verbose": str(args.verbose),
     "exclude_cold_misses": "1"
 })
@@ -207,6 +273,17 @@ cpu_to_cache_link.connect((global_iface, "lowlink", "1ns"), (global_cache, "high
 # Connect L1 cache to mem
 l1_to_mem_link = sst.Link("l1_to_mem_link")
 l1_to_mem_link.connect((global_cache, "lowlink", "1ns"), (global_memctrl, "highlink", "1ns"))
+
+# Create the directed prefetcher if enabled
+if args.enable_prefetch:
+    prefetcher = global_cache.setSubComponent("prefetcher", "satsolver.DirectedPrefetcher", 1)
+    prefetcher.addParams({"cache_line_size": "64"})
+    
+    # Connect prefetcher to solver
+    prefetch_link = sst.Link("prefetch_link")
+    prefetch_link.connect((solver, "prefetch_port", "1ns"), (prefetcher, "cmd_port", "1ns"))
+
+    sst.enableAllStatisticsForComponentType("satsolver.DirectedPrefetcher")
 
 # Enable statistics - different types for different stats
 sst.setStatisticLoadLevel(7)
@@ -258,6 +335,8 @@ sst.enableStatisticsForComponentName("solver", [
 sst.enableStatisticsForComponentType("memHierarchy.Cache", [
     "CacheHits", 
     "CacheMisses",
+    "Prefetch_requests",
+    "Prefetch_drops",
 ], {
     "type": "sst.AccumulatorStatistic",
     "rate": "1s"
