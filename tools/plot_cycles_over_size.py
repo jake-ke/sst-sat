@@ -25,8 +25,10 @@ def collect_cycle_data_from_logs(base_dir):
     Returns dict: {cache_size: parsed_data_list}
     """
     cache_dirs = [
-        'logs_4KiB', 'logs_8KiB', 'logs_16KiB', 'logs_32KiB', 'logs_64KiB', 'logs_128KiB',
-        'logs_256KiB', 'logs_512KiB', 'logs_1MiB', 'logs_2MiB', 'logs_4MiB'
+        # 'logs_4KiB', 'logs_8KiB', 'logs_16KiB', 'logs_32KiB', 'logs_64KiB', 'logs_128KiB',
+        # 'logs_256KiB', 'logs_512KiB', 'logs_1MiB', 'logs_2MiB', 'logs_4MiB'
+        'logs_ddr_4KiB', 'logs_ddr_8KiB', 'logs_ddr_16KiB', 'logs_ddr_32KiB', 'logs_ddr_64KiB', 'logs_ddr_128KiB',
+        'logs_ddr_256KiB', 'logs_ddr_512KiB', 'logs_ddr_1MiB', 'logs_ddr_2MiB', 'logs_ddr_4MiB'
     ]
     
     data = {}

@@ -18,7 +18,57 @@ CNF file format:
 
 import sys
 import os
+import lzma
+import tempfile
+import atexit
 from typing import Dict, List, Set
+
+
+def decompress_xz_file(xz_path: str) -> str:
+    """
+    Decompress .xz file to a temporary file and return the path.
+    The temporary file will be automatically cleaned up on exit.
+    
+    Args:
+        xz_path: Path to the .xz file
+        
+    Returns:
+        Path to the decompressed temporary file
+    """
+    print(f"Decompressing .xz file: {xz_path}")
+    
+    # Create a temporary file
+    temp_fd, temp_path = tempfile.mkstemp(suffix='.cnf', prefix='verifier_cnf_')
+    
+    try:
+        # Read and decompress the .xz file
+        with lzma.open(xz_path, 'rt') as xz_file:
+            with os.fdopen(temp_fd, 'w') as temp_file:
+                # Copy content in chunks to handle large files efficiently
+                while True:
+                    chunk = xz_file.read(8192)  # 8KB chunks
+                    if not chunk:
+                        break
+                    temp_file.write(chunk)
+        
+        print(f"Decompressed to temporary file: {temp_path}")
+        
+        # Register cleanup function to remove temp file on exit
+        atexit.register(lambda: os.unlink(temp_path) if os.path.exists(temp_path) else None)
+        
+        return temp_path
+        
+    except Exception as e:
+        # Clean up the temp file if decompression failed
+        try:
+            os.close(temp_fd)
+        except:
+            pass
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+        raise Exception(f"Failed to decompress {xz_path}: {e}")
 
 
 def parse_solution(solution_file: str) -> Dict[int, bool]:
@@ -238,8 +288,17 @@ def main():
         print(f"Error: CNF file '{cnf_file}' does not exist")
         sys.exit(1)
     
+    # Handle .xz decompression if needed
+    actual_cnf_file = cnf_file
+    if cnf_file.endswith('.xz'):
+        try:
+            actual_cnf_file = decompress_xz_file(cnf_file)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+    
     # Verify the solution
-    is_valid = verify_solution(solution_file, cnf_file)
+    is_valid = verify_solution(solution_file, actual_cnf_file)
     
     # Exit with appropriate code
     sys.exit(0 if is_valid else 1)

@@ -419,7 +419,7 @@ def parse_log_directory(logs_dir, exclude_summary=True):
 
 def get_cache_size_from_directory(directory_name):
     """Extract cache size in bytes from directory name like 'logs_4MiB'."""
-    size_match = re.search(r'logs_(\d+)([KMG]i?B)', directory_name)
+    size_match = re.search(r'logs_(?:ddr_)?(\d+)([KMG]i?B)', directory_name)
     if not size_match:
         return None
     
