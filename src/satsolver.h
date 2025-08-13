@@ -131,7 +131,8 @@ public:
     void initialize();
     bool decide();
     int unitPropagate();
-    void subPropagate(int i, Lit not_p, bool& block_modified, WatcherBlock& block, int worker_id);
+    void subPropagate(int i, Lit not_p, bool& block_modified, WatcherBlock& block, int worker_id,
+        uint64_t& read_clauses_cycles, uint64_t& insert_watchers_cycles, uint64_t& polling_cycles);
     void analyze();
     void findBtLevel();
     void backtrack(int backtrack_level);
@@ -324,6 +325,13 @@ private:
     bool prefetch_enabled;
     SST::Link* prefetch_link;
     void issuePrefetch(uint64_t addr);
+
+    // Propagation timing counters
+    uint64_t cycles_read_headptr;        // Time spent reading head pointers
+    uint64_t cycles_read_watcher_blocks; // Time spent reading watcher blocks
+    uint64_t cycles_read_clauses;        // Time spent reading clauses in subPropagate
+    uint64_t cycles_insert_watchers;     // Time spent inserting watchers
+    uint64_t cycles_polling;             // Time spent polling for busy watchers
 };
 
 #endif // SATSOLVER_H

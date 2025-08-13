@@ -7,6 +7,7 @@
 #include <cmath>      // For pow function
 #include <fstream>    // For file reading
 #include "directedprefetch.h" // Include for PrefetchRequestEvent
+#include <sst/core/realtimeAction.h>  // For current simulation time
 
 //-----------------------------------------------------------------------------------
 // Component Lifecycle Methods
@@ -42,7 +43,13 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     cycles_restart(0),
     // Initialize cycle tracking
     prev_state(IDLE),
-    last_state_change(0) {
+    last_state_change(0),
+    // Initialize propagation timing counters
+    cycles_read_headptr(0),
+    cycles_read_watcher_blocks(0),
+    cycles_read_clauses(0),
+    cycles_insert_watchers(0),
+    cycles_polling(0) {
     
     // Initialize output
     int verbose = params.find<int>("verbose", 0);
@@ -271,6 +278,21 @@ void SATSolver::finish() {
     output.output("Restart      : %.2f%% \t(%lu cycles)\n", pct_restart, cycles_restart);
     output.output("Total Counted: %lu cycles\n", total_counted);
     output.output("===========================================================================\n");
+    
+    // Add new detailed propagation statistics
+    output.output("======================[ Propagation Detail Statistics ]===================\n");
+    double pct_read_headptr = (double)cycles_read_headptr * 100.0 / total_counted;
+    double pct_read_watcher_blocks = (double)cycles_read_watcher_blocks * 100.0 / total_counted;
+    double pct_read_clauses = (double)cycles_read_clauses * 100.0 / total_counted;
+    double pct_insert_watchers = (double)cycles_insert_watchers * 100.0 / total_counted;
+    double pct_polling = (double)cycles_polling * 100.0 / total_counted;
+    
+    output.output("Read Head Pointers : %.2f%% \t(%lu cycles)\n", pct_read_headptr, cycles_read_headptr);
+    output.output("Read Watcher Blocks: %.2f%% \t(%lu cycles)\n", pct_read_watcher_blocks, cycles_read_watcher_blocks);
+    output.output("Read Clauses       : %.2f%% \t(%lu cycles)\n", pct_read_clauses, cycles_read_clauses);
+    output.output("Insert Watchers    : %.2f%% \t(%lu cycles)\n", pct_insert_watchers, cycles_insert_watchers);
+    output.output("Polling for Busy   : %.2f%% \t(%lu cycles)\n", pct_polling, cycles_polling);
+    output.output("===========================================================================\n");
 }
 
 //-----------------------------------------------------------------------------------
@@ -480,7 +502,7 @@ void SATSolver::handleHeapResponse(SST::Event* ev) {
 
 bool SATSolver::clockTick(SST::Cycle_t cycle) {
     // Calculate elapsed cycles since last state change if we're not in IDLE or STEP
-    if (state != IDLE && state != STEP && state != WAIT_HEAP && prev_state != state) {
+    if (state != IDLE && state != STEP && prev_state != state) {
         // Update cycle counts based on previous state
         uint64_t elapsed = cycle - last_state_change;
         output.verbose(CALL_INFO, 8, 0,
@@ -972,7 +994,12 @@ int SATSolver::unitPropagate() {
         Lit p = trail[qhead++];
         Lit not_p = ~p;
         int watch_idx = toWatchIndex(p);
+        
+        // Measure time to read head pointer
+        SST::Cycle_t start_headptr = getCurrentSimCycle() / 1000;
         uint64_t head_addr = watches.readHeadPointer(watch_idx);
+        SST::Cycle_t end_headptr = getCurrentSimCycle() / 1000;
+        cycles_read_headptr += (end_headptr - start_headptr);
 
         output.verbose(CALL_INFO, 3, 0,
             "PROPAGATE: Processing watchers for literal %d\n", toInt(p));
@@ -986,8 +1013,11 @@ int SATSolver::unitPropagate() {
         
         // Traverse the linked list
         while (curr_addr != 0) {
-            // Read current block
+            // Read current block with timing
+            SST::Cycle_t start_block = getCurrentSimCycle() / 1000;
             WatcherBlock curr_block = watches.readBlock(curr_addr);
+            SST::Cycle_t end_block = getCurrentSimCycle() / 1000;
+            cycles_read_watcher_blocks += (end_block - start_block);
 
             uint64_t next_addr = curr_block.next_block;
             bool block_modified = false;
@@ -1023,6 +1053,12 @@ int SATSolver::unitPropagate() {
             // Count the watchers inspected in this block
             para_watchers += valid_nodes.size();
             
+            // Track times for worker operations
+            std::vector<uint64_t> worker_read_clauses(PROPAGATORS, 0);
+            std::vector<uint64_t> worker_insert_watchers(PROPAGATORS, 0);
+            std::vector<uint64_t> worker_polling(PROPAGATORS, 0);
+            int last_worker = 0;
+            
             // Process valid nodes in batches, limited by PROPAGATORS
             int workers = std::min(PROPAGATORS, (int)valid_nodes.size());
             bool done = true;
@@ -1030,13 +1066,22 @@ int SATSolver::unitPropagate() {
                 active_workers.push_back(false);
                 polling.push_back(false);
                 coroutines.push_back(new coro_t::pull_type(
-                    [this, worker_id, &valid_nodes, not_p, &block_modified, &curr_block](coro_t::push_type &yield) {
+                    [this, worker_id, &valid_nodes, not_p, &block_modified, &curr_block, 
+                     &worker_read_clauses, &worker_insert_watchers, &worker_polling](coro_t::push_type &yield) {
                         yield_ptr = &yield;
                         yield_ptrs.push_back(yield_ptr);
                         // Process nodes assigned to this worker
                         for (size_t node_idx = worker_id; node_idx < valid_nodes.size(); node_idx += PROPAGATORS) {
                             int i = valid_nodes[node_idx];
-                            subPropagate(i, not_p, block_modified, curr_block, worker_id);
+                            
+                            // Measure timings for this worker's operations
+                            SST::Cycle_t start_time, end_time;
+                            
+                            subPropagate(i, not_p, block_modified, curr_block, worker_id, 
+                                         worker_read_clauses[worker_id], 
+                                         worker_insert_watchers[worker_id],
+                                         worker_polling[worker_id]);
+                            
                             if (conflict != ClauseRef_Undef) break; // Early exit on conflict
                         }
                     }));
@@ -1074,6 +1119,7 @@ int SATSolver::unitPropagate() {
                     if (coroutines[j] != nullptr) {
                         if (*coroutines[j]) done = false;
                         else {
+                            last_worker = j; // Track the last worker to complete
                             delete coroutines[j];
                             coroutines[j] = nullptr;
                             yield_ptrs[j] = nullptr;
@@ -1091,6 +1137,11 @@ int SATSolver::unitPropagate() {
             yield_ptrs.clear();
             yield_ptr = parent_yield_ptr;
             output.verbose(CALL_INFO, 4, 0, "  Finished processing a watch block\n");
+            
+            // After all workers finished, only add timing data from the last worker to complete
+            cycles_read_clauses += worker_read_clauses[last_worker];
+            cycles_insert_watchers += worker_insert_watchers[last_worker];
+            cycles_polling += worker_polling[last_worker];
             
             // After processing all nodes in the block, check if we need to write it back
             if (block_modified)
@@ -1137,11 +1188,20 @@ void SATSolver::subPropagate(
     Lit not_p,
     bool& block_modified,
     WatcherBlock& curr_block,
-    int worker_id
+    int worker_id,
+    uint64_t& read_clauses_cycles,
+    uint64_t& insert_watchers_cycles,
+    uint64_t& polling_cycles
 ) {
     // Need to inspect the clause
     Cref clause_addr = curr_block.nodes[i].clause_addr;
+    
+    // Time the reading of clauses
+    SST::Cycle_t start_read = getCurrentSimCycle() / 1000;
     Clause c = clauses.readClause(clause_addr, worker_id);
+    SST::Cycle_t end_read = getCurrentSimCycle() / 1000;
+    read_clauses_cycles += (end_read - start_read);
+    
     bool update_clause = false;
 
     // Print clause for debugging
@@ -1179,13 +1239,22 @@ void SATSolver::subPropagate(
                 "    [W%d]Found new watch: literal %d at position %zu\n", 
                 worker_id, toInt(c[1]), k);
             
+            // Time spent polling for busy watches
+            SST::Cycle_t start_poll = getCurrentSimCycle() / 1000;
             while (watches.isBusy(toWatchIndex(~c[1]))) {
                 polling[worker_id] = true;
                 (*yield_ptr)();  // Yield to allow other workers to process
             }
+            SST::Cycle_t end_poll = getCurrentSimCycle() / 1000;
+            polling_cycles += (end_poll - start_poll);
 
             output.verbose(CALL_INFO, 4, 0, "    [W%d]Start watchlist insertion\n", worker_id);
+            
+            // Time spent inserting watchers
+            SST::Cycle_t start_insert = getCurrentSimCycle() / 1000;
             watches.insertWatcher(toWatchIndex(~c[1]), clause_addr, first, worker_id);
+            SST::Cycle_t end_insert = getCurrentSimCycle() / 1000;
+            insert_watchers_cycles += (end_insert - start_insert);
             
             // Mark this node as invalid in the current block
             curr_block.valid_mask &= ~(1 << i);
@@ -1660,6 +1729,7 @@ bool SATSolver::litRedundant(Lit p, int worker_id) {
                 return true;
             }
             
+                       
             // Continue with next element from stack
             ShrinkStackElem e = analyze_stack.back();
             analyze_stack.pop_back();
