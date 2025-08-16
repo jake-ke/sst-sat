@@ -24,6 +24,7 @@ Usage:
 
 import os
 import re
+import csv
 from pathlib import Path
 
 
@@ -265,6 +266,139 @@ def parse_parallel_histograms(content):
     return histogram_stats
 
 
+def parse_propagation_detail_statistics(content):
+    """Parse the Propagation Detail Statistics section with per-activity % and cycles."""
+    stats = {}
+    section = re.search(r"=+\[\s*Propagation Detail Statistics\s*\]=+\n(.*?)\n=+", content, re.DOTALL)
+    if not section:
+        return stats
+
+    text = section.group(1)
+    # Match lines like: Label : 12.34% 	(12345 cycles)
+    for line in text.splitlines():
+        m = re.search(r"^\s*(.+?)\s*:\s*([\d.]+)%\s*\((\d+)\s*cycles\)\s*$", line)
+        if not m:
+            continue
+        label = m.group(1).strip().lower()
+        # normalize to snake_case
+        key_base = 'prop_' + re.sub(r"[^a-z0-9]+", "_", label).strip('_')
+        try:
+            stats[f"{key_base}_pct"] = float(m.group(2))
+            stats[f"{key_base}_cycles"] = int(m.group(3))
+        except ValueError:
+            # Skip malformed numbers
+            continue
+    return stats
+
+
+def parse_watchers_occupancy_histogram(content):
+    """Parse the Watchers Occupancy Histogram section."""
+    out = {}
+    section = re.search(r"=+\[\s*Watchers Occupancy Histogram\s*\]=+\n(.*?)\n=+", content, re.DOTALL)
+    if not section:
+        return out
+
+    text = section.group(1)
+    total_match = re.search(r"Total samples:\s*(\d+)", text)
+    if total_match:
+        out['watchers_occupancy_total_samples'] = int(total_match.group(1))
+
+    bins = {}
+    # Pattern for ranges like [ 0- 0] or [ 3- 7]
+    bin_pattern = r"Bin \[\s*(\d+)\s*-\s*(\d+)\]:\s*(\d+) samples \(([\d.]+)%\)"
+    for m in re.finditer(bin_pattern, text):
+        start = int(m.group(1))
+        end = int(m.group(2))
+        samples = int(m.group(3))
+        pct = float(m.group(4))
+        if start == end:
+            key = str(start)
+        else:
+            key = f"{start}-{end}"
+        bins[key] = {"samples": samples, "percentage": pct}
+
+    # Fallback for formats like "Bin [0]: ..." if ever present
+    if not bins:
+        single_pattern = r"Bin \[\s*(\d+)\s*\]:\s*(\d+) samples \(([\d.]+)%\)"
+        for m in re.finditer(single_pattern, text):
+            idx = str(int(m.group(1)))
+            bins[idx] = {"samples": int(m.group(2)), "percentage": float(m.group(3))}
+
+    oob = re.search(r"Out of bounds:\s*(\d+) samples \(([\d.]+)%\)", text)
+    if oob:
+        bins['out_of_bounds'] = {"samples": int(oob.group(1)), "percentage": float(oob.group(2))}
+
+    if bins:
+        out['watchers_occupancy_bins'] = bins
+    return out
+
+
+def parse_directed_prefetcher_statistics(content):
+    """Parse DirectedPrefetcher Statistics section if present."""
+    stats = {}
+    # Section starts with a simple header followed by key-value lines
+    section = re.search(r"DirectedPrefetcher Statistics:\n(.*?)(?:\n={3,}|\n\[{3,}|\Z)", content, re.DOTALL)
+    if not section:
+        return stats
+    text = section.group(1)
+
+    m = re.search(r"Prefetches issued:\s*(\d+)", text)
+    if m:
+        stats['prefetches_issued'] = int(m.group(1))
+    m = re.search(r"Prefetches used:\s*(\d+)", text)
+    if m:
+        stats['prefetches_used'] = int(m.group(1))
+    m = re.search(r"Prefetches unused.*?:\s*(\d+)", text)
+    if m:
+        stats['prefetches_unused'] = int(m.group(1))
+    m = re.search(r"Prefetch accuracy:\s*([\d.]+)%", text)
+    if m:
+        stats['prefetch_accuracy'] = float(m.group(1))
+    return stats
+
+
+def parse_stats_csv_for_prefetch(stats_csv_path: Path):
+    """Extract last Prefetch_requests and Prefetch_drops from a stats CSV.
+
+    Looks for rows with ComponentName starting with 'global_l1cache' and
+    StatisticName equal to 'Prefetch_requests' or 'Prefetch_drops'. Returns
+    values from Sum.u64 (column name in header) if present.
+    """
+    out = {}
+    try:
+        if not stats_csv_path.exists() or not stats_csv_path.is_file():
+            return out
+
+        last_requests = None
+        last_drops = None
+        with stats_csv_path.open('r', newline='') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                comp = row.get('ComponentName', '')
+                name = row.get('StatisticName', '')
+                if not comp.startswith('global_l1cache'):
+                    continue
+                if name == 'Prefetch_requests':
+                    try:
+                        last_requests = int(row.get('Sum.u64') or 0)
+                    except (TypeError, ValueError):
+                        pass
+                elif name == 'Prefetch_drops':
+                    try:
+                        last_drops = int(row.get('Sum.u64') or 0)
+                    except (TypeError, ValueError):
+                        pass
+
+        if last_requests is not None:
+            out['l1_prefetch_requests'] = last_requests
+        if last_drops is not None:
+            out['l1_prefetch_drops'] = last_drops
+    except Exception:
+        # Ignore CSV parsing errors; keep parser resilient
+        return out
+    return out
+
+
 def parse_log_file(log_file_path):
     """
     Parse a single log file and extract all relevant information.
@@ -292,25 +426,23 @@ def parse_log_file(log_file_path):
     try:
         with open(log_file_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
-        
+
         # Extract test case name from filename
         filename = os.path.basename(log_file_path)
-        # Remove the timestamp and .log extension
         test_case_match = re.match(r'(.+?)_(sat|unsat)_\d{8}_\d{6}\.log$', filename)
         if test_case_match:
             result['test_case'] = test_case_match.group(1)
             result['result'] = test_case_match.group(2).upper()
         else:
-            # Fallback: use filename without extension
             result['test_case'] = os.path.splitext(filename)[0]
-        
-        # Extract variables and clauses from "MAIN-> Problem:" line
+
+    # Extract variables and clauses
         problem_match = re.search(r'MAIN-> Problem: vars=(\d+) clauses=(\d+)', content)
         if problem_match:
             result['variables'] = int(problem_match.group(1))
             result['clauses'] = int(problem_match.group(2))
-        
-        # Extract memory usage from size lines
+
+        # Memory usage aggregation
         memory_patterns = [
             (r'VAR-> Size: \d+ variables, (\d+) bytes', 'variables'),
             (r'WATCH-> Size: \d+ watches, (\d+) bytes', 'watches'),
@@ -321,53 +453,47 @@ def parse_log_file(log_file_path):
             (r'HEAP-> Size: \d+ indices, (\d+) bytes', 'heap_indices'),
             (r'VAR_ACT-> Size: \d+ var activities, (\d+) bytes', 'var_activities')
         ]
-        
         total_bytes = 0
-        for pattern, component in memory_patterns:
-            match = re.search(pattern, content)
-            if match:
-                bytes_value = int(match.group(1))
-                total_bytes += bytes_value
-        
+        for pattern, _ in memory_patterns:
+            m = re.search(pattern, content)
+            if m:
+                total_bytes += int(m.group(1))
         result['total_memory_bytes'] = total_bytes
         result['total_memory_formatted'] = format_bytes(total_bytes)
-        
-        # Double-check result from the actual solver output
+
+        # Result sanity
         if 'UNSATISFIABLE' in content:
             result['result'] = 'UNSAT'
         elif 'SATISFIABLE' in content and 'UNSATISFIABLE' not in content:
             result['result'] = 'SAT'
-        
-        # Extract simulated time
+
+        # Simulated time
         time_match = re.search(r'Simulation is complete, simulated time: ([\d.]+)\s*(\w+)', content)
         if time_match:
             time_val = float(time_match.group(1))
             time_unit = time_match.group(2)
-            # Convert to milliseconds
             if time_unit == 'us':
                 time_val *= 0.001
             elif time_unit == 's':
                 time_val *= 1000
-            # Default assumption is ms
             result['sim_time_ms'] = time_val
-        
-        # Parse all sections
-        solver_stats = parse_solver_statistics(content)
-        result.update(solver_stats)
-        
-        cache_stats = parse_l1_cache_statistics(content)
-        result.update(cache_stats)
-        
-        frag_stats = parse_clauses_fragmentation(content)
-        result.update(frag_stats)
-        
-        cycle_stats = parse_cycle_statistics(content)
-        result.update(cycle_stats)
-        
-        # Add histogram parsing
-        histogram_stats = parse_parallel_histograms(content)
-        result.update(histogram_stats)
-        
+
+        # Also attempt to pull prefetch requests/drops from matching .stats.csv
+        try:
+            stats_csv_path = Path(log_file_path).parent / f"{result['test_case']}.stats.csv"
+            result.update(parse_stats_csv_for_prefetch(stats_csv_path))
+        except Exception:
+            pass
+
+        result.update(parse_solver_statistics(content))
+        result.update(parse_l1_cache_statistics(content))
+        result.update(parse_clauses_fragmentation(content))
+        result.update(parse_cycle_statistics(content))
+        result.update(parse_parallel_histograms(content))
+        result.update(parse_propagation_detail_statistics(content))
+        result.update(parse_watchers_occupancy_histogram(content))
+        result.update(parse_directed_prefetcher_statistics(content))
+
     except Exception as e:
         print(f"Error parsing {log_file_path}: {e}")
         return None

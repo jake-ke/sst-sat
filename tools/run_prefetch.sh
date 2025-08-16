@@ -177,7 +177,6 @@ log_message "SAT Competition Quick Test"
 log_message "Test run started at $(date)"
 log_message "Output directory: $LOGS_DIR"
 log_message "Parallel jobs: $MAX_JOBS"
-log_message "Timeout: 10 minutes (600 seconds)"
 log_message "RAMULATOR2 configuration: ${RAM2_CFG:-default}"
 log_message "L1 cache size: ${L1_SIZE:-default}"
 log_message "L1 cache latency: ${L1_LATENCY:-default}"
@@ -512,7 +511,7 @@ run_tests() {
     ALL_PIDS=("${(@)ALL_PIDS:#$monitor_pid}")
     
     # Process results from temporary file for statistics
-    while IFS="|" read -r filename result; do
+    while IFS="|" read -r filename result start_time end_time; do
         case "$result" in
             "PASSED")
                 passed=$((passed + 1))

@@ -32,6 +32,7 @@ def create_histogram_plots(data_points, output_dir='.'):
     # Filter logs with histogram data
     watchers_data = [d for d in data_points if 'watchers_bins' in d]
     variables_data = [d for d in data_points if 'variables_bins' in d]
+    occupancy_data = [d for d in data_points if 'watchers_occupancy_bins' in d]
     
     if not watchers_data:
         print("No watchers histogram data available")
@@ -41,8 +42,13 @@ def create_histogram_plots(data_points, output_dir='.'):
         print("No variables histogram data available")
         return
     
-    # Create figure with two subplots
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12))
+    # Create figure with two or three subplots depending on occupancy availability
+    if occupancy_data:
+        fig, axes = plt.subplots(3, 1, figsize=(14, 16))
+        ax1, ax2, ax3 = axes
+    else:
+        fig, axes = plt.subplots(2, 1, figsize=(14, 12))
+        ax1, ax2 = axes
     
     # Average the percentages across all logs
     # For watchers histogram
@@ -174,6 +180,58 @@ def create_histogram_plots(data_points, output_dir='.'):
                      textcoords="offset points",
                      ha='center', va='bottom',
                      fontsize=9, fontweight='bold')
+
+    # Plot Watchers Occupancy Histogram if available
+    if occupancy_data:
+        occ_bins = {}
+        occ_counts = {}
+        for log in occupancy_data:
+            bins = log.get('watchers_occupancy_bins', {})
+            for bin_key, values in bins.items():
+                if bin_key not in occ_bins:
+                    occ_bins[bin_key] = []
+                    occ_counts[bin_key] = []
+                occ_bins[bin_key].append(values['percentage'])
+                occ_counts[bin_key].append(values['samples'])
+
+        # Compute averages
+        occ_avg = {k: np.mean(v) for k, v in occ_bins.items()}
+        occ_count_avg = {k: np.mean(v) for k, v in occ_counts.items()}
+
+        # Sort bins for ordered plotting
+        sorted_occ_bins = sorted(occ_avg.items(), key=lambda x: (
+            float('inf') if x[0] == 'out_of_bounds' else 
+            (int(x[0].split('-')[0]) if isinstance(x[0], str) and '-' in x[0] else int(x[0]))
+        ))
+
+        occ_x, occ_y, occ_labels, occ_counts_list = [], [], [], []
+        for bin_key, avg_percent in sorted_occ_bins:
+            if bin_key == 'out_of_bounds':
+                occ_x.append(len(occ_x))
+                occ_labels.append('Out of\nbounds')
+            else:
+                occ_x.append(len(occ_x))
+                occ_labels.append(str(bin_key))
+            occ_y.append(avg_percent)
+            occ_counts_list.append(occ_count_avg[bin_key])
+
+        bars3 = ax3.bar(occ_x, occ_y, alpha=0.8, color='darkseagreen',
+                        edgecolor='black', linewidth=0.5)
+        ax3.set_xticks(occ_x)
+        ax3.set_xticklabels(occ_labels, rotation=45)
+        ax3.set_xlabel('Watchers per Clause (occupancy)')
+        ax3.set_ylabel('Percentage of Samples (%)')
+        ax3.set_title(f'Average Watchers Occupancy Distribution (from {len(occupancy_data)} logs)')
+        ax3.grid(True, axis='y', alpha=0.3)
+
+        for i, (bar, count) in enumerate(zip(bars3, occ_counts_list)):
+            height = bar.get_height()
+            ax3.annotate(f'{height:.1f}%\n({count:.0f})',
+                         xy=(bar.get_x() + bar.get_width() / 2, height),
+                         xytext=(0, 3),
+                         textcoords="offset points",
+                         ha='center', va='bottom',
+                         fontsize=9, fontweight='bold')
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'parallel_histograms.png'), dpi=300, bbox_inches='tight')

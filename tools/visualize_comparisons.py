@@ -7,6 +7,7 @@ Shows current vs backup performance for key metrics.
 import os
 import re
 import sys
+import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -92,6 +93,16 @@ def parse_log_file(filepath):
                     'restarts': result.get('restarts', 0),
                     'sim_time_ms': result.get('sim_time_ms', 0)
                 }
+
+                # Include L1 miss rate metrics (total and per-component)
+                for k, v in result.items():
+                    if isinstance(k, str) and k.startswith('l1_') and k.endswith('_miss_rate'):
+                        stats[k] = v
+
+                # Include propagation detail statistics (pct and cycles)
+                for k, v in result.items():
+                    if isinstance(k, str) and k.startswith('prop_') and (k.endswith('_pct') or k.endswith('_cycles')):
+                        stats[k] = v
                 return stats
             return None
                 
@@ -123,29 +134,24 @@ def load_all_logs(logs_dir):
     
     return pd.DataFrame(all_stats)
 
-def create_scatter_plots(df_merged):
-    """Create scatter plots comparing current vs backup performance."""
-    
-    print(f"Creating plots for {len(df_merged)} matching problems")
-    
-    if df_merged.empty:
-        print("No matching problems found!")
+def _plot_metrics_figure(df_merged, metrics, title, output_path):
+    """Reusable plotting helper for a list of metrics into a single figure."""
+    if not metrics:
         return
-    
-    # Metrics to compare
-    metrics = ['decisions', 'propagations', 'conflicts', 'learned', 'removed', 
-               'db_reductions', 'minimized', 'restarts', 'sim_time_ms']
-    
-    # Create 3x3 subplot grid
-    fig, axes = plt.subplots(3, 3, figsize=(18, 15))
-    fig.suptitle('SAT Solver Performance Comparison: Current vs Backup', fontsize=16, fontweight='bold')
-    
-    # Colors for different result types
-    colors = {'SAT': 'green', 'UNSAT': 'red', 'UNKNOWN': 'gray'}
+    n = len(metrics)
+    cols = 3
+    rows = int(np.ceil(n / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 5 * rows))
+    # Normalize axes to 2D array
+    if rows == 1 and cols == 1:
+        axes = np.array([[axes]])
+    elif rows == 1:
+        axes = np.array([axes])
+    fig.suptitle(title, fontsize=16, fontweight='bold')
     
     for i, metric in enumerate(metrics):
-        row = i // 3
-        col = i % 3
+        row = i // cols
+        col = i % cols
         ax = axes[row, col]
         
         current_col = f'{metric}_current'
@@ -235,16 +241,52 @@ def create_scatter_plots(df_merged):
                 ax.text(0.5, 0.5, 'No valid data', transform=ax.transAxes, 
                        horizontalalignment='center', verticalalignment='center', fontsize=12)
                 ax.set_title(f'{metric.replace("_", " ").title()}', fontsize=12)
-        else:
-            ax.text(0.5, 0.5, f'Data not available', transform=ax.transAxes, 
-                   horizontalalignment='center', verticalalignment='center', fontsize=12)
-            ax.set_title(f'{metric.replace("_", " ").title()}', fontsize=12)
+    else:
+        ax.text(0.5, 0.5, f'Data not available', transform=ax.transAxes, 
+            horizontalalignment='center', verticalalignment='center', fontsize=12)
+        ax.set_title(f'{metric.replace("_", " ").title()}', fontsize=12)
+
+    # Hide any unused subplots
+    total_axes = rows * cols
+    if total_axes > n:
+        # Flatten axes for easy hiding
+        flat_axes = axes.flatten() if isinstance(axes, np.ndarray) else [axes]
+        for j in range(n, total_axes):
+            flat_axes[j].axis('off')
     
-    plt.tight_layout()
-    plt.savefig('performance_scatter_plots.png', 
-                dpi=300, bbox_inches='tight')
-    print("\nScatter plots saved to: ./performance_scatter_plots.png")
-    plt.show()
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Saved plot: {output_path}")
+    plt.close(fig)
+
+
+def create_scatter_plots(df_merged, output_dir='.'):
+    """Create scatter plots comparing current vs backup performance. Generates separate figures for baseline, L1 miss rates, and propagation details."""
+    print(f"Creating plots for {len(df_merged)} matching problems")
+    if df_merged.empty:
+        print("No matching problems found!")
+        return
+
+    # Baseline metrics
+    baseline = ['decisions', 'propagations', 'conflicts', 'learned', 'removed',
+                'db_reductions', 'minimized', 'restarts', 'sim_time_ms']
+    # Discover additional metrics present in both current and backup
+    candidate_metrics = set()
+    for col in df_merged.columns:
+        if col.endswith('_current'):
+            base = col[:-8]
+            if f'{base}_backup' in df_merged.columns:
+                candidate_metrics.add(base)
+    l1_metrics = sorted([m for m in candidate_metrics if (m.startswith('l1_') and m.endswith('_miss_rate'))])
+    prop_metrics = sorted([m for m in candidate_metrics if m.startswith('prop_')])
+
+    os.makedirs(output_dir, exist_ok=True)
+    # Plot and save each figure
+    _plot_metrics_figure(df_merged, baseline, 'SAT Solver Performance Comparison: Current vs Backup', os.path.join(output_dir, 'performance_scatter_plots.png'))
+    if l1_metrics:
+        _plot_metrics_figure(df_merged, l1_metrics, 'L1 Miss Rates: Current vs Backup', os.path.join(output_dir, 'l1_miss_rates_scatter_plots.png'))
+    if prop_metrics:
+        _plot_metrics_figure(df_merged, prop_metrics, 'Propagation Detail: Current vs Backup', os.path.join(output_dir, 'propagation_detail_scatter_plots.png'))
 
 def save_comparison_to_csv(df_merged, output_file='comparison_results.csv'):
     """Save the comparison results to a CSV file."""
@@ -253,8 +295,16 @@ def save_comparison_to_csv(df_merged, output_file='comparison_results.csv'):
         return
     
     # Create a summary dataframe for CSV output
-    metrics = ['sim_time_ms', 'decisions', 'propagations', 'conflicts', 'learned', 'removed', 
-               'db_reductions', 'minimized', 'restarts']
+    baseline = ['sim_time_ms', 'decisions', 'propagations', 'conflicts', 'learned', 'removed', 
+                'db_reductions', 'minimized', 'restarts']
+    candidate_metrics = set()
+    for col in df_merged.columns:
+        if col.endswith('_current'):
+            base = col[:-8]
+            if f'{base}_backup' in df_merged.columns:
+                candidate_metrics.add(base)
+    extra = [m for m in candidate_metrics if (m.startswith('l1_') and m.endswith('_miss_rate')) or m.startswith('prop_')]
+    metrics = baseline + sorted(extra)
     
     # Start with problem names
     csv_data = df_merged[['problem']].copy()
@@ -278,14 +328,26 @@ def save_comparison_to_csv(df_merged, output_file='comparison_results.csv'):
 
 def print_summary_stats(df_merged):
     """Print summary statistics for the comparison."""
-    metrics = ['decisions', 'propagations', 'conflicts', 'learned', 'removed', 
-               'db_reductions', 'minimized', 'restarts', 'sim_time_ms']
+    baseline = ['decisions', 'propagations', 'conflicts', 'learned', 'removed', 
+                'db_reductions', 'minimized', 'restarts', 'sim_time_ms']
+    candidate_metrics = set()
+    for col in df_merged.columns:
+        if col.endswith('_current'):
+            base = col[:-8]
+            if f'{base}_backup' in df_merged.columns:
+                candidate_metrics.add(base)
+    extra = [m for m in candidate_metrics if (m.startswith('l1_') and m.endswith('_miss_rate')) or m.startswith('prop_')]
+    metrics = baseline + sorted(extra)
     
-    print("\n" + "="*80)
+    # Compute dynamic width for the metric column to reduce misalignment
+    metric_titles = [m.replace('_', ' ').title() for m in metrics]
+    metric_col_width = max(28, min(48, max(len(t) for t in metric_titles)))
+    print("\n" + "=" * (metric_col_width + 44))
     print("PERFORMANCE COMPARISON SUMMARY")
-    print("="*80)
-    print(f"{'Metric':<20} {'Improved':<10} {'Worse':<10} {'Same':<8} {'Avg Diff':<12}")
-    print("-"*80)
+    print("=" * (metric_col_width + 44))
+    header = f"{'Metric':<{metric_col_width}} {'Improved':>9} {'Worse':>9} {'Same':>7} {'Avg Diff':>14}"
+    print(header)
+    print("-" * (metric_col_width + 44))
     
     for metric in metrics:
         current_col = f'{metric}_current'
@@ -310,16 +372,21 @@ def print_summary_stats(df_merged):
                 avg_diff = diffs.mean()
 
                 metric_name = metric.replace('_', ' ').title()
-                print(f"{metric_name:<20} {improved:<10} {worse:<10} {same:<8} {avg_diff:<12.2f}")
+                print(f"{metric_name:<{metric_col_width}} {improved:>9} {worse:>9} {same:>7} {avg_diff:>14.2f}")
 
 def main():
     print("Starting visualization script...")
     print("Creating scatter plot comparisons...")
-    assert len(sys.argv) == 3, "Usage: python visualize_comparisons.py <logs_dir> <logs_dir_2>"
+    parser = argparse.ArgumentParser(description='Visualize SAT solver performance comparisons')
+    parser.add_argument('logs_dir', help='Directory containing current logs')
+    parser.add_argument('backup_dir', help='Directory containing backup logs')
+    parser.add_argument('--output-dir', default='.', help='Directory to save figures and CSV')
+    args = parser.parse_args()
     
     # Load and merge data
-    logs_dir = sys.argv[1]
-    backup_dir = sys.argv[2]
+    logs_dir = args.logs_dir
+    backup_dir = args.backup_dir
+    output_dir = args.output_dir
     
     print(f"Loading logs from: {logs_dir}")
     df_current = load_all_logs(logs_dir)
@@ -349,9 +416,11 @@ def main():
     print(f"Found {len(df_merged)} matching problems")
     
     if not df_merged.empty:
-        create_scatter_plots(df_merged)
+        create_scatter_plots(df_merged, output_dir=output_dir)
         print_summary_stats(df_merged)
-        save_comparison_to_csv(df_merged)
+        # Save CSV into output directory
+        os.makedirs(output_dir, exist_ok=True)
+        save_comparison_to_csv(df_merged, os.path.join(output_dir, 'comparison_results.csv'))
     else:
         print("No data available for comparison!")
 

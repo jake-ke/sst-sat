@@ -4,6 +4,13 @@ SAT Solver Result Parser
 
 This script parses log files from SAT solver runs and generates CSV reports.
 
+Enhancements:
+- Reads matching <test_case>.stats.csv to extract L1 prefetch requests/drops
+    from the last occurrence of rows starting with
+    "global_l1cache,Prefetch_requests," and "global_l1cache,Prefetch_drops,"
+    and records their Sum.u64 (column 7 in the CSV header) per test.
+- Adds prefetch statistics and propagation detail statistics to the CSV.
+
 Usage: python parse_results.py <results_folder> [output_file]
 """
 
@@ -13,42 +20,72 @@ from pathlib import Path
 from unified_parser import parse_log_directory, format_bytes
 
 
+# CSV prefetch parsing is handled in unified_parser now.
+
+
 def write_csv_report(results, output_file):
-    """Write detailed results to a CSV file."""
+    """Write detailed results to a CSV file with dynamic fields for extras."""
     # Sort results by total memory bytes before writing
-    sorted_results = sorted(results, key=lambda x: x['total_memory_bytes'])
-    
-    # Define column order: basic info, solver stats, L1 totals, then L1 components, then fragmentation, cycles
-    fieldnames = [
-        'test_case', 'result', 'variables', 'clauses', 
+    sorted_results = sorted(results, key=lambda x: x.get('total_memory_bytes', 0))
+
+    # Base columns: basic info, solver stats, L1 totals, then L1 components (total+miss%), then cycles (+ percentages)
+    base_fields = [
+        'test_case', 'result', 'variables', 'clauses',
         'total_memory_bytes', 'total_memory_formatted', 'sim_time_ms',
         # Solver statistics
         'decisions', 'propagations', 'conflicts', 'learned', 'removed',
-        'db_reductions', 'assigns', 'unassigns', 'minimized', 'restarts',
+        'db_reductions', 'minimized', 'restarts',
         # L1 cache totals first
         'l1_total_requests', 'l1_total_miss_rate',
         # L1 cache by data structure
-        'l1_heap_total', 'l1_heap_miss_rate', 'l1_heap_hits', 'l1_heap_misses',
-        'l1_variables_total', 'l1_variables_miss_rate', 'l1_variables_hits', 'l1_variables_misses',
-        'l1_watches_total', 'l1_watches_miss_rate', 'l1_watches_hits', 'l1_watches_misses',
-        'l1_clauses_total', 'l1_clauses_miss_rate', 'l1_clauses_hits', 'l1_clauses_misses',
-        'l1_varactivity_total', 'l1_varactivity_miss_rate', 'l1_varactivity_hits', 'l1_varactivity_misses',
-        # Fragmentation statistics
-        'heap_bytes', 'reserved_bytes', 'requested_bytes', 'allocated_bytes', 'wasted_bytes',
-        'current_frag_percent', 'peak_frag_percent',
+        'l1_heap_total', 'l1_heap_miss_rate',
+        'l1_variables_total', 'l1_variables_miss_rate',
+        'l1_watches_total', 'l1_watches_miss_rate',
+        'l1_clauses_total', 'l1_clauses_miss_rate',
+        'l1_varactivity_total', 'l1_varactivity_miss_rate',
         # Cycle statistics
         'propagate_cycles', 'analyze_cycles', 'minimize_cycles', 'backtrack_cycles',
-        'decision_cycles', 'reduce_db_cycles', 'restart_cycles', 'total_counted_cycles'
+        'decision_cycles', 'reduce_db_cycles', 'restart_cycles', 'total_counted_cycles',
+        # Cycle percentages (computed)
+        'propagate_cycles_pct', 'analyze_cycles_pct', 'minimize_cycles_pct', 'backtrack_cycles_pct',
+        'decision_cycles_pct', 'reduce_db_cycles_pct', 'restart_cycles_pct'
     ]
-    
+
+    # Extra fixed fields: directed prefetcher stats and CSV prefetch requests/drops
+    extra_fixed = [
+        'prefetches_issued', 'prefetches_used', 'prefetches_unused', 'prefetch_accuracy',
+    'l1_prefetch_requests', 'l1_prefetch_drops', 'l1_prefetch_drop_pct'
+    ]
+
+    # Dynamic propagation detail fields (union across results)
+    prop_fields = sorted({k for r in results for k in r.keys() if k.startswith('prop_')})
+
+    fieldnames = base_fields + extra_fixed + prop_fields
+
     with open(output_file, 'w', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        
+
+        cycle_names = [
+            'propagate_cycles', 'analyze_cycles', 'minimize_cycles', 'backtrack_cycles',
+            'decision_cycles', 'reduce_db_cycles', 'restart_cycles'
+        ]
+
         for result in sorted_results:
-            row = {}
-            for field in fieldnames:
-                row[field] = result.get(field, 0)
+            row = {field: result.get(field, 0) for field in fieldnames}
+
+            # Compute cycle percentages if total_counted_cycles present
+            total_cycles = result.get('total_counted_cycles', 0) or 0
+            for name in cycle_names:
+                pct_field = name.replace('_cycles', '_cycles_pct')
+                cycles = result.get(name, 0) or 0
+                row[pct_field] = (cycles / total_cycles * 100.0) if total_cycles > 0 else 0.0
+
+            # Compute prefetch drop percentage if requests present
+            req = result.get('l1_prefetch_requests', 0) or 0
+            drops = result.get('l1_prefetch_drops', 0) or 0
+            row['l1_prefetch_drop_pct'] = (drops / req * 100.0) if req > 0 else 0.0
+
             writer.writerow(row)
 
 
@@ -66,6 +103,8 @@ def parse_results_folder(folder_path, output_file=None):
     if not results:
         print(f"No valid log files found in {folder_path}")
         return
+
+    # unified_parser already enriches each result with CSV prefetch req/drops
     
     # Print parsing summary
     print(f"Successfully parsed: {len(results)} files")
@@ -114,6 +153,22 @@ def parse_results_folder(folder_path, output_file=None):
         print("Average miss rates by data structure:")
         for comp, miss_rate in component_stats.items():
             print(f"  {comp.capitalize()}: {miss_rate:.2f}%")
+
+    # Prefetch stats summary (DirectedPrefetcher + CSV requests/drops)
+    prefetch_results = [r for r in results if any(k in r for k in ('prefetches_issued','prefetches_used','prefetches_unused','prefetch_accuracy','l1_prefetch_requests','l1_prefetch_drops'))]
+    if prefetch_results:
+        avg_acc = sum(r.get('prefetch_accuracy', 0.0) for r in prefetch_results if r.get('prefetch_accuracy') is not None) / max(1, sum(1 for r in prefetch_results if 'prefetch_accuracy' in r))
+        avg_requests = sum(r.get('l1_prefetch_requests', 0) for r in prefetch_results) / len(prefetch_results)
+        avg_drops = sum(r.get('l1_prefetch_drops', 0) for r in prefetch_results) / len(prefetch_results)
+        print(f"\nPrefetch stats across problems: {len(prefetch_results)} with data")
+        print(f"Average Prefetch accuracy: {avg_acc:.2f}% (if present)")
+        print(f"Average L1 Prefetch requests (CSV): {avg_requests:.1f}")
+        print(f"Average L1 Prefetch drops (CSV): {avg_drops:.1f}")
+
+    # Propagation detail presence
+    prop_keys = sorted({k for r in results for k in r if k.startswith('prop_')})
+    if prop_keys:
+        print(f"\nPropagation detail statistics collected for {sum(1 for r in results if any(k in r for k in prop_keys))} problems.")
 
 
 def main():
