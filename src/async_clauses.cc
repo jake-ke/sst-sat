@@ -63,7 +63,7 @@ void Clauses::initialize(const std::vector<Clause>& clauses) {
                    size_, size_ * sizeof(Cref));
     
     // Calculate total size needed for original clauses
-    size_t total_memory = 0;
+    size_t total_memory = line_size;  // addr 0 is ClauseRef_Undef
     std::vector<Cref> addr_array(clauses.size());
     
     for (size_t i = 0; i < clauses.size(); i++) {
@@ -84,7 +84,7 @@ void Clauses::initialize(const std::vector<Clause>& clauses) {
     
     // Prepare buffer for all clause data - no headers/footers needed for original clauses
     std::vector<uint8_t> literals_buffer(total_memory);
-    size_t offset = 0;
+    size_t offset = line_size;  // Start after ClauseRef_Undef
     
     for (const auto& clause : clauses) {
         // num_lits and activity

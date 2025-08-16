@@ -202,7 +202,7 @@ global_cache.addParams({
     "cache_line_size"    : "64",
     "associativity"      : "8",
     "access_latency_cycles" : args.l1_latency,
-    "max_requests_per_cycle" : "2",
+    "max_requests_per_cycle" : "-1",
     "request_link_width" : "64B",
     "response_link_width" : "64B",
     "L1"                 : "1",
@@ -258,7 +258,7 @@ else:
     global_memory.addParams({
         "access_time" : args.mem_latency,
         "mem_size" : "4GiB",
-        "max_requests_per_cycle" : "1",
+        "max_requests_per_cycle" : "-1",
         "request_width" : "64",
     })
 
@@ -302,6 +302,19 @@ sst.enableStatisticsForComponentName("solver", [
     "restarts"
 ], {
     "type": "sst.AccumulatorStatistic",
+    "rate": "1s"
+})
+
+# Enable histogram statistic for watchers occupancy
+sst.enableStatisticsForComponentName("solver", [
+    "watcher_occ"
+], {
+    "type": "sst.HistogramStatistic",
+    "minvalue": "0",
+    "binwidth": "1", 
+    "numbins": "20",
+    "dumpbinsonoutput": "1",
+    "includeoutofbounds": "1",
     "rate": "1s"
 })
 

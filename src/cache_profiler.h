@@ -42,7 +42,6 @@ public:
         { "watches_base_addr", "Base address for watches data", "0x30000000" },
         { "clauses_cmd_base_addr", "Base address for clauses command data", "0x50000000" },
         { "var_act_base_addr", "Base address for variable activity data", "0x70000000" },
-        { "clause_act_base_addr", "Base address for clause activity data", "0x80000000" },
         { "verbose", "Verbosity level", "0" },
         { "exclude_cold_misses", "Exclude cold misses when counting cache misses", "0" }
     )
@@ -58,8 +57,6 @@ public:
         { "clauses_misses", "Number of clauses misses", "count", 1 },
         { "var_activity_hits", "Number of variable activity hits", "count", 1 },
         { "var_activity_misses", "Number of variable activity misses", "count", 1 },
-        { "cla_activity_hits", "Number of clause activity hits", "count", 1 },
-        { "cla_activity_misses", "Number of clause activity misses", "count", 1 },
     )
 
 private:
@@ -72,7 +69,6 @@ private:
     uint64_t watches_base_addr; 
     uint64_t clauses_cmd_base_addr;
     uint64_t var_act_base_addr;
-    uint64_t clause_act_base_addr;
     
     // Flag for excluding cold misses
     bool exclude_cold_misses;
@@ -91,10 +87,6 @@ private:
     Statistic<uint64_t>* clauses_misses;
     Statistic<uint64_t>* var_activity_hits;
     Statistic<uint64_t>* var_activity_misses;
-    Statistic<uint64_t>* cla_activity_hits;
-    Statistic<uint64_t>* cla_activity_misses;
-    Statistic<uint64_t>* other_hits;
-    Statistic<uint64_t>* other_misses;
 };
 
 } // namespace SATSolver

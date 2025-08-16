@@ -157,6 +157,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_db_reductions = registerStatistic<uint64_t>("db_reductions");
     stat_minimized_literals = registerStatistic<uint64_t>("minimized_literals");
     stat_restarts = registerStatistic<uint64_t>("restarts");
+    stat_watcher_occ = registerStatistic<uint64_t>("watcher_occ");
     stat_para_watchers = registerStatistic<uint64_t>("para_watchers");
     stat_para_vars = registerStatistic<uint64_t>("para_vars");
 
@@ -245,6 +246,8 @@ void SATSolver::finish() {
         getStatCount(stat_learned) - getStatCount(stat_removed));
     output.output("===========================================================================\n");
     
+    output.output("=========================[ Watchers Occupancy Histogram ]=================\n");
+    printHist(stat_watcher_occ);
     output.output("=========================[ Parallel Watchers Histogram ]=================\n");
     printHist(stat_para_watchers);
     output.output("===========================================================================\n");
@@ -997,35 +1000,45 @@ int SATSolver::unitPropagate() {
         
         // Measure time to read head pointer
         SST::Cycle_t start_headptr = getCurrentSimCycle() / 1000;
-        uint64_t head_addr = watches.readHeadPointer(watch_idx);
+        WatchMetaData wmd = watches.readMetaData(watch_idx);
         SST::Cycle_t end_headptr = getCurrentSimCycle() / 1000;
         cycles_read_headptr += (end_headptr - start_headptr);
+
+        if (qhead < trail.size()) {
+            Lit next_p = trail[qhead];
+            issuePrefetch(watches.watchesAddr(toWatchIndex(next_p)));
+        }
 
         output.verbose(CALL_INFO, 3, 0,
             "PROPAGATE: Processing watchers for literal %d\n", toInt(p));
 
-        uint64_t curr_addr = head_addr;
-        uint64_t prev_addr = 0;
+        bool do_prewatch = PRE_WATCHERS > 0;
+        uint32_t curr_addr = wmd.head_ptr;
+        uint32_t prev_addr = 0;
         WatcherBlock prev_block;
         
-        // Counter for watchers inspected in this propagation
-        uint64_t para_watchers = 0;
-        
+        uint64_t para_watchers = 0;  // watchers inspected in this propagation
+        uint64_t watcher_occ = 0;  // number of watchers residing in watch lists
+
         // Traverse the linked list
-        while (curr_addr != 0) {
-            // Read current block with timing
-            SST::Cycle_t start_block = getCurrentSimCycle() / 1000;
-            WatcherBlock curr_block = watches.readBlock(curr_addr);
-            SST::Cycle_t end_block = getCurrentSimCycle() / 1000;
-            cycles_read_watcher_blocks += (end_block - start_block);
-
-            uint64_t next_addr = curr_block.next_block;
+        while (curr_addr != 0 || do_prewatch) {
             bool block_modified = false;
+            WatcherBlock curr_block;
+            if (do_prewatch) {
+                curr_block.next_block = curr_addr;
+                for (int i = 0; i < PRE_WATCHERS; i++) {
+                    curr_block.nodes[i] = wmd.pre_watchers[i];
+                }
 
-            if (next_addr != 0) issuePrefetch(next_addr);
-            else if (qhead < trail.size()) {
-                Lit next_p = trail[qhead];
-                issuePrefetch(watches.watchesAddr(toWatchIndex(next_p)));
+                if (curr_addr != 0) issuePrefetch(curr_addr);
+            } else {
+                // Read current block with timing
+                SST::Cycle_t start_block = getCurrentSimCycle() / 1000;
+                curr_block = watches.readBlock(curr_addr);
+                SST::Cycle_t end_block = getCurrentSimCycle() / 1000;
+                cycles_read_watcher_blocks += (end_block - start_block);
+
+                if (curr_block.next_block != 0) issuePrefetch(curr_block.next_block);
             }
 
             // spawn sub-coroutines
@@ -1033,17 +1046,16 @@ int SATSolver::unitPropagate() {
             
             // Collect valid nodes that need processing
             std::vector<int> valid_nodes;
-            for (int i = 0; i < watches.getNodesPerBlock(); i++) {
-                assert(curr_block.valid_mask != 0 && "Invalid watch block with no valid nodes");
-                // Skip invalid nodes
-                if ((curr_block.valid_mask & (1 << i)) == 0) continue;
+            for (int i = 0; i < PROPAGATORS; i++) {
+                if (!curr_block.nodes[i].valid) continue;
+                watcher_occ++;
 
                 Lit blocker = curr_block.nodes[i].blocker;
                 if (var_assigned[var(blocker)] && value(blocker) == true) {
                     // Blocker is true, skip to next watcher
                     output.verbose(CALL_INFO, 4, 0,
                         "  Watch block[%d]: clause 0x%x, blocker %d = True, skipping\n", 
-                        i, curr_block.nodes[i].clause_addr, toInt(blocker));
+                        i, curr_block.nodes[i].getClauseAddr(), toInt(blocker));
                     continue;
                 }
                 
@@ -1144,8 +1156,10 @@ int SATSolver::unitPropagate() {
             cycles_polling += worker_polling[last_worker];
             
             // After processing all nodes in the block, check if we need to write it back
-            if (block_modified)
-                watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block);
+            if (block_modified) {
+                if (do_prewatch) watches.writePreWatchers(watch_idx, curr_block.nodes);
+                else watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block);
+            }
 
             if (conflict != ClauseRef_Undef) {
                 // Record watchers inspected up to the conflict point
@@ -1157,19 +1171,20 @@ int SATSolver::unitPropagate() {
             }
             
             // the current block is deleted if it has no valid nodes left
-            if (curr_block.valid_mask != 0) {
+            if (curr_block.countValidNodes() != 0 && !do_prewatch) {
                 prev_addr = curr_addr;
                 prev_block = curr_block;
             }
 
             // Move to next block
-            curr_addr = next_addr;
+            curr_addr = curr_block.next_block;
             block_modified = false;
+            do_prewatch = false;
         }
         
-        // Record total watchers inspected for this literal (entire linked list traversed)
         if (para_watchers > 0) stat_para_watchers->addData(para_watchers);
-        
+        stat_watcher_occ->addData(watcher_occ);
+
         // Check if the current batch of vars has been fully processed
         if (qhead == batch_end) {
             stat_para_vars->addData(batch_end - batch_start);
@@ -1194,7 +1209,7 @@ void SATSolver::subPropagate(
     uint64_t& polling_cycles
 ) {
     // Need to inspect the clause
-    Cref clause_addr = curr_block.nodes[i].clause_addr;
+    Cref clause_addr = curr_block.nodes[i].getClauseAddr();
     
     // Time the reading of clauses
     SST::Cycle_t start_read = getCurrentSimCycle() / 1000;
@@ -1208,7 +1223,7 @@ void SATSolver::subPropagate(
     output.verbose(CALL_INFO, 4, 0,
         "  Watch block[%d]: blocker:%d, clause 0x%x: %s\n",
         i, toInt(curr_block.nodes[i].blocker),
-        curr_block.nodes[i].clause_addr, printClause(c.literals).c_str());
+        clause_addr, printClause(c.literals).c_str());
 
     // Make sure the false literal (~p) is at position 1
     if (c[0] == not_p) {
@@ -1257,7 +1272,7 @@ void SATSolver::subPropagate(
             insert_watchers_cycles += (end_insert - start_insert);
             
             // Mark this node as invalid in the current block
-            curr_block.valid_mask &= ~(1 << i);
+            curr_block.nodes[i].valid = 0;
             block_modified = true;
             return;
         }

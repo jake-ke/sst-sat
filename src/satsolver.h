@@ -83,6 +83,7 @@ public:
         {"db_reductions", "Number of clause database reductions", "count", 1},
         {"minimized_literals", "Number of literals removed by clause minimization", "count", 1},
         {"restarts", "Number of restarts", "count", 1},
+        {"watcher_occ", "Number of watchers residing in watch lists", "count", 1},
         {"para_watchers", "Number of watchers inspected per propagation", "count", 1},
         {"para_vars", "Number of variables processed per unitPropagate before conflict", "count", 1},
     )
@@ -296,6 +297,7 @@ private:
     Statistic<uint64_t>* stat_db_reductions;
     Statistic<uint64_t>* stat_minimized_literals;
     Statistic<uint64_t>* stat_restarts;
+    Statistic<uint64_t>* stat_watcher_occ;
     Statistic<uint64_t>* stat_para_watchers;
     Statistic<uint64_t>* stat_para_vars;
 

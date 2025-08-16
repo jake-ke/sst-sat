@@ -26,7 +26,6 @@ CacheProfiler::CacheProfiler(ComponentId_t id, Params& params) : CacheListener(i
     watches_base_addr = std::stoull(params.find<std::string>("watches_base_addr", "0x30000000"), nullptr, 0);
     clauses_cmd_base_addr = std::stoull(params.find<std::string>("clauses_cmd_base_addr", "0x50000000"), nullptr, 0);
     var_act_base_addr = std::stoull(params.find<std::string>("var_act_base_addr", "0x70000000"), nullptr, 0);
-    clause_act_base_addr = std::stoull(params.find<std::string>("clause_act_base_addr", "0x80000000"), nullptr, 0);
 
     // Register statistics
     heap_hits = registerStatistic<uint64_t>("heap_hits");
@@ -39,14 +38,16 @@ CacheProfiler::CacheProfiler(ComponentId_t id, Params& params) : CacheListener(i
     clauses_misses = registerStatistic<uint64_t>("clauses_misses");
     var_activity_hits = registerStatistic<uint64_t>("var_activity_hits");
     var_activity_misses = registerStatistic<uint64_t>("var_activity_misses");
-    cla_activity_hits = registerStatistic<uint64_t>("cla_activity_hits");
-    cla_activity_misses = registerStatistic<uint64_t>("cla_activity_misses");
 }
 
 void CacheProfiler::notifyAccess(const CacheListenerNotification& notify) {
     const NotifyAccessType notifyType = notify.getAccessType();
     const NotifyResultType notifyResType = notify.getResultType();
     Addr addr = notify.getPhysicalAddress();
+
+    // if (notifyType == EVICT && addr < variables_base_addr) {
+    //     printf("Cache eviction at physical 0x%lx, result type %d\n", addr, notifyResType);
+    // }
 
     if (notifyType != READ && notifyType != WRITE) {
         return; // Only handle read and write accesses
@@ -63,13 +64,7 @@ void CacheProfiler::notifyAccess(const CacheListenerNotification& notify) {
     }
 
     // Identify which data structure this access belongs to and update statistics
-    if (addr >= clause_act_base_addr) {
-        // Clause activity
-        if (notifyResType == HIT) 
-            cla_activity_hits->addData(1);
-        else if (!exclude_cold_misses || !is_cold_miss)
-            cla_activity_misses->addData(1);
-    } else if (addr >= var_act_base_addr) {
+    if (addr >= var_act_base_addr) {
         // Variable activity
         if (notifyResType == HIT) 
             var_activity_hits->addData(1);
@@ -95,6 +90,8 @@ void CacheProfiler::notifyAccess(const CacheListenerNotification& notify) {
             variables_misses->addData(1);
     } else if (addr >= heap_base_addr) {
         // Heap
+        // if (notifyType == WRITE) printf("CACHE write: 0x%lx, physical 0x%lx, notifyResType %d\n", notify.getTargetAddress(), addr, notifyResType);
+        // else printf("CACHE read: 0x%lx, physical 0x%lx, notifyResType %d\n", notify.getTargetAddress(), addr, notifyResType);
         if (notifyResType == HIT) 
             heap_hits->addData(1);
         else if (!exclude_cold_misses || !is_cold_miss)
@@ -139,7 +136,6 @@ void CacheProfiler::printStats(Output& output) {
     printStats("Watches", watches_hits, watches_misses);
     printStats("Clauses", clauses_hits, clauses_misses);
     printStats("VarActivity", var_activity_hits, var_activity_misses);
-    printStats("ClaActivity", cla_activity_hits, cla_activity_misses);
     
     // Print total stats
     uint64_t total = total_hits + total_misses;
