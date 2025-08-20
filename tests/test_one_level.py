@@ -318,6 +318,19 @@ sst.enableStatisticsForComponentName("solver", [
     "rate": "1s"
 })
 
+# Enable histogram statistic for blocks visited during watcher insertion
+sst.enableStatisticsForComponentName("solver", [
+    "watcher_blocks"
+], {
+    "type": "sst.HistogramStatistic",
+    "minvalue": "0",
+    "binwidth": "1", 
+    "numbins": "20",
+    "dumpbinsonoutput": "1",
+    "includeoutofbounds": "1",
+    "rate": "1s"
+})
+
 # Enable histogram statistic for watchers inspected
 sst.enableStatisticsForComponentName("solver", [
     "para_watchers"

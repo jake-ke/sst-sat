@@ -33,29 +33,23 @@ def create_histogram_plots(data_points, output_dir='.'):
     watchers_data = [d for d in data_points if 'watchers_bins' in d]
     variables_data = [d for d in data_points if 'variables_bins' in d]
     occupancy_data = [d for d in data_points if 'watchers_occupancy_bins' in d]
-    
+    blocks_data = [d for d in data_points if 'watcher_blocks_visited_bins' in d]
+
     if not watchers_data:
         print("No watchers histogram data available")
         return
-        
     if not variables_data:
         print("No variables histogram data available")
         return
     
-    # Create figure with two or three subplots depending on occupancy availability
-    if occupancy_data:
-        fig, axes = plt.subplots(3, 1, figsize=(14, 16))
-        ax1, ax2, ax3 = axes
-    else:
-        fig, axes = plt.subplots(2, 1, figsize=(14, 12))
-        ax1, ax2 = axes
+    # 2x2 layout
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    ax1, ax2, ax3, ax4 = axes.ravel()
     
-    # Average the percentages across all logs
-    # For watchers histogram
+    # Average Watchers Histogram
     watchers_bins = {}
     watchers_counts = {}
     max_watcher_bin = 0
-    
     for log in watchers_data:
         bins = log.get('watchers_bins', {})
         for bin_key, values in bins.items():
@@ -64,18 +58,41 @@ def create_histogram_plots(data_points, output_dir='.'):
                 max_watcher_bin = max(max_watcher_bin, end)
             else:
                 max_watcher_bin = max(max_watcher_bin, int(bin_key) if bin_key != 'out_of_bounds' else 0)
-                
             if bin_key not in watchers_bins:
                 watchers_bins[bin_key] = []
                 watchers_counts[bin_key] = []
             watchers_bins[bin_key].append(values['percentage'])
             watchers_counts[bin_key].append(values['samples'])
+    watchers_avg = {k: np.mean(v) for k, v in watchers_bins.items()}
+    watchers_count_avg = {k: np.mean(v) for k, v in watchers_counts.items()}
+    sorted_watchers_bins = sorted(watchers_avg.items(), key=lambda x: (
+        float('inf') if x[0] == 'out_of_bounds' else
+        (int(x[0].split('-')[0]) if isinstance(x[0], str) and '-' in x[0] else int(x[0]))
+    ))
+    watchers_x, watchers_y, watchers_labels, watchers_counts_list = [], [], [], []
+    for bin_key, avg_percent in sorted_watchers_bins:
+        idx = len(watchers_x)
+        watchers_x.append(idx)
+        watchers_labels.append('Out of\nbounds' if bin_key == 'out_of_bounds' else str(bin_key))
+        watchers_y.append(avg_percent)
+        watchers_counts_list.append(watchers_count_avg[bin_key])
+    bars1 = ax1.bar(watchers_x, watchers_y, alpha=0.8, color='steelblue', edgecolor='black', linewidth=0.5)
+    ax1.set_xticks(watchers_x)
+    ax1.set_xticklabels(watchers_labels, rotation=45)
+    ax1.set_xlabel('Number of Watchers')
+    ax1.set_ylabel('Percentage of Samples (%)')
+    ax1.set_title(f'Average Parallel Watchers Distribution (from {len(watchers_data)} logs)')
+    ax1.grid(True, axis='y', alpha=0.3)
+    for bar, count in zip(bars1, watchers_counts_list):
+        h = bar.get_height()
+        ax1.annotate(f'{h:.1f}%\n({count:.0f})', xy=(bar.get_x() + bar.get_width() / 2, h),
+                     xytext=(0, 3), textcoords="offset points", ha='center', va='bottom',
+                     fontsize=9, fontweight='bold')
     
-    # For variables histogram
+    # Average Variables Histogram
     variables_bins = {}
     variables_counts = {}
     max_variable_bin = 0
-    
     for log in variables_data:
         bins = log.get('variables_bins', {})
         for bin_key, values in bins.items():
@@ -84,104 +101,38 @@ def create_histogram_plots(data_points, output_dir='.'):
                 max_variable_bin = max(max_variable_bin, end)
             else:
                 max_variable_bin = max(max_variable_bin, int(bin_key) if bin_key != 'out_of_bounds' else 0)
-                
             if bin_key not in variables_bins:
                 variables_bins[bin_key] = []
                 variables_counts[bin_key] = []
             variables_bins[bin_key].append(values['percentage'])
             variables_counts[bin_key].append(values['samples'])
-    
-    # Calculate averages for each bin
-    watchers_avg = {bin_key: np.mean(percentages) for bin_key, percentages in watchers_bins.items()}
-    variables_avg = {bin_key: np.mean(percentages) for bin_key, percentages in variables_bins.items()}
-    
-    # Calculate average counts
-    watchers_count_avg = {bin_key: np.mean(counts) for bin_key, counts in watchers_counts.items()}
-    variables_count_avg = {bin_key: np.mean(counts) for bin_key, counts in variables_counts.items()}
-    
-    # Sort bins for ordered plotting
-    sorted_watchers_bins = sorted(watchers_avg.items(), key=lambda x: (
-        float('inf') if x[0] == 'out_of_bounds' else 
-        (int(x[0].split('-')[0]) if isinstance(x[0], str) and '-' in x[0] else int(x[0]))
-    ))
-    
+    variables_avg = {k: np.mean(v) for k, v in variables_bins.items()}
+    variables_count_avg = {k: np.mean(v) for k, v in variables_counts.items()}
     sorted_variables_bins = sorted(variables_avg.items(), key=lambda x: (
-        float('inf') if x[0] == 'out_of_bounds' else 
+        float('inf') if x[0] == 'out_of_bounds' else
         (int(x[0].split('-')[0]) if isinstance(x[0], str) and '-' in x[0] else int(x[0]))
     ))
-    
-    # Prepare data for plotting
-    watchers_x = []
-    watchers_y = []
-    watchers_labels = []
-    watchers_counts = []
-    
-    for bin_key, avg_percent in sorted_watchers_bins:
-        if bin_key == 'out_of_bounds':
-            watchers_x.append(len(watchers_x))
-            watchers_labels.append('Out of\nbounds')
-        else:
-            watchers_x.append(len(watchers_x))
-            watchers_labels.append(str(bin_key))
-        watchers_y.append(avg_percent)
-        watchers_counts.append(watchers_count_avg[bin_key])
-    
-    variables_x = []
-    variables_y = []
-    variables_labels = []
-    variables_counts = []
-    
+    variables_x, variables_y, variables_labels, variables_counts_list = [], [], [], []
     for bin_key, avg_percent in sorted_variables_bins:
-        if bin_key == 'out_of_bounds':
-            variables_x.append(len(variables_x))
-            variables_labels.append('Out of\nbounds')
-        else:
-            variables_x.append(len(variables_x))
-            variables_labels.append(str(bin_key))
+        idx = len(variables_x)
+        variables_x.append(idx)
+        variables_labels.append('Out of\nbounds' if bin_key == 'out_of_bounds' else str(bin_key))
         variables_y.append(avg_percent)
-        variables_counts.append(variables_count_avg[bin_key])
-    
-    # Plot Watchers Histogram - use consistent color for all bars
-    bars1 = ax1.bar(watchers_x, watchers_y, alpha=0.8, color='steelblue', 
-                   edgecolor='black', linewidth=0.5)
-    ax1.set_xticks(watchers_x)
-    ax1.set_xticklabels(watchers_labels, rotation=45)
-    ax1.set_xlabel('Number of Watchers')
-    ax1.set_ylabel('Percentage of Samples (%)')
-    ax1.set_title(f'Average Parallel Watchers Distribution (from {len(watchers_data)} logs)')
-    ax1.grid(True, axis='y', alpha=0.3)
-    
-    # Add both count and percentage labels on top of each bar
-    for i, (bar, count) in enumerate(zip(bars1, watchers_counts)):
-        height = bar.get_height()
-        ax1.annotate(f'{height:.1f}%\n({count:.0f})',
-                     xy=(bar.get_x() + bar.get_width() / 2, height),
-                     xytext=(0, 3),  # 3 points vertical offset
-                     textcoords="offset points",
-                     ha='center', va='bottom',
-                     fontsize=9, fontweight='bold')
-    
-    # Plot Variables Histogram - use consistent color for all bars
-    bars2 = ax2.bar(variables_x, variables_y, alpha=0.8, color='indianred',
-                   edgecolor='black', linewidth=0.5)
+        variables_counts_list.append(variables_count_avg[bin_key])
+    bars2 = ax2.bar(variables_x, variables_y, alpha=0.8, color='indianred', edgecolor='black', linewidth=0.5)
     ax2.set_xticks(variables_x)
     ax2.set_xticklabels(variables_labels, rotation=45)
     ax2.set_xlabel('Number of Variables')
     ax2.set_ylabel('Percentage of Samples (%)')
     ax2.set_title(f'Average Parallel Variables Distribution (from {len(variables_data)} logs)')
     ax2.grid(True, axis='y', alpha=0.3)
-    
-    # Add both count and percentage labels on top of each bar
-    for i, (bar, count) in enumerate(zip(bars2, variables_counts)):
-        height = bar.get_height()
-        ax2.annotate(f'{height:.1f}%\n({count:.0f})',
-                     xy=(bar.get_x() + bar.get_width() / 2, height),
-                     xytext=(0, 3),  # 3 points vertical offset
-                     textcoords="offset points",
-                     ha='center', va='bottom',
+    for bar, count in zip(bars2, variables_counts_list):
+        h = bar.get_height()
+        ax2.annotate(f'{h:.1f}%\n({count:.0f})', xy=(bar.get_x() + bar.get_width() / 2, h),
+                     xytext=(0, 3), textcoords="offset points", ha='center', va='bottom',
                      fontsize=9, fontweight='bold')
 
-    # Plot Watchers Occupancy Histogram if available
+    # Watchers Occupancy Histogram (subplot 3)
     if occupancy_data:
         occ_bins = {}
         occ_counts = {}
@@ -193,46 +144,76 @@ def create_histogram_plots(data_points, output_dir='.'):
                     occ_counts[bin_key] = []
                 occ_bins[bin_key].append(values['percentage'])
                 occ_counts[bin_key].append(values['samples'])
-
-        # Compute averages
         occ_avg = {k: np.mean(v) for k, v in occ_bins.items()}
         occ_count_avg = {k: np.mean(v) for k, v in occ_counts.items()}
-
-        # Sort bins for ordered plotting
         sorted_occ_bins = sorted(occ_avg.items(), key=lambda x: (
-            float('inf') if x[0] == 'out_of_bounds' else 
+            float('inf') if x[0] == 'out_of_bounds' else
             (int(x[0].split('-')[0]) if isinstance(x[0], str) and '-' in x[0] else int(x[0]))
         ))
-
         occ_x, occ_y, occ_labels, occ_counts_list = [], [], [], []
         for bin_key, avg_percent in sorted_occ_bins:
-            if bin_key == 'out_of_bounds':
-                occ_x.append(len(occ_x))
-                occ_labels.append('Out of\nbounds')
-            else:
-                occ_x.append(len(occ_x))
-                occ_labels.append(str(bin_key))
+            idx = len(occ_x)
+            occ_x.append(idx)
+            occ_labels.append('Out of\nbounds' if bin_key == 'out_of_bounds' else str(bin_key))
             occ_y.append(avg_percent)
             occ_counts_list.append(occ_count_avg[bin_key])
-
-        bars3 = ax3.bar(occ_x, occ_y, alpha=0.8, color='darkseagreen',
-                        edgecolor='black', linewidth=0.5)
+        bars3 = ax3.bar(occ_x, occ_y, alpha=0.8, color='darkseagreen', edgecolor='black', linewidth=0.5)
         ax3.set_xticks(occ_x)
         ax3.set_xticklabels(occ_labels, rotation=45)
         ax3.set_xlabel('Watchers per Clause (occupancy)')
         ax3.set_ylabel('Percentage of Samples (%)')
         ax3.set_title(f'Average Watchers Occupancy Distribution (from {len(occupancy_data)} logs)')
         ax3.grid(True, axis='y', alpha=0.3)
-
-        for i, (bar, count) in enumerate(zip(bars3, occ_counts_list)):
-            height = bar.get_height()
-            ax3.annotate(f'{height:.1f}%\n({count:.0f})',
-                         xy=(bar.get_x() + bar.get_width() / 2, height),
-                         xytext=(0, 3),
-                         textcoords="offset points",
-                         ha='center', va='bottom',
+        for bar, count in zip(bars3, occ_counts_list):
+            h = bar.get_height()
+            ax3.annotate(f'{h:.1f}%\n({count:.0f})', xy=(bar.get_x() + bar.get_width() / 2, h),
+                         xytext=(0, 3), textcoords="offset points", ha='center', va='bottom',
                          fontsize=9, fontweight='bold')
-    
+    else:
+        ax3.axis('off')
+        ax3.text(0.5, 0.5, 'No watchers occupancy data', ha='center', va='center', fontsize=12)
+
+    # Watcher Blocks Visited Histogram (subplot 4)
+    if blocks_data:
+        blk_bins = {}
+        blk_counts = {}
+        for log in blocks_data:
+            bins = log.get('watcher_blocks_visited_bins', {})
+            for bin_key, values in bins.items():
+                if bin_key not in blk_bins:
+                    blk_bins[bin_key] = []
+                    blk_counts[bin_key] = []
+                blk_bins[bin_key].append(values['percentage'])
+                blk_counts[bin_key].append(values['samples'])
+        blk_avg = {k: np.mean(v) for k, v in blk_bins.items()}
+        blk_count_avg = {k: np.mean(v) for k, v in blk_counts.items()}
+        sorted_blk_bins = sorted(blk_avg.items(), key=lambda x: (
+            float('inf') if x[0] == 'out_of_bounds' else
+            (int(x[0].split('-')[0]) if isinstance(x[0], str) and '-' in x[0] else int(x[0]))
+        ))
+        blk_x, blk_y, blk_labels, blk_counts_list = [], [], [], []
+        for bin_key, avg_percent in sorted_blk_bins:
+            idx = len(blk_x)
+            blk_x.append(idx)
+            blk_labels.append('Out of\nbounds' if bin_key == 'out_of_bounds' else str(bin_key))
+            blk_y.append(avg_percent)
+            blk_counts_list.append(blk_count_avg[bin_key])
+        bars4 = ax4.bar(blk_x, blk_y, alpha=0.8, color='mediumpurple', edgecolor='black', linewidth=0.5)
+        ax4.set_xticks(blk_x)
+        ax4.set_xticklabels(blk_labels, rotation=45)
+        ax4.set_xlabel('Visited Watcher Blocks')
+        ax4.set_ylabel('Percentage of Samples (%)')
+        ax4.set_title(f'Average Watcher Blocks Visited Distribution (from {len(blocks_data)} logs)')
+        ax4.grid(True, axis='y', alpha=0.3)
+        for bar, count in zip(bars4, blk_counts_list):
+            h = bar.get_height()
+            ax4.annotate(f'{h:.1f}%\n({count:.0f})', xy=(bar.get_x() + bar.get_width() / 2, h),
+                         xytext=(0, 3), textcoords="offset points", ha='center', va='bottom',
+                         fontsize=9, fontweight='bold')
+    else:
+        ax4.axis('off')
+        ax4.text(0.5, 0.5, 'No watcher blocks visited data', ha='center', va='center', fontsize=12)
+
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'parallel_histograms.png'), dpi=300, bbox_inches='tight')
     print(f"Histogram plots saved to: {os.path.join(output_dir, 'parallel_histograms.png')}")

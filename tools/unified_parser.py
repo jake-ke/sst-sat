@@ -177,93 +177,37 @@ def parse_cycle_statistics(content):
     return cycle_stats
 
 
-def parse_parallel_histograms(content):
-    """Parse Parallel Watchers and Variables Histogram sections."""
-    histogram_stats = {}
-    
-    # Parse Watchers Histogram
-    watchers_section = re.search(
-        r'=+\[ Parallel Watchers Histogram \]=+\n(.*?)\n=+',
-        content, re.DOTALL
-    )
-    
-    if watchers_section:
-        watchers_text = watchers_section.group(1)
-        
-        # Get total samples
-        total_match = re.search(r'Total samples: (\d+)', watchers_text)
-        if total_match:
-            histogram_stats['watchers_total_samples'] = int(total_match.group(1))
-        
-        # Parse each bin
-        bins = {}
-        bin_pattern = r'Bin \[\s*(\d+)-\s*(\d+)\]:\s+(\d+) samples \(([\d.]+)%\)'
-        for match in re.finditer(bin_pattern, watchers_text):
-            bin_start = int(match.group(1))
-            bin_end = int(match.group(2))
-            samples = int(match.group(3))
-            percentage = float(match.group(4))
-            
-            # Use bin start as key for single-value bins
-            if bin_start == bin_end:
-                bin_key = bin_start
-            else:
-                bin_key = f"{bin_start}-{bin_end}"
-                
-            bins[bin_key] = {'samples': samples, 'percentage': percentage}
-        
-        # Parse out of bounds
-        out_of_bounds_match = re.search(r'Out of bounds:\s+(\d+) samples \(([\d.]+)%\)', watchers_text)
-        if out_of_bounds_match:
-            bins['out_of_bounds'] = {
-                'samples': int(out_of_bounds_match.group(1)),
-                'percentage': float(out_of_bounds_match.group(2))
-            }
-            
-        histogram_stats['watchers_bins'] = bins
-    
-    # Parse Variables Histogram
-    variables_section = re.search(
-        r'=+\[ Parallel Variables Histogram \]=+\n(.*?)\n=+',
-        content, re.DOTALL
-    )
-    
-    if variables_section:
-        variables_text = variables_section.group(1)
-        
-        # Get total samples
-        total_match = re.search(r'Total samples: (\d+)', variables_text)
-        if total_match:
-            histogram_stats['variables_total_samples'] = int(total_match.group(1))
-        
-        # Parse each bin
-        bins = {}
-        bin_pattern = r'Bin \[\s*(\d+)-\s*(\d+)\]:\s+(\d+) samples \(([\d.]+)%\)'
-        for match in re.finditer(bin_pattern, variables_text):
-            bin_start = int(match.group(1))
-            bin_end = int(match.group(2))
-            samples = int(match.group(3))
-            percentage = float(match.group(4))
-            
-            # Use bin start as key for single-value bins
-            if bin_start == bin_end:
-                bin_key = bin_start
-            else:
-                bin_key = f"{bin_start}-{bin_end}"
-                
-            bins[bin_key] = {'samples': samples, 'percentage': percentage}
-        
-        # Parse out of bounds
-        out_of_bounds_match = re.search(r'Out of bounds:\s+(\d+) samples \(([\d.]+)%\)', variables_text)
-        if out_of_bounds_match:
-            bins['out_of_bounds'] = {
-                'samples': int(out_of_bounds_match.group(1)),
-                'percentage': float(out_of_bounds_match.group(2))
-            }
-            
-        histogram_stats['variables_bins'] = bins
-    
-    return histogram_stats
+def parse_histogram(content, section_title: str, key_prefix: str):
+    """Generic histogram parser for sections with 'Total samples' and 'Bin' lines."""
+    out = {}
+    section = re.search(rf"=+\[\s*{re.escape(section_title)}\s*\]=+\n(.*?)\n=+", content, re.DOTALL)
+    if not section:
+        return out
+
+    text = section.group(1)
+    total_match = re.search(r"Total samples:\s*(\d+)", text)
+    if total_match:
+        out[f"{key_prefix}_total_samples"] = int(total_match.group(1))
+
+    bins = {}
+    # Ranged bins like [ 0- 0] or [ 3- 7]
+    bin_pattern = r"Bin \[\s*(\d+)\s*-\s*(\d+)\s*\]:\s*(\d+)\s+samples \(([\d.]+)%\)"
+    for m in re.finditer(bin_pattern, text):
+        start = int(m.group(1))
+        end = int(m.group(2))
+        samples = int(m.group(3))
+        pct = float(m.group(4))
+        key = start if start == end else f"{start}-{end}"
+        bins[key] = {"samples": samples, "percentage": pct}
+
+    # Optional out-of-bounds
+    oob = re.search(r"Out of bounds:\s*(\d+)\s+samples \(([\d.]+)%\)", text)
+    if oob:
+        bins["out_of_bounds"] = {"samples": int(oob.group(1)), "percentage": float(oob.group(2))}
+
+    if bins:
+        out[f"{key_prefix}_bins"] = bins
+    return out
 
 
 def parse_propagation_detail_statistics(content):
@@ -289,48 +233,6 @@ def parse_propagation_detail_statistics(content):
             # Skip malformed numbers
             continue
     return stats
-
-
-def parse_watchers_occupancy_histogram(content):
-    """Parse the Watchers Occupancy Histogram section."""
-    out = {}
-    section = re.search(r"=+\[\s*Watchers Occupancy Histogram\s*\]=+\n(.*?)\n=+", content, re.DOTALL)
-    if not section:
-        return out
-
-    text = section.group(1)
-    total_match = re.search(r"Total samples:\s*(\d+)", text)
-    if total_match:
-        out['watchers_occupancy_total_samples'] = int(total_match.group(1))
-
-    bins = {}
-    # Pattern for ranges like [ 0- 0] or [ 3- 7]
-    bin_pattern = r"Bin \[\s*(\d+)\s*-\s*(\d+)\]:\s*(\d+) samples \(([\d.]+)%\)"
-    for m in re.finditer(bin_pattern, text):
-        start = int(m.group(1))
-        end = int(m.group(2))
-        samples = int(m.group(3))
-        pct = float(m.group(4))
-        if start == end:
-            key = str(start)
-        else:
-            key = f"{start}-{end}"
-        bins[key] = {"samples": samples, "percentage": pct}
-
-    # Fallback for formats like "Bin [0]: ..." if ever present
-    if not bins:
-        single_pattern = r"Bin \[\s*(\d+)\s*\]:\s*(\d+) samples \(([\d.]+)%\)"
-        for m in re.finditer(single_pattern, text):
-            idx = str(int(m.group(1)))
-            bins[idx] = {"samples": int(m.group(2)), "percentage": float(m.group(3))}
-
-    oob = re.search(r"Out of bounds:\s*(\d+) samples \(([\d.]+)%\)", text)
-    if oob:
-        bins['out_of_bounds'] = {"samples": int(oob.group(1)), "percentage": float(oob.group(2))}
-
-    if bins:
-        out['watchers_occupancy_bins'] = bins
-    return out
 
 
 def parse_directed_prefetcher_statistics(content):
@@ -435,7 +337,6 @@ def parse_log_file(log_file_path):
             result['result'] = test_case_match.group(2).upper()
         else:
             result['test_case'] = os.path.splitext(filename)[0]
-
     # Extract variables and clauses
         problem_match = re.search(r'MAIN-> Problem: vars=(\d+) clauses=(\d+)', content)
         if problem_match:
@@ -489,11 +390,15 @@ def parse_log_file(log_file_path):
         result.update(parse_l1_cache_statistics(content))
         result.update(parse_clauses_fragmentation(content))
         result.update(parse_cycle_statistics(content))
-        result.update(parse_parallel_histograms(content))
-        result.update(parse_propagation_detail_statistics(content))
-        result.update(parse_watchers_occupancy_histogram(content))
-        result.update(parse_directed_prefetcher_statistics(content))
 
+        # Unified histogram parsing
+        result.update(parse_histogram(content, 'Parallel Watchers Histogram', 'watchers'))
+        result.update(parse_histogram(content, 'Parallel Variables Histogram', 'variables'))
+        result.update(parse_histogram(content, 'Watchers Occupancy Histogram', 'watchers_occupancy'))
+        result.update(parse_histogram(content, 'Watcher Blocks Visited Histogram', 'watcher_blocks_visited'))
+
+        result.update(parse_propagation_detail_statistics(content))
+        result.update(parse_directed_prefetcher_statistics(content))
     except Exception as e:
         print(f"Error parsing {log_file_path}: {e}")
         return None
@@ -560,3 +465,4 @@ def get_cache_size_from_directory(directory_name):
     }
     
     return size_num * multipliers.get(size_unit, 1)
+

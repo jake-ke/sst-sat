@@ -158,6 +158,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_minimized_literals = registerStatistic<uint64_t>("minimized_literals");
     stat_restarts = registerStatistic<uint64_t>("restarts");
     stat_watcher_occ = registerStatistic<uint64_t>("watcher_occ");
+    stat_watcher_blocks = registerStatistic<uint64_t>("watcher_blocks");
     stat_para_watchers = registerStatistic<uint64_t>("para_watchers");
     stat_para_vars = registerStatistic<uint64_t>("para_vars");
 
@@ -246,17 +247,42 @@ void SATSolver::finish() {
         getStatCount(stat_learned) - getStatCount(stat_removed));
     output.output("===========================================================================\n");
     
-    output.output("=========================[ Watchers Occupancy Histogram ]=================\n");
-    printHist(stat_watcher_occ);
-    output.output("=========================[ Parallel Watchers Histogram ]=================\n");
-    printHist(stat_para_watchers);
-    output.output("===========================================================================\n");
-    output.output("=========================[ Parallel Variables Histogram ]================\n");
-    printHist(stat_para_vars);
-    output.output("===========================================================================\n");
-    output.output("=========================[ Clauses Fragmentation ]=========================\n");
-    clauses.printFragStats();
-    output.output("===========================================================================\n");
+    // Only print histograms if they have data
+    if (auto* hist_stat_occ = dynamic_cast<HistogramStatistic<uint64_t>*>(stat_watcher_occ)) {
+        if (hist_stat_occ->getCollectionCount() > 0) {
+            output.output("=========================[ Watchers Occupancy Histogram ]=================\n");
+            printHist(stat_watcher_occ);
+            output.output("===========================================================================\n");
+        }
+    }
+
+    if (auto* hist_stat_blocks = dynamic_cast<HistogramStatistic<uint64_t>*>(stat_watcher_blocks)) {
+        if (hist_stat_blocks->getCollectionCount() > 0) {
+            output.output("=========================[ Watcher Blocks Visited Histogram ]=============\n");
+            printHist(stat_watcher_blocks);
+            output.output("===========================================================================\n");
+        }
+    }
+    
+    if (auto* hist_stat_para = dynamic_cast<HistogramStatistic<uint64_t>*>(stat_para_watchers)) {
+        if (hist_stat_para->getCollectionCount() > 0) {
+            output.output("=========================[ Parallel Watchers Histogram ]=================\n");
+            printHist(stat_para_watchers);
+            output.output("===========================================================================\n");
+        }
+    }
+    
+    if (auto* hist_stat_vars = dynamic_cast<HistogramStatistic<uint64_t>*>(stat_para_vars)) {
+        if (hist_stat_vars->getCollectionCount() > 0) {
+            output.output("=========================[ Parallel Variables Histogram ]================\n");
+            printHist(stat_para_vars);
+            output.output("===========================================================================\n");
+        }
+    }
+    
+    // output.output("=========================[ Clauses Fragmentation ]=========================\n");
+    // clauses.printFragStats();
+    // output.output("===========================================================================\n");
     
     uint64_t total_counted = cycles_propagate + cycles_analyze + cycles_minimize +
                             cycles_backtrack + cycles_decision + cycles_reduce + cycles_restart;
@@ -1267,9 +1293,12 @@ void SATSolver::subPropagate(
             
             // Time spent inserting watchers
             SST::Cycle_t start_insert = getCurrentSimCycle() / 1000;
-            watches.insertWatcher(toWatchIndex(~c[1]), clause_addr, first, worker_id);
+            int block_visits = watches.insertWatcher(toWatchIndex(~c[1]), clause_addr, first, worker_id);
             SST::Cycle_t end_insert = getCurrentSimCycle() / 1000;
             insert_watchers_cycles += (end_insert - start_insert);
+            
+            // Record block visits statistics
+            stat_watcher_blocks->addData(block_visits);
             
             // Mark this node as invalid in the current block
             curr_block.nodes[i].valid = 0;

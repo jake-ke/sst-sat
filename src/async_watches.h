@@ -96,7 +96,7 @@ public:
     void updateBlock(int lit_idx, uint32_t prev_addr, uint32_t curr_addr, 
                      WatcherBlock& prev_block, WatcherBlock& curr_block);
     void initWatches(size_t watch_count, std::vector<Clause>& clauses);
-    void insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worker_id = 0);
+    int insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worker_id = 0);
     void removeWatcher(int lit_idx, Cref clause_addr, int worker_id = 0);
 
     // helper functions

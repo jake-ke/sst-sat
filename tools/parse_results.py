@@ -54,13 +54,21 @@ def write_csv_report(results, output_file):
     # Extra fixed fields: directed prefetcher stats and CSV prefetch requests/drops
     extra_fixed = [
         'prefetches_issued', 'prefetches_used', 'prefetches_unused', 'prefetch_accuracy',
-    'l1_prefetch_requests', 'l1_prefetch_drops', 'l1_prefetch_drop_pct'
+        'l1_prefetch_requests', 'l1_prefetch_drops', 'l1_prefetch_drop_pct'
+    ]
+
+    # Add Watcher Blocks Visited distribution (percentages)
+    wbv_fields = [
+        'watcher_blocks_visited_1_pct',
+        'watcher_blocks_visited_2_pct',
+        'watcher_blocks_visited_3_pct',
+        'watcher_blocks_visited_gt3_pct',
     ]
 
     # Dynamic propagation detail fields (union across results)
     prop_fields = sorted({k for r in results for k in r.keys() if k.startswith('prop_')})
 
-    fieldnames = base_fields + extra_fixed + prop_fields
+    fieldnames = base_fields + extra_fixed + wbv_fields + prop_fields
 
     with open(output_file, 'w', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -85,6 +93,29 @@ def write_csv_report(results, output_file):
             req = result.get('l1_prefetch_requests', 0) or 0
             drops = result.get('l1_prefetch_drops', 0) or 0
             row['l1_prefetch_drop_pct'] = (drops / req * 100.0) if req > 0 else 0.0
+
+            # Compute Watcher Blocks Visited distribution percentages
+            wbv_bins = result.get('watcher_blocks_visited_bins', {}) or {}
+            def pct_for(key):
+                v = wbv_bins.get(key)
+                return float(v.get('percentage')) if isinstance(v, dict) and 'percentage' in v else 0.0
+
+            row['watcher_blocks_visited_1_pct'] = pct_for(1)
+            row['watcher_blocks_visited_2_pct'] = pct_for(2)
+            row['watcher_blocks_visited_3_pct'] = pct_for(3)
+
+            gt3_pct = 0.0
+            for k, v in wbv_bins.items():
+                # Include Out of bounds values in >3 bucket
+                if k == 'out_of_bounds':
+                    gt3_pct += float(v.get('percentage', 0.0))
+                if isinstance(k, int) and k >= 4:
+                    gt3_pct += float(v.get('percentage', 0.0))
+                elif isinstance(k, str) and '-' in k:
+                    start = int(k.split('-')[0])
+                    if start >= 4:
+                        gt3_pct += float(v.get('percentage', 0.0))
+            row['watcher_blocks_visited_gt3_pct'] = gt3_pct
 
             writer.writerow(row)
 

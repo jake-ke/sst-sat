@@ -201,11 +201,13 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
 }
 
 // Insert a new watcher for a literal
-void Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worker_id) {
+int Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worker_id) {
     if (busy.find(lit_idx) != busy.end()) {
         output.fatal(CALL_INFO, -1, "Watches: Already busy with var %d\n", lit_idx/2);
     }
     busy.insert(lit_idx);
+    
+    int block_visits = 1; // Start with 1 for metadata read
 
     // Read current metadata
     WatchMetaData metadata = readMetaData(lit_idx, worker_id);
@@ -221,7 +223,7 @@ void Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int work
             output.verbose(CALL_INFO, 7, 0, 
                 "Worker[%d] Inserted watcher in pre_watcher[%d], clause 0x%x, var %d\n", 
                 worker_id, i, clause_addr, lit_idx/2);
-            return;
+            return block_visits;
         }
     }
 
@@ -233,6 +235,7 @@ void Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int work
         WatcherBlock new_block;
         new_block.nodes[0] = WatcherNode(clause_addr, blocker);
         writeBlock(new_block_addr, new_block);
+        block_visits++; // Count new block write
         metadata.head_ptr = new_block_addr;
         metadata.size++;
         writeMetaData(lit_idx, metadata);
@@ -241,12 +244,13 @@ void Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int work
         output.verbose(CALL_INFO, 7, 0, 
             "Worker[%d] Inserted watcher in empty block list, clause 0x%x, var %d\n", 
             worker_id, clause_addr, lit_idx/2);
-        return;
+        return block_visits;
     }
     
     // Case 3: Search all blocks for a free slot
     while (curr_addr != 0) {
         WatcherBlock curr_block = readBlock(curr_addr, worker_id);
+        block_visits++; // Count each block read
 
         // Check if this block has a free slot
         for (size_t i = 0; i < PROPAGATORS; i++) {
@@ -259,7 +263,7 @@ void Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int work
                 output.verbose(CALL_INFO, 7, 0, 
                     "Worker[%d] Inserted watcher in slot %zu, clause 0x%x, var %d\n", 
                     worker_id, i, clause_addr, lit_idx/2);
-                return;
+                return block_visits;
             }
         }
         curr_addr = curr_block.next_block;
@@ -272,6 +276,7 @@ void Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int work
     new_block.nodes[0] = WatcherNode(clause_addr, blocker);
     new_block.next_block = metadata.head_ptr;  // Link to current head
     writeBlock(new_block_addr, new_block);
+    block_visits++; // Count new block write
     
     metadata.head_ptr = new_block_addr;
     metadata.size++;
@@ -281,6 +286,7 @@ void Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int work
     output.verbose(CALL_INFO, 7, 0, 
         "Worker[%d] Inserted watcher in new block, clause 0x%x, var %d\n", 
         worker_id, clause_addr, lit_idx/2);
+    return block_visits;
 }
 
 // Remove a watcher with given clause address

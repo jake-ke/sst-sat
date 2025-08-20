@@ -31,6 +31,7 @@ bool Heap::tick(SST::Cycle_t cycle) {
         case IDLE: break;
         case WAIT: break;
         case STEP: {
+            // printf("=== Cycle %lu ===\n", cycle);
             output.verbose(CALL_INFO, 8, 0, "=== Tick %lu === \n", cycle);
             assert(heap_active_workers.size() <= HEAPLANES);
             for (size_t j = 0; j < heap_active_workers.size(); j++) {
@@ -89,6 +90,7 @@ bool Heap::tick(SST::Cycle_t cycle) {
     if (!pending_requests.empty() && heap_active_workers.size() < HEAPLANES 
         && !need_rescale && !debugging) {
         size_t idx = heap_active_workers.size();
+        // printf("=== Cycle %lu ===\n", cycle);
         startNewWorker(idx);
     }
 
@@ -246,12 +248,14 @@ Var Heap::read(uint64_t addr, int worker_id) {
     auto req = new SST::Interfaces::StandardMem::Read(addr, sizeof(Var));
     reorder_buffer.registerRequest(req->getID(), worker_id);
     memory->send(req);
+    // printf("HEAP read: 0x%lx\n", addr);
     outstanding_mem_requests++;
     state = WAIT;
     (*heap_sink_ptr)();
     
     Var v;
     memcpy(&v, reorder_buffer.getResponse(worker_id).data(), sizeof(Var));
+    // printf("Read data of 0x%lx is %d\n", addr, v);
     return v;
 }
 
@@ -267,10 +271,8 @@ void Heap::write(uint64_t addr, Var val) {
             store_queue.size() - 1, addr, addr + sizeof(Var) - 1, val);
     }
 
+    // printf("HEAP write: 0x%lx, data %d\n", addr, val);
     memory->send(new SST::Interfaces::StandardMem::Write(addr, sizeof(Var), data));
-    // outstanding_mem_requests++;
-    // state = WAIT;  // Wait for response 
-    // (*heap_sink_ptr)();
 }
 
 // Find a matching entry in the store queue by address range
@@ -313,6 +315,7 @@ void Heap::debug_heap(int worker_id) {
     for (auto lock : locks) {
         sst_assert(!lock, CALL_INFO, -1, "Heap lock still held\n");
     }
+    // memory->send(new SST::Interfaces::StandardMem::FlushCache());
 
     bool failed = false;
     for (int i = 0; i < heap_size; i++) {
@@ -523,7 +526,9 @@ void Heap::initHeap() {
         // Append to heap array
         heap_data.resize((heap_idx + 1) * sizeof(Var));
         memcpy(heap_data.data() + heap_idx * sizeof(Var), &v, sizeof(Var));
-       
+        
+        // printf("Heap write untimed: 0x%lx, data %d\n", heapAddr(heap_idx), v);
+        // printf("Heap write untimed: 0x%lx, data %d\n", indexAddr(v), heap_idx);
         pos_map[v] = heap_idx++;   // Mark position in indices map
     }
 
