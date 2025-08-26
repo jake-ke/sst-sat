@@ -244,7 +244,8 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
             }
             
             // If this is the last block and it isn't full, add it to the free list
-            if (block_idx == blocks_needed - 1 && nodes_in_this_block < PROPAGATORS) {
+            // but only if free list is enabled
+            if (USE_FREE_LIST && block_idx == blocks_needed - 1 && nodes_in_this_block < PROPAGATORS) {
                 // Calculate the node address for the first free slot
                 uint32_t curr_block_addr = first_block_addr + (block_idx * block_size);
                 uint32_t free_node_idx = nodes_in_this_block;  // First empty slot
@@ -301,16 +302,17 @@ void Watches::updateBlock(int lit_idx, uint32_t prev_addr, uint32_t curr_addr,
             prev_block.setNextBlock(curr_block.getNextBlock());
             writeBlock(prev_addr, prev_block);
         }
-        removeFromFreeList(lit_idx, metadata, curr_block);
+        if (USE_FREE_LIST) removeFromFreeList(lit_idx, metadata, curr_block);
         freeBlock(curr_addr);
     } else {
         // Block still has valid nodes, update it
         writeBlock(curr_addr, curr_block);
         
-        // If the block has free slots and isn't already in the free list,
-        // add it to the free list
-        int free_slot = curr_block.findNextFreeNode();
-        if (free_slot != -1) addToFreeList(lit_idx, metadata, curr_block, curr_addr, free_slot);
+        // If the block has free slots and free list is enabled, add it to the free list
+        if (USE_FREE_LIST) {
+            int free_slot = curr_block.findNextFreeNode();
+            if (free_slot != -1) addToFreeList(lit_idx, metadata, curr_block, curr_addr, free_slot);
+        }
     }
 }
 
@@ -341,8 +343,8 @@ int Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worke
         }
     }
 
-    // Case 2: Check free list if available
-    if (metadata.free_head != 0) {
+    // Case 2: Check free list if available and enabled
+    if (USE_FREE_LIST && metadata.free_head != 0) {
         uint32_t free_node_ptr = metadata.free_head;
         uint32_t free_block_addr = free_node_ptr & ~(FREE_IDX_BITS - 1);
         int node_idx = free_node_ptr & (FREE_IDX_BITS - 1);
@@ -368,15 +370,46 @@ int Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worke
         return block_visits;
     }
     
-    // Case 3: all blocks full or no free list - add a new block at front
+    // Case 3 (when free list is disabled): Search all blocks for an empty slot
+    if (!USE_FREE_LIST && metadata.head_ptr != 0) {
+        uint32_t curr_addr = metadata.head_ptr;
+        
+        while (curr_addr != 0) {
+            // Read the current block
+            WatcherBlock block = readBlock(curr_addr, worker_id);
+            block_visits++;
+            
+            // Look for any free slot in the block
+            for (int i = 0; i < PROPAGATORS; i++) {
+                if (!block.nodes[i].valid) {
+                    // Found a free slot, insert the watcher here
+                    block.nodes[i] = WatcherNode(clause_addr, blocker);
+                    writeBlock(curr_addr, block);
+                    
+                    busy.erase(lit_idx);
+                    output.verbose(CALL_INFO, 4, 0, 
+                        "Worker[%d] Inserted watcher in existing block 0x%x index %d, clause 0x%x, var %d\n", 
+                        worker_id, curr_addr, i, clause_addr, lit_idx/2);
+                    
+                    return block_visits;
+                }
+            }
+            
+            // Move to the next block
+            curr_addr = block.getNextBlock();
+        }
+    }
+    
+    // Case 4: all blocks full or no blocks - add a new block at front
     uint32_t new_block_addr = allocateBlock();
     WatcherBlock new_block;
     new_block.nodes[0] = WatcherNode(clause_addr, blocker);
     // Link to current head
     if (metadata.head_ptr != 0) new_block.setNextBlock(metadata.head_ptr);
     
-    // Since we now have a free slot, add this block to the free list
-    if (PROPAGATORS > 1) block_visits += addToFreeList(lit_idx, metadata, new_block, new_block_addr, 1);
+    // Since we now have a free slot, add this block to the free list if enabled
+    if (USE_FREE_LIST && PROPAGATORS > 1)
+        block_visits += addToFreeList(lit_idx, metadata, new_block, new_block_addr, 1);
     else {
         writeBlock(new_block_addr, new_block);
         block_visits++; // Count new block write
