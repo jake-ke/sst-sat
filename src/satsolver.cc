@@ -525,7 +525,6 @@ void SATSolver::handleHeapResponse(SST::Event* ev) {
     heap_resp = resp->result;
     if (!unstalled_heap) state = STEP;
     else unstalled_cnt--;
-    // printf("HandleHeap: unstalled_cnt is now %d\n", unstalled_cnt);
     delete resp;
 }
 
@@ -1051,7 +1050,7 @@ int SATSolver::unitPropagate() {
             bool block_modified = false;
             WatcherBlock curr_block;
             if (do_prewatch) {
-                curr_block.next_block = curr_addr;
+                curr_block.setNextBlock(curr_addr);
                 for (int i = 0; i < PRE_WATCHERS; i++) {
                     curr_block.nodes[i] = wmd.pre_watchers[i];
                 }
@@ -1064,7 +1063,7 @@ int SATSolver::unitPropagate() {
                 SST::Cycle_t end_block = getCurrentSimCycle() / 1000;
                 cycles_read_watcher_blocks += (end_block - start_block);
 
-                if (curr_block.next_block != 0) issuePrefetch(curr_block.next_block);
+                if (curr_block.getNextBlock() != 0) issuePrefetch(curr_block.getNextBlock());
             }
 
             // spawn sub-coroutines
@@ -1111,10 +1110,6 @@ int SATSolver::unitPropagate() {
                         // Process nodes assigned to this worker
                         for (size_t node_idx = worker_id; node_idx < valid_nodes.size(); node_idx += PROPAGATORS) {
                             int i = valid_nodes[node_idx];
-                            
-                            // Measure timings for this worker's operations
-                            SST::Cycle_t start_time, end_time;
-                            
                             subPropagate(i, not_p, block_modified, curr_block, worker_id, 
                                          worker_read_clauses[worker_id], 
                                          worker_insert_watchers[worker_id],
@@ -1184,7 +1179,7 @@ int SATSolver::unitPropagate() {
             // After processing all nodes in the block, check if we need to write it back
             if (block_modified) {
                 if (do_prewatch) watches.writePreWatchers(watch_idx, curr_block.nodes);
-                else watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block);
+                else watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block, wmd);
             }
 
             if (conflict != ClauseRef_Undef) {
@@ -1203,7 +1198,7 @@ int SATSolver::unitPropagate() {
             }
 
             // Move to next block
-            curr_addr = curr_block.next_block;
+            curr_addr = curr_block.getNextBlock();
             block_modified = false;
             do_prewatch = false;
         }
@@ -1236,7 +1231,7 @@ void SATSolver::subPropagate(
 ) {
     // Need to inspect the clause
     Cref clause_addr = curr_block.nodes[i].getClauseAddr();
-    
+
     // Time the reading of clauses
     SST::Cycle_t start_read = getCurrentSimCycle() / 1000;
     Clause c = clauses.readClause(clause_addr, worker_id);
@@ -1603,16 +1598,16 @@ void SATSolver::attachClause(Cref clause_addr, const Clause& c) {
     // Watch the first two literals in the clause, use each other as a blocker
     output.verbose(CALL_INFO, 5, 0, "ATTACH: clause 0x%x with literals %d and %d\n",
         clause_addr, toInt(c[0]), toInt(c[1]));
-    watches[toWatchIndex(~c[0])].insert(clause_addr, c[1]);
-    watches[toWatchIndex(~c[1])].insert(clause_addr, c[0]);
+    watches.insertWatcher(toWatchIndex(~c[0]), clause_addr, c[1]);
+    watches.insertWatcher(toWatchIndex(~c[1]), clause_addr, c[0]);
 }
 
 void SATSolver::detachClause(Cref clause_addr) {
     const Clause& c = clauses.readClause(clause_addr);
     output.verbose(CALL_INFO, 6, 0, "DETACH: clause 0x%x from watcher %d and %d\n",
         clause_addr, toInt(~c[0]), toInt(~c[1]));
-    watches[toWatchIndex(~c[0])].remove(clause_addr);
-    watches[toWatchIndex(~c[1])].remove(clause_addr);
+    watches.removeWatcher(toWatchIndex(~c[0]), clause_addr);
+    watches.removeWatcher(toWatchIndex(~c[1]), clause_addr);
 }
 
 

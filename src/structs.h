@@ -15,6 +15,9 @@ const bool OVERLAP_HEAP_BUMP = false;  // overlaps heap bumping with clause mini
 const bool WRITE_BUFFER = true;  // enables write request buffering for improved performance
 const int PRE_WATCHERS = 7;  // Number of pre-watchers to store in metadata
 
+// helpers
+const int FREE_IDX_BITS = pow(2, ceil(log(PROPAGATORS)/log(2)));  // next power of 2
+
 // Define types for variables and literals
 typedef int Var;
 const Var var_Undef = 0;
