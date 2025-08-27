@@ -7,11 +7,11 @@
 
 using coro_t = boost::coroutines2::coroutine<void>;
 
-const int MINIMIZERS = 2;  // Number of minimizers
-const int PROPAGATORS = 7;  // Number of propagators
+const int PROPAGATORS = 7;  // Number of watchers to propagate
 const int HEAPLANES = 8;  // Number of heap lanes for parallel execution
-const bool OVERLAP_HEAP_INSERT = false;  // overlaps heap insertions (backtracking) with propagation
-const bool OVERLAP_HEAP_BUMP = false;  // overlaps heap bumping with clause minimization and find bt level
+const int MINIMIZERS = 2;  // Number of minimizers
+const bool OVERLAP_HEAP_INSERT = true;  // overlaps heap insertions (backtracking) with propagation
+const bool OVERLAP_HEAP_BUMP = true;  // overlaps heap bumping with clause minimization and find bt level
 const bool WRITE_BUFFER = true;  // enables write request buffering for improved performance
 const int PRE_WATCHERS = 7;  // Number of pre-watchers to store in metadata
 const int USE_FREE_LIST = 1;  // Use free list for watcher insertion

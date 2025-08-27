@@ -26,7 +26,7 @@ void Clauses::writeAddr(uint32_t idx, const Cref& addr) {
 
 // get the number of literals in a clause from clause address
 uint32_t Clauses::getClauseSize(Cref addr, int worker_id) {
-    read(clauseAddr(addr), sizeof(uint32_t), worker_id);
+    read(clauseAddr(addr) + offsetof(Clause, num_lits), sizeof(uint32_t), worker_id);
 
     uint32_t size;
     memcpy(&size, reorder_buffer->getResponse(worker_id).data(), sizeof(uint32_t));
@@ -38,7 +38,7 @@ Clause Clauses::readClause(Cref addr, int worker_id) {
     uint32_t num_lits = getClauseSize(addr, worker_id);
     
     // Read the rest of clause data (activity + literals)
-    readBurst(clauseAddr(addr + sizeof(uint32_t)), CLAUSE_MEMBER_SIZE * (num_lits + 1), worker_id);
+    readBurst(clauseAddr(addr + offsetof(Clause, activity)), CLAUSE_MEMBER_SIZE * (num_lits + 1), worker_id);
 
     const uint8_t* data = reorder_buffer->getResponse(worker_id).data();
     
@@ -54,6 +54,12 @@ void Clauses::writeClause(Cref addr, const Clause& c) {
     memcpy(buffer.data() + CLAUSE_MEMBER_SIZE * 2, c.literals.data(), 
            c.litSize() * sizeof(Lit)); // literals
     writeBurst(clauseAddr(addr), buffer);
+}
+
+void Clauses::writeLiteral(Cref addr, const Lit& lit, int idx) {
+    std::vector<uint8_t> buffer(sizeof(Lit));
+    memcpy(buffer.data(), &lit, sizeof(Lit));
+    write(clauseAddr(addr + offsetof(Clause, literals) + idx * sizeof(Lit)), sizeof(Lit), buffer);
 }
 
 void Clauses::initialize(const std::vector<Clause>& clauses) {
@@ -124,7 +130,7 @@ void Clauses::freeClause(Cref addr, uint32_t cls_size) {
 void Clauses::writeAct(Cref addr, float act) {
     std::vector<uint8_t> buffer(sizeof(float));
     memcpy(buffer.data(), &act, sizeof(float));
-    write(clauseAddr(addr + sizeof(uint32_t)), sizeof(float), buffer);
+    write(clauseAddr(addr + offsetof(Clause, activity)), sizeof(float), buffer);
 }
 
 std::vector<Cref> Clauses::readAllAddr(int worker_id) {
@@ -143,7 +149,7 @@ std::vector<float> Clauses::readAllAct(const std::vector<Cref>& addr, int worker
     
     // TODO: parallelize by using non blocking reads with different worker IDs
     for (size_t i = 0; i < addr.size(); i++) {
-        read(clauseAddr(addr[i] + sizeof(uint32_t)), sizeof(float), worker_id);
+        read(clauseAddr(addr[i] + offsetof(Clause, activity)), sizeof(float), worker_id);
         memcpy(&result[i], reorder_buffer->getResponse(worker_id).data(), sizeof(float));
     }
     

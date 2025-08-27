@@ -20,6 +20,7 @@ public:
     // Core operations
     Clause readClause(Cref addr, int worker_id = 0);
     void writeClause(Cref addr, const Clause& c);
+    void writeLiteral(Cref addr, const Lit& lit, int idx);
     uint32_t getClauseSize(Cref addr, int worker_id = 0);
     void initialize(const std::vector<Clause>& clauses);
     Cref addClause(const Clause& clause);

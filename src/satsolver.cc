@@ -1238,8 +1238,6 @@ void SATSolver::subPropagate(
     SST::Cycle_t end_read = getCurrentSimCycle() / 1000;
     read_clauses_cycles += (end_read - start_read);
     
-    bool update_clause = false;
-
     // Print clause for debugging
     output.verbose(CALL_INFO, 4, 0,
         "  Watch block[%d]: blocker:%d, clause 0x%x: %s\n",
@@ -1249,7 +1247,8 @@ void SATSolver::subPropagate(
     // Make sure the false literal (~p) is at position 1
     if (c[0] == not_p) {
         std::swap(c.literals[0], c.literals[1]);
-        update_clause = true;  // mark that the clause was modified
+        clauses.writeLiteral(clause_addr, c[0], 0);
+        clauses.writeLiteral(clause_addr, c[1], 1);
         output.verbose(CALL_INFO, 4, 0, "    [W%d]Swapped literals 0 and 1\n", worker_id);
     }
     assert(c[1] == not_p);
@@ -1270,7 +1269,8 @@ void SATSolver::subPropagate(
         if (!var_assigned[var(lit)] || value(lit) == true) {
             // Swap to position 1 and update watcher
             std::swap(c.literals[1], c.literals[k]);
-            clauses.writeClause(clause_addr, c);
+            clauses.writeLiteral(clause_addr, c[1], 1);
+            clauses.writeLiteral(clause_addr, c[k], k);
             output.verbose(CALL_INFO, 4, 0, 
                 "    [W%d]Found new watch: literal %d at position %zu\n", 
                 worker_id, toInt(c[1]), k);
@@ -1302,8 +1302,6 @@ void SATSolver::subPropagate(
         }
     }
 
-    if (update_clause) clauses.writeClause(clause_addr, c);
-    
     // Did not find a new watch - clause is unit or conflicting
     output.verbose(CALL_INFO, 4, 0, "    [W%d]No new watch found\n", worker_id);
 
