@@ -407,7 +407,10 @@ void SATSolver::parseDIMACS(const std::string& filename) {
                 }
                 
                 if (clause.literals.size() == 1) {  // Unit clause
-                    initial_units.push_back(clause.literals[0]);
+                    if (std::find(initial_units.begin(), initial_units.end(), 
+                                  clause.literals[0]) == initial_units.end()) {
+                        initial_units.push_back(clause.literals[0]);
+                    }
                     num_clauses--;
                     output.verbose(CALL_INFO, 3, 0,
                         "Unit clause: %d\n", toInt(clause.literals[0]));
@@ -785,18 +788,18 @@ void SATSolver::execMinimize() {
 
     if (ccmin_mode == 2) {
         // Deep minimization (more thorough)
-        parent_yield_ptr = yield_ptr;
+        coro_t::push_type* parent_yield_ptr = yield_ptr;
         int workers = std::min(MINIMIZERS, (int)learnt_clause.size() - 1);
         active_workers.resize(workers, false);
-        coroutines.resize(workers);
-        yield_ptrs.resize(workers);
+        std::vector<coro_t::pull_type*> coroutines(workers);
+        std::vector<coro_t::push_type*> yield_ptrs(workers);
         std::vector<bool> redundant(learnt_clause.size(), false);
         bool done = true;
 
         // spawn sub-coroutines for each literal
         for (int worker_id = 0; worker_id < workers; worker_id++) {
             coroutines[worker_id] = new coro_t::pull_type(
-                [this, worker_id, &redundant](coro_t::push_type &yield) {
+                [this, worker_id, &redundant, &yield_ptrs](coro_t::push_type &yield) {
                     yield_ptr = &yield;
                     yield_ptrs[worker_id] = yield_ptr;
                     minimizeL2_sub(redundant, worker_id);
@@ -830,8 +833,6 @@ void SATSolver::execMinimize() {
         
         // finished all sub-coroutines
         active_workers.clear();
-        coroutines.clear();
-        yield_ptrs.clear();
         yield_ptr = parent_yield_ptr;
 
         for (i = j = 1; i < learnt_clause.size(); i++) {
@@ -1012,199 +1013,115 @@ bool SATSolver::decide() {
 int SATSolver::unitPropagate() {
     output.verbose(CALL_INFO, 3, 0, "PROPAGATE: Starting unit propagation\n");
     conflict = ClauseRef_Undef;
-    
+
     // Track the current batch of variables that can be processed in parallel
     size_t batch_start = qhead;
     size_t batch_end = trail.size();
-    
+
+    // Clear any existing clause locks from previous propagations
+    clause_locks.clear();
+
     while (qhead < trail.size()) {
         stat_propagations->addData(1);
-        Lit p = trail[qhead++];
-        Lit not_p = ~p;
-        int watch_idx = toWatchIndex(p);
-        
-        // Measure time to read head pointer
-        SST::Cycle_t start_headptr = getCurrentSimCycle() / 1000;
-        WatchMetaData wmd = watches.readMetaData(watch_idx);
-        SST::Cycle_t end_headptr = getCurrentSimCycle() / 1000;
-        cycles_read_headptr += (end_headptr - start_headptr);
 
-        if (qhead < trail.size()) {
-            Lit next_p = trail[qhead];
-            issuePrefetch(watches.watchesAddr(toWatchIndex(next_p)));
-        }
+        // Process literals in parallel batches of PARA_LITS
+        coro_t::push_type* parent_yield_ptr = yield_ptr;
+        int workers = std::min(PARA_LITS, int(trail.size() - qhead));
+        std::vector<coro_t::pull_type*> coroutines(workers);
+        std::vector<coro_t::push_type*> yield_ptrs(workers);
 
-        output.verbose(CALL_INFO, 3, 0,
-            "PROPAGATE: Processing watchers for literal %d\n", toInt(p));
+        // Track times for each literal worker
+        std::vector<uint64_t> lit_read_headptr(workers, 0);
+        std::vector<uint64_t> lit_read_watcher_blocks(workers, 0);
+        int last_worker = -1;
 
-        bool do_prewatch = PRE_WATCHERS > 0;
-        uint32_t curr_addr = wmd.head_ptr;
-        uint32_t prev_addr = 0;
-        WatcherBlock prev_block;
-        
-        uint64_t para_watchers = 0;  // watchers inspected in this propagation
-        uint64_t watcher_occ = 0;  // number of watchers residing in watch lists
-
-        // Traverse the linked list
-        while (curr_addr != 0 || do_prewatch) {
-            bool block_modified = false;
-            WatcherBlock curr_block;
-            if (do_prewatch) {
-                curr_block.setNextBlock(curr_addr);
-                for (int i = 0; i < PRE_WATCHERS; i++) {
-                    curr_block.nodes[i] = wmd.pre_watchers[i];
-                }
-
-                if (curr_addr != 0) issuePrefetch(curr_addr);
-            } else {
-                // Read current block with timing
-                SST::Cycle_t start_block = getCurrentSimCycle() / 1000;
-                curr_block = watches.readBlock(curr_addr);
-                SST::Cycle_t end_block = getCurrentSimCycle() / 1000;
-                cycles_read_watcher_blocks += (end_block - start_block);
-
-                if (curr_block.getNextBlock() != 0) issuePrefetch(curr_block.getNextBlock());
-            }
-
-            // spawn sub-coroutines
-            parent_yield_ptr = yield_ptr;
-            
-            // Collect valid nodes that need processing
-            std::vector<int> valid_nodes;
+        // Spawn coroutines for each literal in this batch
+        bool done = true;
+        output.verbose(CALL_INFO, 5, 0, "Spawning %d literal coroutines\n", workers);
+        for (int lit_idx = 0; lit_idx < workers; lit_idx++) {
+            // set up coroutines for watchers
             for (int i = 0; i < PROPAGATORS; i++) {
-                if (!curr_block.nodes[i].valid) continue;
-                watcher_occ++;
-
-                Lit blocker = curr_block.nodes[i].blocker;
-                if (var_assigned[var(blocker)] && value(blocker) == true) {
-                    // Blocker is true, skip to next watcher
-                    output.verbose(CALL_INFO, 4, 0,
-                        "  Watch block[%d]: clause 0x%x, blocker %d = True, skipping\n", 
-                        i, curr_block.nodes[i].getClauseAddr(), toInt(blocker));
-                    continue;
-                }
-                
-                valid_nodes.push_back(i);
-            }
-            
-            // Count the watchers inspected in this block
-            para_watchers += valid_nodes.size();
-            
-            // Track times for worker operations
-            std::vector<uint64_t> worker_read_clauses(PROPAGATORS, 0);
-            std::vector<uint64_t> worker_insert_watchers(PROPAGATORS, 0);
-            std::vector<uint64_t> worker_polling(PROPAGATORS, 0);
-            int last_worker = 0;
-            
-            // Process valid nodes in batches, limited by PROPAGATORS
-            int workers = std::min(PROPAGATORS, (int)valid_nodes.size());
-            bool done = true;
-            for (int worker_id = 0; worker_id < workers; worker_id++) {
                 active_workers.push_back(false);
                 polling.push_back(false);
-                coroutines.push_back(new coro_t::pull_type(
-                    [this, worker_id, &valid_nodes, not_p, &block_modified, &curr_block, 
-                     &worker_read_clauses, &worker_insert_watchers, &worker_polling](coro_t::push_type &yield) {
-                        yield_ptr = &yield;
-                        yield_ptrs.push_back(yield_ptr);
-                        // Process nodes assigned to this worker
-                        for (size_t node_idx = worker_id; node_idx < valid_nodes.size(); node_idx += PROPAGATORS) {
-                            int i = valid_nodes[node_idx];
-                            subPropagate(i, not_p, block_modified, curr_block, worker_id, 
-                                         worker_read_clauses[worker_id], 
-                                         worker_insert_watchers[worker_id],
-                                         worker_polling[worker_id]);
-                            
-                            if (conflict != ClauseRef_Undef) break; // Early exit on conflict
-                        }
-                    }));
-                if (*coroutines.back()) done = false;  // may finish without yielding
-            }
-            if (!active_workers.empty() && !done) (*parent_yield_ptr)();  // yield back to IDLE
-
-            // stepping sub-coroutines
-            while (!done) {
-                // Check if any worker is active
-                for (size_t j = 0; j < active_workers.size(); j++) {
-                    output.verbose(CALL_INFO, 8, 0, "Worker %zu: active=%d, polling=%d, done=%d\n",
-                        j, (bool)active_workers[j], (bool)polling[j], (bool)(coroutines[j] == nullptr));
-                    if (active_workers[j]) {
-                        yield_ptr = yield_ptrs[j];
-                        (*coroutines[j])();
-                        active_workers[j] = false;
-                    } 
-                }
-
-                // since the polling workers never get triggered,
-                // we need to check them after completing the active workers
-                // polling status may also change after processing active workers
-                for (size_t j = 0; j < polling.size(); j++) {
-                    if (polling[j]) {
-                        polling[j] = false;
-                        yield_ptr = yield_ptrs[j];
-                        (*coroutines[j])();
-                    }
-                }
-
-                // check for done
-                done = true;
-                for (size_t j = 0; j < coroutines.size(); j++) {
-                    if (coroutines[j] != nullptr) {
-                        if (*coroutines[j]) done = false;
-                        else {
-                            last_worker = j; // Track the last worker to complete
-                            delete coroutines[j];
-                            coroutines[j] = nullptr;
-                            yield_ptrs[j] = nullptr;
-                        }
-                    }
-                }
-
-                if (!done) (*parent_yield_ptr)();  // yield back to IDLE
             }
 
-            // finished all sub-coroutines
-            active_workers.clear();
-            polling.clear();
-            coroutines.clear();
-            yield_ptrs.clear();
-            yield_ptr = parent_yield_ptr;
-            output.verbose(CALL_INFO, 4, 0, "  Finished processing a watch block\n");
-            
-            // After all workers finished, only add timing data from the last worker to complete
-            cycles_read_clauses += worker_read_clauses[last_worker];
-            cycles_insert_watchers += worker_insert_watchers[last_worker];
-            cycles_polling += worker_polling[last_worker];
-            
-            // After processing all nodes in the block, check if we need to write it back
-            if (block_modified) {
-                if (do_prewatch) watches.writePreWatchers(watch_idx, curr_block.nodes);
-                else watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block, wmd);
-            }
-
-            if (conflict != ClauseRef_Undef) {
-                // Record watchers inspected up to the conflict point
-                stat_para_watchers->addData(para_watchers);
-                stat_para_vars->addData(qhead - batch_start);
-
-                qhead = trail.size();
-                return conflict;
-            }
-            
-            // the current block is deleted if it has no valid nodes left
-            if (curr_block.countValidNodes() != 0 && !do_prewatch) {
-                prev_addr = curr_addr;
-                prev_block = curr_block;
-            }
-
-            // Move to next block
-            curr_addr = curr_block.getNextBlock();
-            block_modified = false;
-            do_prewatch = false;
+            // when watcher coroutines are not launched, assume lit coroutine uses the start
+            coro_t::pull_type* lit_coro = new coro_t::pull_type(
+                [this, lit_idx, &lit_read_headptr, &lit_read_watcher_blocks, &yield_ptrs]
+                (coro_t::push_type &yield) {
+                    yield_ptr = &yield;
+                    yield_ptrs[lit_idx] = yield_ptr;
+                    propagateLiteral(lit_idx,
+                                     lit_read_headptr[lit_idx], 
+                                     lit_read_watcher_blocks[lit_idx]);
+                });
+            coroutines[lit_idx] = lit_coro;
+            if (*lit_coro) done = false; // May finish without yielding
         }
-        
-        if (para_watchers > 0) stat_para_watchers->addData(para_watchers);
-        stat_watcher_occ->addData(watcher_occ);
+
+        // Initial yield if any coroutines are active
+        if (!done) (*parent_yield_ptr)();
+
+        // Process all coroutines until completion
+        while (!done) {
+            // Check for active workers within each lit coroutine
+            for (int j = 0; j < coroutines.size(); j++) {
+                for (int jj = 0; jj < PROPAGATORS; jj++) {
+                    if (active_workers[j * PROPAGATORS + jj]) {
+                        yield_ptr = yield_ptrs[j];
+                        (*coroutines[j])();
+                        active_workers[j * PROPAGATORS + jj] = false;
+                        break;
+                    }
+                }
+            }
+
+            for (int j = 0; j < coroutines.size(); j++) {
+                for (int jj = 0; jj < PROPAGATORS; jj++) {
+                    if (polling[j * PROPAGATORS + jj]) {
+                        yield_ptr = yield_ptrs[j];
+                        (*coroutines[j])();
+                        break;
+                    }
+                }
+            }
+
+            // Check if any workers are still active
+            // we can just check the parent coroutines
+            done = true;
+            for (int j = 0; j < coroutines.size(); j++) {
+                if (coroutines[j] != nullptr) {
+                    if (*coroutines[j]) done = false;
+                    else {
+                        last_worker = j;
+                        delete coroutines[j];
+                        coroutines[j] = nullptr;
+                        if (j < yield_ptrs.size())
+                            yield_ptrs[j] = nullptr;
+                    }
+                }
+            }
+
+            // If not done, yield back to IDLE
+            if (!done) (*parent_yield_ptr)();
+        }
+
+        // Cleanup any remaining coroutines
+        for (auto* coro : coroutines) {
+            if (coro) delete coro;
+        }
+
+        // Cleanup the shared coroutine structures
+        active_workers.clear();
+        polling.clear();
+        yield_ptr = parent_yield_ptr;
+
+        // Update qhead for the batch we processed
+        qhead += workers;
+
+        // Accumulate timing data of the last finished worker
+        cycles_read_headptr += lit_read_headptr[last_worker];
+        cycles_read_watcher_blocks += lit_read_watcher_blocks[last_worker];
 
         // Check if the current batch of vars has been fully processed
         if (qhead == batch_end) {
@@ -1213,35 +1130,244 @@ int SATSolver::unitPropagate() {
             batch_end = trail.size();
             batch_start = qhead;
         }
+
+        // If conflict found, record statistics and return
+        if (conflict != ClauseRef_Undef) {
+            if (decision_output_stream.is_open()) decision_output_stream << "#Conflict" << std::endl;
+            output.verbose(CALL_INFO, 2, 0, "CONFLICT: clause 0x%x\n", conflict);
+            conflictC++;
+            stat_conflicts->addData(1);
+            
+            qhead = trail.size();
+            return conflict;
+        }
     }
     
     output.verbose(CALL_INFO, 3, 0, "PROPAGATE: no more propagations\n");
     return conflict;
 }
 
-void SATSolver::subPropagate(
-    int i,
+void SATSolver::propagateLiteral(
+    int lit_worker_id,
+    uint64_t& read_headptr_cycles,
+    uint64_t& read_watcher_blocks_cycles
+) {
+    // assuming we are using base_worker_id when watcher coroutines are not launched
+    int base_worker_id = lit_worker_id * PROPAGATORS;
+    Lit p = trail[qhead + lit_worker_id];
+    Lit not_p = ~p;
+    int watch_idx = toWatchIndex(p);
+
+    // Measure time to read head pointer
+    SST::Cycle_t start_headptr = getCurrentSimCycle() / 1000;
+    WatchMetaData wmd = watches.readMetaData(watch_idx, base_worker_id);
+    SST::Cycle_t end_headptr = getCurrentSimCycle() / 1000;
+    read_headptr_cycles += (end_headptr - start_headptr);
+
+    // Prefetch the next watch metadata if available
+    if (qhead + lit_worker_id + PARA_LITS < trail.size()) {
+        Lit next_p = trail[qhead + lit_worker_id + PARA_LITS];
+        issuePrefetch(watches.watchesAddr(toWatchIndex(next_p)));
+    }
+
+    output.verbose(CALL_INFO, 3, 0,
+        "PROPAGATE[L%d]: Processing watchers for literal %d\n", 
+        lit_worker_id, toInt(p));
+
+    bool do_prewatch = PRE_WATCHERS > 0;
+    uint32_t curr_addr = wmd.head_ptr;
+    uint32_t prev_addr = 0;
+    WatcherBlock prev_block;
+
+    uint64_t para_watchers = 0;  // watchers inspected in this propagation
+    uint64_t watcher_occ = 0;    // number of watchers residing in watch lists
+
+    // Traverse the linked list
+    while (curr_addr != 0 || do_prewatch) {
+        bool block_modified = false;
+        WatcherBlock curr_block;
+        if (do_prewatch) {
+            curr_block.setNextBlock(curr_addr);
+            for (int i = 0; i < PRE_WATCHERS; i++) {
+                curr_block.nodes[i] = wmd.pre_watchers[i];
+            }
+
+            if (curr_addr != 0) issuePrefetch(curr_addr);
+        } else {
+            // Read current block with timing
+            SST::Cycle_t start_block = getCurrentSimCycle() / 1000;
+            curr_block = watches.readBlock(curr_addr, base_worker_id);
+            SST::Cycle_t end_block = getCurrentSimCycle() / 1000;
+            read_watcher_blocks_cycles += (end_block - start_block);
+
+            if (curr_block.getNextBlock() != 0) issuePrefetch(curr_block.getNextBlock());
+        }
+
+        // Collect valid nodes that need processing
+        std::vector<int> valid_nodes;
+        for (int i = 0; i < PROPAGATORS; i++) {
+            if (!curr_block.nodes[i].valid) continue;
+            watcher_occ++;
+
+            Lit blocker = curr_block.nodes[i].blocker;
+            if (var_assigned[var(blocker)] && value(blocker) == true) {
+                // Blocker is true, skip to next watcher
+                output.verbose(CALL_INFO, 4, 0,
+                    "  Watch block[%d]: clause 0x%x, blocker %d = True, skipping\n", 
+                    i, curr_block.nodes[i].getClauseAddr(), toInt(blocker));
+                continue;
+            }
+
+            valid_nodes.push_back(i);
+        }
+        para_watchers += valid_nodes.size();
+        
+        // Propagate watchers in parallel batches
+        coro_t::push_type* parent_yield_ptr = yield_ptr;
+        int workers = std::min(PROPAGATORS, (int)valid_nodes.size());
+        std::vector<coro_t::pull_type*> coroutines(workers);
+        std::vector<coro_t::push_type*> yield_ptrs(workers);
+        bool done = true;
+        int last_worker = -1;
+
+        // Track cycles for worker operations
+        std::vector<uint64_t> worker_read_clauses(PROPAGATORS, 0);
+        std::vector<uint64_t> worker_insert_watchers(PROPAGATORS, 0);
+        std::vector<uint64_t> worker_polling(PROPAGATORS, 0);
+        output.verbose(CALL_INFO, 5, 0, 
+            "PROPAGATE[L%d] spawning %d watcher coroutines\n", lit_worker_id, workers);
+        // Create watcher coroutines
+        for (int worker_id = 0; worker_id < workers; worker_id++) {
+            coroutines[worker_id] = new coro_t::pull_type(
+                [this, worker_id, lit_worker_id, &valid_nodes, not_p,
+                 &block_modified, &curr_block, &yield_ptrs,
+                 &worker_read_clauses, &worker_insert_watchers, &worker_polling
+                ](coro_t::push_type &yield) {
+                    yield_ptr = &yield;
+                    yield_ptrs[worker_id] = yield_ptr;
+                    propagateWatchers(valid_nodes[worker_id], not_p, block_modified, curr_block,
+                                      lit_worker_id, worker_id,
+                                      worker_read_clauses[worker_id],
+                                      worker_insert_watchers[worker_id],
+                                      worker_polling[worker_id]);
+                });
+            if (*coroutines[worker_id]) done = false;  // may finish without yielding
+        }
+
+        if (!done) (*parent_yield_ptr)();  // yield back to IDLE
+
+        // stepping sub-coroutines
+        while (!done) {
+            // Check if any worker is active
+            for (int j = 0; j < workers; j++) {
+                // printf("Worker %d: active=%d, polling=%d, done=%d\n",
+                //     j, (bool)active_workers[base_worker_id + j], (bool)polling[base_worker_id + j], (bool)(coroutines[j] == nullptr));
+                if (active_workers[base_worker_id + j]) {
+                    yield_ptr = yield_ptrs[j];
+                    (*coroutines[j])();
+                    active_workers[base_worker_id + j] = false;
+                }
+            }
+
+            // since the polling workers never get triggered,
+            // we need to check them after completing the active workers
+            // polling status may also change after processing active workers
+            for (int j = 0; j < workers; j++) {
+                if (polling[base_worker_id + j]) {
+                    polling[base_worker_id + j] = false;
+                    yield_ptr = yield_ptrs[j];
+                    (*coroutines[j])();
+                }
+            }
+
+            // check for done
+            done = true;
+            for (int j = 0; j < workers; j++) {
+                if (coroutines[j] != nullptr) {
+                    if (*coroutines[j]) done = false;
+                    else {
+                        last_worker = j; // Track the last worker to complete
+                        delete coroutines[j];
+                        coroutines[j] = nullptr;
+                        yield_ptrs[j] = nullptr;
+                    }
+                }
+            }
+
+            if (!done) (*parent_yield_ptr)();  // yield back to IDLE
+        }
+        // finished all sub-coroutines
+        yield_ptr = parent_yield_ptr;
+        output.verbose(CALL_INFO, 4, 0, "  PROPAGATE[L%d]: Finished a watch block\n", lit_worker_id);
+
+        // After all workers finished, accumulate timing data
+        cycles_read_clauses += worker_read_clauses[last_worker];
+        cycles_insert_watchers += worker_insert_watchers[last_worker];
+        cycles_polling += worker_polling[last_worker];
+        
+        // After processing all nodes in the block, check if we need to write it back
+        if (block_modified) {
+            if (do_prewatch) watches.writePreWatchers(watch_idx, curr_block.nodes);
+            else watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block, wmd);
+        }
+        
+        if (conflict != ClauseRef_Undef) break;
+        
+        // the current block is deleted if it has no valid nodes left
+        if (curr_block.countValidNodes() != 0 && !do_prewatch) {
+            prev_addr = curr_addr;
+            prev_block = curr_block;
+        }
+        
+        // Move to next block
+        curr_addr = curr_block.getNextBlock();
+        block_modified = false;
+        do_prewatch = false;
+    }
+
+    stat_para_watchers->addData(para_watchers);
+    stat_watcher_occ->addData(watcher_occ);
+}
+
+void SATSolver::propagateWatchers(
+    int watcher_i,
     Lit not_p,
     bool& block_modified,
     WatcherBlock& curr_block,
+    int lit_worker_id,
     int worker_id,
     uint64_t& read_clauses_cycles,
     uint64_t& insert_watchers_cycles,
     uint64_t& polling_cycles
 ) {
+    // Calculate the global worker ID for reporting
+    int global_worker_id = lit_worker_id * PROPAGATORS + worker_id;
+
     // Need to inspect the clause
-    Cref clause_addr = curr_block.nodes[i].getClauseAddr();
+    Cref clause_addr = curr_block.nodes[watcher_i].getClauseAddr();
+
+    // Check if the clause is already being processed by another worker
+    SST::Cycle_t start_poll = getCurrentSimCycle() / 1000;
+    while (clause_locks.count(clause_addr) > 0) {
+        polling[global_worker_id] = true;
+        (*yield_ptr)();  // Yield to allow other workers to process
+    }
+    SST::Cycle_t end_poll = getCurrentSimCycle() / 1000;
+    polling_cycles += (end_poll - start_poll);
+
+    // Lock the clause
+    clause_locks.insert(clause_addr);
 
     // Time the reading of clauses
     SST::Cycle_t start_read = getCurrentSimCycle() / 1000;
-    Clause c = clauses.readClause(clause_addr, worker_id);
+    Clause c = clauses.readClause(clause_addr, global_worker_id);
     SST::Cycle_t end_read = getCurrentSimCycle() / 1000;
     read_clauses_cycles += (end_read - start_read);
-    
+
     // Print clause for debugging
     output.verbose(CALL_INFO, 4, 0,
-        "  Watch block[%d]: blocker:%d, clause 0x%x: %s\n",
-        i, toInt(curr_block.nodes[i].blocker),
+        "  [L%d-W%d] Watch block[%d]: blocker:%d, clause 0x%x: %s\n",
+        lit_worker_id, worker_id, watcher_i, toInt(curr_block.nodes[watcher_i].blocker),
         clause_addr, printClause(c.literals).c_str());
 
     // Make sure the false literal (~p) is at position 1
@@ -1249,20 +1375,24 @@ void SATSolver::subPropagate(
         std::swap(c.literals[0], c.literals[1]);
         clauses.writeLiteral(clause_addr, c[0], 0);
         clauses.writeLiteral(clause_addr, c[1], 1);
-        output.verbose(CALL_INFO, 4, 0, "    [W%d]Swapped literals 0 and 1\n", worker_id);
+        output.verbose(CALL_INFO, 4, 0, "    [L%d-W%d]Swapped literals 0 and 1\n", 
+            lit_worker_id, worker_id);
     }
-    assert(c[1] == not_p);
-    
+    sst_assert(c[1] == not_p, CALL_INFO, -1, "Second literal %d is not %d", toInt(c[1]), toInt(not_p));
+
     // If first literal is already true, just update the blocker and continue
     Lit first = c[0];
     if (var_assigned[var(first)] && value(first) == true) {
         output.verbose(CALL_INFO, 4, 0,
-            "    [W%d]First literal %d is true\n", worker_id, toInt(first));
-        curr_block.nodes[i].blocker = first;
+            "    [L%d-W%d]First literal %d is true\n", lit_worker_id, worker_id, toInt(first));
+        curr_block.nodes[watcher_i].blocker = first;
         block_modified = true;
+
+        // Release the lock on this clause
+        clause_locks.erase(clause_addr);
         return;
     }
-    
+
     // Look for a new literal to watch
     for (size_t k = 2; k < c.litSize(); k++) {
         Lit lit = c[k];
@@ -1272,51 +1402,59 @@ void SATSolver::subPropagate(
             clauses.writeLiteral(clause_addr, c[1], 1);
             clauses.writeLiteral(clause_addr, c[k], k);
             output.verbose(CALL_INFO, 4, 0, 
-                "    [W%d]Found new watch: literal %d at position %zu\n", 
-                worker_id, toInt(c[1]), k);
-            
+                "    [L%d-W%d]Found new watch: literal %d at position %zu\n", 
+                lit_worker_id, worker_id, toInt(c[1]), k);
+
             // Time spent polling for busy watches
             SST::Cycle_t start_poll = getCurrentSimCycle() / 1000;
             while (watches.isBusy(toWatchIndex(~c[1]))) {
-                polling[worker_id] = true;
+                polling[global_worker_id] = true;
                 (*yield_ptr)();  // Yield to allow other workers to process
             }
             SST::Cycle_t end_poll = getCurrentSimCycle() / 1000;
             polling_cycles += (end_poll - start_poll);
 
-            output.verbose(CALL_INFO, 4, 0, "    [W%d]Start watchlist insertion\n", worker_id);
-            
+            output.verbose(CALL_INFO, 4, 0, "    [L%d-W%d]Start watchlist insertion\n", 
+                lit_worker_id, worker_id);
+
             // Time spent inserting watchers
             SST::Cycle_t start_insert = getCurrentSimCycle() / 1000;
-            int block_visits = watches.insertWatcher(toWatchIndex(~c[1]), clause_addr, first, worker_id);
+            int block_visits = watches.insertWatcher(toWatchIndex(~c[1]), clause_addr, first, global_worker_id);
             SST::Cycle_t end_insert = getCurrentSimCycle() / 1000;
             insert_watchers_cycles += (end_insert - start_insert);
-            
+
             // Record block visits statistics
             stat_watcher_blocks->addData(block_visits);
-            
+
             // Mark this node as invalid in the current block
-            curr_block.nodes[i].valid = 0;
+            curr_block.nodes[watcher_i].valid = 0;
             block_modified = true;
+
+            // Release the lock on this clause
+            clause_locks.erase(clause_addr);
             return;
         }
     }
 
     // Did not find a new watch - clause is unit or conflicting
-    output.verbose(CALL_INFO, 4, 0, "    [W%d]No new watch found\n", worker_id);
+    output.verbose(CALL_INFO, 4, 0, "    [L%d-W%d]No new watch found\n", lit_worker_id, worker_id);
 
     // Check if first literal is false (conflict) or undefined (unit)
     if (var_assigned[var(first)] && value(first) == false) {
         // Conflict detected
         conflict = clause_addr;
         output.verbose(CALL_INFO, 3, 0,
-            "    [W%d]Conflict: Clause 0x%x has all literals false\n", worker_id, conflict);
+            "    [L%d-W%d]Conflict: Clause 0x%x has all literals false\n", 
+            lit_worker_id, worker_id, conflict);
     } else {
         // Unit clause found, propagate
         output.verbose(CALL_INFO, 3, 0,
-            "    [W%d]forces literal %d (to true)\n", worker_id, toInt(first));
+            "    [L%d-W%d]forces literal %d (to true)\n", lit_worker_id, worker_id, toInt(first));
         trailEnqueue(first, clause_addr);
     }
+
+    // Release the lock on this clause
+    clause_locks.erase(clause_addr);
 }
 
 // Add a new method to issue prefetches
@@ -1404,6 +1542,8 @@ void SATSolver::analyze() {
         }
 
         // Select next literal to expand from the trail
+        // HACK: may need to check the entire trail if trail is not in order
+        // index = trail.size() - 1;
         while (!seen[var(trail[index--])]);
         p = trail[index+1];
         conflict = variables.getReason(var(p));

@@ -7,6 +7,7 @@
 
 using coro_t = boost::coroutines2::coroutine<void>;
 
+const int PARA_LITS = 4;  // Number of parallel literals to propagate
 const int PROPAGATORS = 7;  // Number of watchers to propagate
 const int HEAPLANES = 8;  // Number of heap lanes for parallel execution
 const int MINIMIZERS = 2;  // Number of minimizers

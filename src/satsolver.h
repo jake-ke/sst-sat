@@ -133,8 +133,13 @@ public:
     void initialize();
     bool decide();
     int unitPropagate();
-    void subPropagate(int i, Lit not_p, bool& block_modified, WatcherBlock& block, int worker_id,
-        uint64_t& read_clauses_cycles, uint64_t& insert_watchers_cycles, uint64_t& polling_cycles);
+    void propagateLiteral(int lit_worker_id, 
+                          uint64_t& read_headptr_cycles, 
+                          uint64_t& read_watcher_blocks_cycles);
+    void propagateWatchers(int watcher_i, Lit not_p, bool& block_modified, WatcherBlock& block, 
+                           int lit_worker_id, int worker_id,
+                           uint64_t& read_clauses_cycles, uint64_t& insert_watchers_cycles, 
+                           uint64_t& polling_cycles);
     void analyze();
     void findBtLevel();
     void backtrack(int backtrack_level);
@@ -280,11 +285,9 @@ private:
     ReorderBuffer reorder_buffer;                   // Reorder buffer for managing parallel read requests
     coro_t::pull_type* coroutine;                   // coroutine in the top level FSM
     coro_t::push_type* yield_ptr;                   // current yield pointer
-    coro_t::push_type* parent_yield_ptr;            // saves parent (fsm) yield pointer
-    std::vector<coro_t::pull_type*> coroutines;     // sub coroutines for parallel tasks
-    std::vector<coro_t::push_type*> yield_ptrs;     // yield pointers for parallel tasks
     std::vector<bool> active_workers;               // Track completion of sub coroutines
-    std::vector<bool> polling;
+    std::vector<bool> polling;                      // Track workers in polling state
+    std::unordered_set<Cref> clause_locks;          // Track locked clauses during parallel propagation
 
 
     // Statistics

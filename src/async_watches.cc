@@ -124,7 +124,7 @@ int Watches::addToFreeList(int lit_idx, WatchMetaData& metadata, WatcherBlock& b
     writeBlock(block_addr, block);
     block_visits++;
 
-    output.verbose(CALL_INFO, 4, 0, 
+    output.verbose(CALL_INFO, 7, 0, 
         "Add to free list: var %d, lit_idx %d, block 0x%x, node %d\n", 
         lit_idx/2, lit_idx, block_addr, node_idx);
     return block_visits;
@@ -138,7 +138,7 @@ int Watches::removeFromFreeList(int lit_idx, WatchMetaData& metadata, WatcherBlo
     WatcherNode& free_node = block.nodes[block.free_index];
     uint32_t prev_ptr = free_node.getPrevFree();
     uint32_t next_ptr = free_node.next_free;
-    output.verbose(CALL_INFO, 4, 0, 
+    output.verbose(CALL_INFO, 7, 0, 
         "Removing from free list: var %d, lit_idx %d, head_ptr 0x%x, free_head=0x%x, prev_free=0x%x, next_free=0x%x\n",
         lit_idx/2, lit_idx, metadata.head_ptr, metadata.free_head, prev_ptr, next_ptr);
     
@@ -318,7 +318,7 @@ void Watches::updateBlock(int lit_idx, uint32_t prev_addr, uint32_t curr_addr,
 
 // Insert a new watcher for a literal
 int Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worker_id) {
-    output.verbose(CALL_INFO, 4, 0, "Inserting watcher for var %d, clause 0x%x, blocker %d\n", lit_idx/2, clause_addr, toInt(blocker));
+    output.verbose(CALL_INFO, 7, 0, "Inserting watcher for var %d, clause 0x%x, blocker %d\n", lit_idx/2, clause_addr, toInt(blocker));
     if (busy.find(lit_idx) != busy.end()) {
         output.fatal(CALL_INFO, -1, "Watches: Already busy with var %d\n", lit_idx/2);
     }
@@ -336,7 +336,7 @@ int Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worke
             writePreWatcher(lit_idx, metadata.pre_watchers[i], i);
 
             busy.erase(lit_idx);
-            output.verbose(CALL_INFO, 4, 0, 
+            output.verbose(CALL_INFO, 7, 0, 
                 "Worker[%d] Inserted watcher in pre_watcher[%d], clause 0x%x, var %d\n", 
                 worker_id, i, clause_addr, lit_idx/2);
             return block_visits;
@@ -363,7 +363,7 @@ int Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worke
         writeBlock(free_block_addr, block);
         
         busy.erase(lit_idx);
-        output.verbose(CALL_INFO, 4, 0, 
+        output.verbose(CALL_INFO, 7, 0, 
             "Worker[%d] Inserted watcher using free list at block 0x%x index %d, clause 0x%x, var %d\n", 
             worker_id, free_block_addr, free_slot, clause_addr, lit_idx/2);
         
@@ -387,7 +387,7 @@ int Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worke
                     writeBlock(curr_addr, block);
                     
                     busy.erase(lit_idx);
-                    output.verbose(CALL_INFO, 4, 0, 
+                    output.verbose(CALL_INFO, 7, 0, 
                         "Worker[%d] Inserted watcher in existing block 0x%x index %d, clause 0x%x, var %d\n", 
                         worker_id, curr_addr, i, clause_addr, lit_idx/2);
                     
@@ -418,7 +418,7 @@ int Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worke
     writeHeadPointer(lit_idx, new_block_addr);
 
     busy.erase(lit_idx);
-    output.verbose(CALL_INFO, 4, 0, 
+    output.verbose(CALL_INFO, 7, 0, 
         "Worker[%d] Inserted watcher in new block 0x%x, clause 0x%x, var %d\n", 
         worker_id, new_block_addr, clause_addr, lit_idx/2);
     return block_visits;
@@ -426,7 +426,7 @@ int Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worke
 
 // Remove a watcher with given clause address
 void Watches::removeWatcher(int lit_idx, Cref clause_addr) {
-    output.verbose(CALL_INFO, 4, 0, 
+    output.verbose(CALL_INFO, 7, 0, 
         "Removing watcher for clause 0x%x at var %d\n", clause_addr, lit_idx/2);
 
     // Read metadata
@@ -440,7 +440,7 @@ void Watches::removeWatcher(int lit_idx, Cref clause_addr) {
             metadata.pre_watchers[i].valid = 0;
             writeMetaData(lit_idx, metadata);
             
-            output.verbose(CALL_INFO, 4, 0, 
+            output.verbose(CALL_INFO, 7, 0, 
                 "Removed watcher for clause 0x%x at var %d from pre_watcher[%d]\n", 
                 clause_addr, lit_idx/2, i);
             return;
@@ -463,7 +463,7 @@ void Watches::removeWatcher(int lit_idx, Cref clause_addr) {
                 // Update the block
                 updateBlock(lit_idx, prev_addr, curr_addr, prev_block, curr_block, metadata);
 
-                output.verbose(CALL_INFO, 4, 0, 
+                output.verbose(CALL_INFO, 7, 0, 
                     "Removed watcher for clause 0x%x at var %d\n", 
                     clause_addr, lit_idx/2);
                 
