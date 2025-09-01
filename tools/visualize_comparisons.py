@@ -34,14 +34,13 @@ def parse_minisat_log(filepath):
     try:
         with open(filepath, 'r') as f:
             content = f.read()
-        
-        # Extract problem name from filename for minisat logs
+
+        # Extract problem name from filename: <problem_base>_YYYYMMDD_HHMMSS.log
         basename = os.path.basename(filepath)
-        # Remove timestamp pattern and .log extension
-        problem_name = re.sub(r'_(sat|unsat)_\d+.*\.log$', '', basename)
+        base_no_log = re.sub(r'\.log$', '', basename)
+        problem_name = re.sub(r'_\d{8}_\d{6}$', '', base_no_log)
         stats['problem'] = problem_name
-        
-        # Extract statistics using regex for minisat format
+
         minisat_patterns = {
             'decisions': r'decisions\s*:\s*(\d+)',
             'propagations': r'propagations\s*:\s*(\d+)',
@@ -52,19 +51,34 @@ def parse_minisat_log(filepath):
             'minimized': r'minimized\s*:\s*(\d+)',
             'restarts': r'restarts\s*:\s*(\d+)',
         }
-        
         for stat, pattern in minisat_patterns.items():
             match = re.search(pattern, content, re.IGNORECASE)
             if match:
                 stats[stat] = int(match.group(1))
-        
-        # Minisat doesn't have simulation time, but we can estimate from CPU time if available
-        # For now, we'll leave it as None to avoid comparison issues
-        
+
+        # Extract CPU time (seconds) and convert to milliseconds as sim_time_ms for consistency
+        cpu_match = re.search(r'CPU time\s*:\s*([\d.]+)\s*s', content, re.IGNORECASE)
+        if cpu_match:
+            try:
+                cpu_seconds = float(cpu_match.group(1))
+                stats['sim_time_ms'] = cpu_seconds * 1000.0
+            except ValueError:
+                pass
+        else:
+            # Fallback: if a raw number appears without unit, still attempt parse
+            cpu_match_alt = re.search(r'CPU time\s*:\s*([\d.]+)', content, re.IGNORECASE)
+            if cpu_match_alt:
+                try:
+                    cpu_seconds = float(cpu_match_alt.group(1))
+                    stats['sim_time_ms'] = cpu_seconds * 1000.0
+                except ValueError:
+                    pass
+        # Ensure sim_time_ms exists for downstream code
+        if 'sim_time_ms' not in stats:
+            stats['sim_time_ms'] = 0.0
     except Exception as e:
         print(f"Error parsing minisat log {filepath}: {e}")
         return None
-    
     return stats
 
 
@@ -412,7 +426,68 @@ def main():
         print("Error: 'problem' column missing from backup logs!")
         return
     
-    df_merged = pd.merge(df_current, df_backup, on='problem', suffixes=('_current', '_backup'))
+    # Normalize problem names so current satsolver logs (which may have .xz in name)
+    # match minisat logs (which add a timestamp suffix).
+    def _normalize(name: str) -> str:
+        if not isinstance(name, str):
+            return name
+        name = name.strip()
+        # Remove .log if still present
+        name = re.sub(r'\.log$', '', name)
+        # Remove timestamp pattern _YYYYMMDD_HHMMSS if at end or before an extension
+        name = re.sub(r'_\d{8}_\d{6}(?=$|\.[A-Za-z0-9]+$)', '', name)
+        # Remove compression extensions (xz, gz, bz2)
+        name = re.sub(r'\.(?:xz|gz|bz2)$', '', name)
+        # Collapse any accidental double extensions like .cnf.cnf
+        name = re.sub(r'(\.cnf)+$', '.cnf', name)
+        return name
+
+    df_current['problem_norm'] = df_current['problem'].apply(_normalize)
+    df_backup['problem_norm'] = df_backup['problem'].apply(_normalize)
+
+    # Identify problems that won't be compared
+    current_set = set(df_current['problem_norm'])
+    backup_set = set(df_backup['problem_norm'])
+    only_current = sorted(current_set - backup_set)
+    only_backup = sorted(backup_set - current_set)
+    # Attempt secondary reconciliation: if difference is only due to trailing .cnf vs no extension, adjust
+    if only_current or only_backup:
+        # Build maps by base (strip trailing .cnf for comparison purposes)
+        def base_no_cnf(n):
+            return re.sub(r'\.cnf$', '', n)
+        unmatched_pairs = []
+        backup_bases = {base_no_cnf(b): b for b in only_backup}
+        for c in list(only_current):
+            base = base_no_cnf(c)
+            if base in backup_bases:
+                # They actually match after base normalization; remove from diff lists
+                only_backup.remove(backup_bases[base])
+                only_current.remove(c)
+                unmatched_pairs.append((c, backup_bases[base]))
+        if unmatched_pairs:
+            print(f"Resolved {len(unmatched_pairs)} previously unmatched problems by base name normalization.")
+        if only_current:
+            print(f"Problems only in CURRENT ({len(only_current)}):")
+            for p in only_current:
+                print(f"  {p}")
+        if only_backup:
+            print(f"Problems only in BACKUP ({len(only_backup)}):")
+            for p in only_backup:
+                print(f"  {p}")
+        # Diagnostic: show any names still containing timestamp pattern (should be none)
+        residual = [n for n in list(current_set | backup_set) if re.search(r'_\d{8}_\d{6}$', n)]
+        if residual:
+            print(f"Warning: {len(residual)} names still contain timestamp suffix after normalization:")
+            for n in residual:
+                print(f"  {n}")
+        if not only_current and not only_backup:
+            print("All problems overlap between current and backup after normalization.")
+    else:
+        print("All problems overlap between current and backup.")
+
+    df_merged = pd.merge(df_current, df_backup, on='problem_norm', suffixes=('_current', '_backup'))
+    # Provide a canonical problem column (normalized)
+    df_merged['problem'] = df_merged['problem_norm']
     print(f"Found {len(df_merged)} matching problems")
     
     if not df_merged.empty:

@@ -149,7 +149,7 @@ skipped=0
 total=0
 
 # Define benchmark directory
-BENCHMARK_DIR=./benchmarks
+BENCHMARK_DIR=/home/jakeke/sat_benchmarks/satcomp_sim
 
 # Check if benchmark directory exists
 if [[ ! -d "$BENCHMARK_DIR" ]]; then
