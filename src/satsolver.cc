@@ -1281,8 +1281,8 @@ void SATSolver::propagateLiteral(
             if (var_assigned[var(blocker)] && value(blocker) == true) {
                 // Blocker is true, skip to next watcher
                 output.verbose(CALL_INFO, 4, 0,
-                    "  Watch block[%d]: clause 0x%x, blocker %d = True, skipping\n", 
-                    i, curr_block.nodes[i].getClauseAddr(), toInt(blocker));
+                    "PROPAGATE[L%d]: Watch block[%d]: clause 0x%x, blocker %d = True, skipping\n", 
+                    lit_worker_id, i, curr_block.nodes[i].getClauseAddr(), toInt(blocker));
                 continue;
             }
 
@@ -1302,7 +1302,8 @@ void SATSolver::propagateLiteral(
         std::vector<uint64_t> worker_read_clauses(PROPAGATORS, 0);
         std::vector<uint64_t> worker_insert_watchers(PROPAGATORS, 0);
         std::vector<uint64_t> worker_polling(PROPAGATORS, 0);
-        output.verbose(CALL_INFO, 4, 0, "  spawning %d watcher coroutines\n", workers);
+        output.verbose(CALL_INFO, 4, 0, "PROPAGATE[L%d]: spawning %d watcher coroutines\n",
+            lit_worker_id, workers);
         // Create watcher coroutines
         for (int worker_id = 0; worker_id < workers; worker_id++) {
             coroutines[worker_id] = new coro_t::pull_type(
@@ -1507,7 +1508,8 @@ void SATSolver::propagateWatchers(
     // Check if first literal is false (conflict) or undefined (unit)
     if (var_assigned[var(first)] && value(first) == false) {
         // Conflict detected
-        if (conflicts.size() < MAX_CONFL) {
+        if (std::find(conflicts.begin(), conflicts.end(), clause_addr) == conflicts.end()
+            && conflicts.size() < MAX_CONFL) {
             conflicts.push_back(clause_addr);
             output.verbose(CALL_INFO, 3, 0,
                 "  Conflict #%zu: Clause 0x%x has all literals false\n",
@@ -1558,8 +1560,8 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
         const Clause& c = clauses.readClause(conflict, worker_id);
         
         // Bump activity for learnt clauses
-        if (clauses.isLearnt(conflict)) c_to_bump.push_back(conflict);
-        
+        if (clauses.isLearnt(conflict)) tmp_c_to_bump.push_back(conflict);
+
         // Debug print for current clause
         output.verbose(CALL_INFO, 5, 0, "ANALYZE[%d]: current clause (0x%x): %s\n",
             worker_id, conflict, printClause(c.literals).c_str());
@@ -1576,7 +1578,7 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
 
             if (!tmp_seen[v] && v_data.level > 0) {
                 // Bump activity for seen variables
-                v_to_bump.push_back(v);
+                tmp_v_to_bump.push_back(v);
 
                 tmp_seen[v] = 1;
                 output.verbose(CALL_INFO, 5, 0,
