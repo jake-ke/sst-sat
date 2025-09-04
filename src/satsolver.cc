@@ -357,7 +357,7 @@ void SATSolver::parseDIMACS(const std::string& filename) {
         // Process based on first character
         switch (line[firstChar]) {
             case 'c':  // Comment line
-                output.verbose(CALL_INFO, 4, 0,
+                output.verbose(CALL_INFO, 8, 0,
                     "Comment: %s\n", line.substr(firstChar + 1).c_str());
                 break;
                 
@@ -741,21 +741,20 @@ void SATSolver::initialize() {
 }
 
 void SATSolver::execPropagate() {
-    conflict = unitPropagate();
-    
-    // if not parallelizing propagation and heap insertions
-    if (conflict != ClauseRef_Undef) {
+    unitPropagate();
+
+    // If we have conflicts
+    if (!conflicts.empty()) {
+        conflictC ++;  // for restart
+        stat_conflicts->addDataNTimes(conflicts.size(), 1);
         if (decision_output_stream.is_open()) decision_output_stream << "#Conflict" << std::endl;
-        output.verbose(CALL_INFO, 2, 0, "CONFLICT: clause 0x%x\n", conflict);
-        conflictC++;
-        stat_conflicts->addData(1);
         
         if (trail_lim.empty()) {
             output.output("UNSATISFIABLE: conflict at level 0\n");
             state = DONE;
             return;
         }
-        state = ANALYZE;  // learn from the conflict
+        state = ANALYZE;  // learn from the conflicts
     } else if (conflictC >= conflicts_until_restart) state = RESTART;
     else if (nLearnts() - nAssigns() >= max_learnts) state = REDUCE;
     else state = DECIDE;
@@ -767,7 +766,80 @@ void SATSolver::execPropagate() {
 }
 
 void SATSolver::execAnalyze() {
-    analyze();
+    // Debug print for trail
+    if (output.getVerboseLevel() >= 4) {
+        int j = 0;
+        output.verbose(CALL_INFO, 4, 0, "Trail (%zu):", trail.size());
+        for (int i = 0; i < trail.size(); i++) {
+            if (i == trail_lim[j]) {
+                output.output("\n    dec=%d: ",j);
+                j++;
+            }
+            output.output(" %d", toInt(trail[i]));
+        }
+        output.output("\n");
+    }
+
+    coro_t::push_type* parent_yield_ptr = yield_ptr;
+    int workers = std::min(LEARNERS, (int)conflicts.size());
+    active_workers.resize(workers, false);
+    std::vector<coro_t::pull_type*> coroutines(workers);
+    std::vector<coro_t::push_type*> yield_ptrs(workers);
+    bt_level = std::numeric_limits<int>::max();
+    bool done = true;
+
+    // spawn sub-coroutines for each literal
+    for (int worker_id = 0; worker_id < workers; worker_id++) {
+        coroutines[worker_id] = new coro_t::pull_type(
+            [this, worker_id, &yield_ptrs](coro_t::push_type &yield) {
+                yield_ptr = &yield;
+                yield_ptrs[worker_id] = yield_ptr;
+                analyze(conflicts[worker_id], worker_id);
+            });
+        if (*coroutines[worker_id]) done = false;  // may finish without yielding
+    }
+    if (!done) (*parent_yield_ptr)();  // yield back to IDLE
+
+    // stepping sub-coroutines
+    while (!done) {
+        done = true;
+        // Check if any worker is active
+        for (int worker_id = 0; worker_id < workers; worker_id++) {
+            if (active_workers[worker_id]) {
+                yield_ptr = yield_ptrs[worker_id];
+                (*coroutines[worker_id])();
+                active_workers[worker_id] = false;
+                if (*coroutines[worker_id]) {
+                    done = false;
+                } else {
+                    delete coroutines[worker_id];
+                    coroutines[worker_id] = nullptr;
+                    yield_ptrs[worker_id] = nullptr;
+                }
+            // waiting workers
+            } else if (coroutines[worker_id] != nullptr) done = false;
+        }
+
+        if (!done) (*parent_yield_ptr)();  // yield back to IDLE
+    }
+    
+    // finished all sub-coroutines
+    active_workers.clear();
+    yield_ptr = parent_yield_ptr;
+
+    for (const Var& v : v_to_bump) {
+        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::BUMP, v));
+        unstalled_heap = true;
+        unstalled_cnt++;
+    }
+    for (const Cref& c : c_to_bump) {
+        const Clause& cdata = clauses.readClause(c);
+        claBumpActivity(c, cdata.act());
+    }
+
+    output.verbose(CALL_INFO, 3, 0, "Final learnt: %s\n",
+        printClause(learnt_clause).c_str());
+
     if (OVERLAP_HEAP_BUMP) state = MINIMIZE;
     else {
         state = WAIT_HEAP;
@@ -1010,9 +1082,9 @@ bool SATSolver::decide() {
 // unitPropagate
 //-----------------------------------------------------------------------------------
 
-int SATSolver::unitPropagate() {
+void SATSolver::unitPropagate() {
     output.verbose(CALL_INFO, 3, 0, "PROPAGATE: Starting unit propagation\n");
-    conflict = ClauseRef_Undef;
+    conflicts.clear();
 
     // Track the current batch of variables that can be processed in parallel
     size_t batch_start = qhead;
@@ -1037,7 +1109,8 @@ int SATSolver::unitPropagate() {
 
         // Spawn coroutines for each literal in this batch
         bool done = true;
-        output.verbose(CALL_INFO, 5, 0, "Spawning %d literal coroutines\n", workers);
+        output.verbose(CALL_INFO, 4, 0, "PROPAGATE: spawning %d/%lu literal coroutines\n",
+            workers, trail.size() - qhead);
         for (int lit_idx = 0; lit_idx < workers; lit_idx++) {
             // set up coroutines for watchers
             for (int i = 0; i < PROPAGATORS; i++) {
@@ -1131,20 +1204,15 @@ int SATSolver::unitPropagate() {
             batch_start = qhead;
         }
 
-        // If conflict found, record statistics and return
-        if (conflict != ClauseRef_Undef) {
-            if (decision_output_stream.is_open()) decision_output_stream << "#Conflict" << std::endl;
-            output.verbose(CALL_INFO, 2, 0, "CONFLICT: clause 0x%x\n", conflict);
-            conflictC++;
-            stat_conflicts->addData(1);
-            
+        // Stop if we've reached MAX_CONFL conflicts (unless MAX_CONFL is -1, meaning no limit)
+        if (MAX_CONFL >= 0 && (int)conflicts.size() >= MAX_CONFL) {
+            output.verbose(CALL_INFO, 2, 0, "PROPAGATE: MAX_CONFL reached, stop\n");
             qhead = trail.size();
-            return conflict;
         }
     }
     
     output.verbose(CALL_INFO, 3, 0, "PROPAGATE: no more propagations\n");
-    return conflict;
+    return;
 }
 
 void SATSolver::propagateLiteral(
@@ -1234,8 +1302,7 @@ void SATSolver::propagateLiteral(
         std::vector<uint64_t> worker_read_clauses(PROPAGATORS, 0);
         std::vector<uint64_t> worker_insert_watchers(PROPAGATORS, 0);
         std::vector<uint64_t> worker_polling(PROPAGATORS, 0);
-        output.verbose(CALL_INFO, 5, 0, 
-            "PROPAGATE[L%d] spawning %d watcher coroutines\n", lit_worker_id, workers);
+        output.verbose(CALL_INFO, 4, 0, "  spawning %d watcher coroutines\n", workers);
         // Create watcher coroutines
         for (int worker_id = 0; worker_id < workers; worker_id++) {
             coroutines[worker_id] = new coro_t::pull_type(
@@ -1298,7 +1365,7 @@ void SATSolver::propagateLiteral(
         }
         // finished all sub-coroutines
         yield_ptr = parent_yield_ptr;
-        output.verbose(CALL_INFO, 4, 0, "  PROPAGATE[L%d]: Finished a watch block\n", lit_worker_id);
+        output.verbose(CALL_INFO, 4, 0, "PROPAGATE[L%d]: Finished a watch block\n", lit_worker_id);
 
         // After all workers finished, accumulate timing data
         cycles_read_clauses += worker_read_clauses[last_worker];
@@ -1310,9 +1377,9 @@ void SATSolver::propagateLiteral(
             if (do_prewatch) watches.writePreWatchers(watch_idx, curr_block.nodes);
             else watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block, wmd);
         }
-        
-        if (conflict != ClauseRef_Undef) break;
-        
+
+        if (MAX_CONFL >= 0 && conflicts.size() >= MAX_CONFL) break;
+
         // the current block is deleted if it has no valid nodes left
         if (curr_block.countValidNodes() != 0 && !do_prewatch) {
             prev_addr = curr_addr;
@@ -1366,7 +1433,7 @@ void SATSolver::propagateWatchers(
 
     // Print clause for debugging
     output.verbose(CALL_INFO, 4, 0,
-        "  [L%d-W%d] Watch block[%d]: blocker:%d, clause 0x%x: %s\n",
+        "[L%d-W%d] Watch block[%d]: blocker:%d, clause 0x%x: %s\n",
         lit_worker_id, worker_id, watcher_i, toInt(curr_block.nodes[watcher_i].blocker),
         clause_addr, printClause(c.literals).c_str());
 
@@ -1375,8 +1442,7 @@ void SATSolver::propagateWatchers(
         std::swap(c.literals[0], c.literals[1]);
         clauses.writeLiteral(clause_addr, c[0], 0);
         clauses.writeLiteral(clause_addr, c[1], 1);
-        output.verbose(CALL_INFO, 4, 0, "    [L%d-W%d]Swapped literals 0 and 1\n", 
-            lit_worker_id, worker_id);
+        output.verbose(CALL_INFO, 4, 0, "  Swapped literals 0 and 1\n");
     }
     sst_assert(c[1] == not_p, CALL_INFO, -1, "Second literal %d is not %d", toInt(c[1]), toInt(not_p));
 
@@ -1384,7 +1450,7 @@ void SATSolver::propagateWatchers(
     Lit first = c[0];
     if (var_assigned[var(first)] && value(first) == true) {
         output.verbose(CALL_INFO, 4, 0,
-            "    [L%d-W%d]First literal %d is true\n", lit_worker_id, worker_id, toInt(first));
+            "  First literal %d is true\n", toInt(first));
         curr_block.nodes[watcher_i].blocker = first;
         block_modified = true;
 
@@ -1402,8 +1468,7 @@ void SATSolver::propagateWatchers(
             clauses.writeLiteral(clause_addr, c[1], 1);
             clauses.writeLiteral(clause_addr, c[k], k);
             output.verbose(CALL_INFO, 4, 0, 
-                "    [L%d-W%d]Found new watch: literal %d at position %zu\n", 
-                lit_worker_id, worker_id, toInt(c[1]), k);
+                "  Found new watch: literal %d at position %zu\n", toInt(c[1]), k);
 
             // Time spent polling for busy watches
             SST::Cycle_t start_poll = getCurrentSimCycle() / 1000;
@@ -1414,7 +1479,7 @@ void SATSolver::propagateWatchers(
             SST::Cycle_t end_poll = getCurrentSimCycle() / 1000;
             polling_cycles += (end_poll - start_poll);
 
-            output.verbose(CALL_INFO, 4, 0, "    [L%d-W%d]Start watchlist insertion\n", 
+            output.verbose(CALL_INFO, 5, 0, "  [L%d-W%d]Start watchlist insertion\n", 
                 lit_worker_id, worker_id);
 
             // Time spent inserting watchers
@@ -1437,20 +1502,21 @@ void SATSolver::propagateWatchers(
     }
 
     // Did not find a new watch - clause is unit or conflicting
-    output.verbose(CALL_INFO, 4, 0, "    [L%d-W%d]No new watch found\n", lit_worker_id, worker_id);
+    output.verbose(CALL_INFO, 5, 0, "  No new watch found\n");
 
     // Check if first literal is false (conflict) or undefined (unit)
     if (var_assigned[var(first)] && value(first) == false) {
         // Conflict detected
-        conflict = clause_addr;
-        output.verbose(CALL_INFO, 3, 0,
-            "    [L%d-W%d]Conflict: Clause 0x%x has all literals false\n", 
-            lit_worker_id, worker_id, conflict);
+        if (conflicts.size() < MAX_CONFL) {
+            conflicts.push_back(clause_addr);
+            output.verbose(CALL_INFO, 3, 0,
+                "  Conflict #%zu: Clause 0x%x has all literals false\n",
+                conflicts.size(), clause_addr);
+        } else { output.verbose(CALL_INFO, 3, 0, "  Conflict, but ignored\n"); }
     } else {
         // Unit clause found, propagate
-        output.verbose(CALL_INFO, 3, 0,
-            "    [L%d-W%d]forces literal %d (to true)\n", lit_worker_id, worker_id, toInt(first));
-        trailEnqueue(first, clause_addr);
+        output.verbose(CALL_INFO, 3, 0, "  forces literal %d (to true)\n", toInt(first));
+        if (conflicts.empty()) trailEnqueue(first, clause_addr);
     }
 
     // Release the lock on this clause
@@ -1469,28 +1535,19 @@ void SATSolver::issuePrefetch(uint64_t addr) {
 // analyze
 //-----------------------------------------------------------------------------------
 
-void SATSolver::analyze() {
+void SATSolver::analyze(Cref conflict, int worker_id) {
     output.verbose(CALL_INFO, 3, 0,
-        "ANALYZE: Starting conflict analysis of clause 0x%x\n", conflict);
-    
-    // Debug print for trail
-    if (output.getVerboseLevel() >= 3) {
-        int j = 0;
-        output.verbose(CALL_INFO, 3, 0, "Trail (%zu):", trail.size());
-        for (int i = 0; i < trail.size(); i++) {
-            if (i == trail_lim[j]) {
-                output.output("\n    dec=%d: ",j);
-                j++;
-            }
-            output.output(" %d", toInt(trail[i]));
-        }
-        output.output("\n");
-    }
+        "ANALYZE[%d]: Starting conflict analysis of clause 0x%x\n", worker_id, conflict);
 
     // First UIP scheme
-    learnt_clause.clear();
-    learnt_clause.resize(1);  // Reserve space for the asserting literal
-    
+    std::vector<Lit> tmp_learnt;
+    tmp_learnt.resize(1);  // Reserve space for the asserting literal
+    std::vector<char> tmp_seen;
+    tmp_seen.resize(num_vars + 1, 0);
+    int tmp_btlevel = 0;
+    std::vector<Cref> tmp_c_to_bump;
+    std::vector<Var> tmp_v_to_bump;
+
     int pathC = 0;  // Counter for literals at current decision level
     Lit p = lit_Undef;
     int index = trail.size() - 1;
@@ -1498,45 +1555,44 @@ void SATSolver::analyze() {
     // Add literals from conflict clause to learnt clause
     do {
         assert(conflict != ClauseRef_Undef); // (otherwise should be UIP)
-        const Clause& c = clauses.readClause(conflict);
+        const Clause& c = clauses.readClause(conflict, worker_id);
         
         // Bump activity for learnt clauses
-        if (clauses.isLearnt(conflict))
-            claBumpActivity(conflict, c.act());
+        if (clauses.isLearnt(conflict)) c_to_bump.push_back(conflict);
         
         // Debug print for current clause
-        output.verbose(CALL_INFO, 5, 0, "ANALYZE: current clause (0x%x): %s\n",
-            conflict, printClause(c.literals).c_str());
+        output.verbose(CALL_INFO, 5, 0, "ANALYZE[%d]: current clause (0x%x): %s\n",
+            worker_id, conflict, printClause(c.literals).c_str());
 
         // For each literal in the clause
         for (size_t i = (p == lit_Undef) ? 0 : 1; i < c.litSize(); i++) {
             Lit q = c[i];
             Var v = var(q);
             output.verbose(CALL_INFO, 5, 0,
-                "ANALYZE: Processing literal %d\n", toInt(q));
-            
+                "ANALYZE[%d]: Processing literal %d\n", worker_id, toInt(q));
+
             // Read variable data individually for each variable in the conflict clause
-            Variable v_data = variables.readVar(v);
+            Variable v_data = variables.readVar(v, worker_id);
 
-            if (!seen[v] && v_data.level > 0) {
-                order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::BUMP, v));
-                unstalled_heap = true;
-                unstalled_cnt++;
+            if (!tmp_seen[v] && v_data.level > 0) {
+                // Bump activity for seen variables
+                v_to_bump.push_back(v);
 
-                seen[v] = 1;
+                tmp_seen[v] = 1;
                 output.verbose(CALL_INFO, 5, 0,
-                    "ANALYZE:     Marking var %d as seen\n", v);
-                
+                    "ANALYZE[%d]:     Marking var %d as seen\n", worker_id, v);
+
                 if (v_data.level >= current_level()) {
                     pathC++;  // Count literals at current decision level
                     output.verbose(CALL_INFO, 5, 0,
-                        "ANALYZE:     At current level, pathC=%d\n", pathC);
+                        "ANALYZE[%d]:     At current level, pathC=%d\n", worker_id, pathC);
                 } else {
+                    if (v_data.level > tmp_btlevel) tmp_btlevel = v_data.level;
                     // Literals from earlier decision levels go directly to the learnt clause
-                    learnt_clause.push_back(q);
+                    tmp_learnt.push_back(q);
                     output.verbose(CALL_INFO, 5, 0,
-                        "ANALYZE:     Added to learnt clause (earlier level %zu)\n", 
-                        v_data.level);
+                        "ANALYZE[%d]:     Added to learnt clause (earlier level %zu)\n",
+                        worker_id, v_data.level);
                 }
             }
         }
@@ -1544,26 +1600,34 @@ void SATSolver::analyze() {
         // Select next literal to expand from the trail
         // HACK: may need to check the entire trail if trail is not in order
         // index = trail.size() - 1;
-        while (!seen[var(trail[index--])]);
+        while (!tmp_seen[var(trail[index--])]);
         p = trail[index+1];
-        conflict = variables.getReason(var(p));
+        conflict = variables.getReason(var(p), worker_id);
 
-        seen[var(p)] = 0;
+        tmp_seen[var(p)] = 0;
         pathC--;
         
         output.verbose(CALL_INFO, 5, 0,
-            "ANALYZE: Selected trail literal %d, index %d, reason=0x%x, pathC=%d\n",
-            toInt(p), index, conflict, pathC);
-        
+            "ANALYZE[%d]: Selected trail literal %d, index %d, reason=0x%x, pathC=%d\n",
+            worker_id, toInt(p), index, conflict, pathC);
+
     } while (pathC > 0);
     
     // Add the 1-UIP literal as the first in the learnt clause
-    learnt_clause[0] = ~p;
+    tmp_learnt[0] = ~p;
 
     // Print learnt clause for debug
-    output.verbose(CALL_INFO, 3, 0, "ANALYZE: learnt: %s\n",
-        printClause(learnt_clause).c_str());
+    output.verbose(CALL_INFO, 4, 0, "ANALYZE[%d]: learnt: %s, bt_level=%d\n",
+        worker_id, printClause(tmp_learnt).c_str(), tmp_btlevel);
 
+    if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level 
+        && tmp_learnt.size() < learnt_clause.size())) {
+        bt_level = tmp_btlevel;
+        learnt_clause = std::move(tmp_learnt);
+        seen = std::move(tmp_seen);
+        c_to_bump = std::move(tmp_c_to_bump);
+        v_to_bump = std::move(tmp_v_to_bump);
+    }
     // order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::DEBUG_HEAP, 0));
 }
 
@@ -1719,7 +1783,7 @@ void SATSolver::trailEnqueue(Lit literal, int reason) {
     // Add to trail
     trail.push_back(literal);
     stat_assigns->addData(1);
-    output.verbose(CALL_INFO, 5, 0,"ASSIGN: x%d = %d at level %d due to clause %d\n", 
+    output.verbose(CALL_INFO, 6, 0,"ASSIGN: x%d = %d at level %d due to clause %d\n", 
         v, var_value[v] ? 1 : 0, current_level(), reason);
 }
 
@@ -1854,7 +1918,7 @@ bool SATSolver::litRedundant(Lit p, int worker_id) {
         output.verbose(CALL_INFO, 5, 0, "MIN[%d] literal %d not redundant, reason undefined\n", worker_id, toInt(p));
         return false;
     }
-    
+
     assert(seen[var(p)] == seen_undef || seen[var(p)] == seen_source);
     
     std::vector<ShrinkStackElem> analyze_stack; // Stack for clause minimization

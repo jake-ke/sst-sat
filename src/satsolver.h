@@ -132,7 +132,7 @@ public:
     // Core CDCL Algorithm
     void initialize();
     bool decide();
-    int unitPropagate();
+    void unitPropagate();
     void propagateLiteral(int lit_worker_id, 
                           uint64_t& read_headptr_cycles, 
                           uint64_t& read_watcher_blocks_cycles);
@@ -140,7 +140,7 @@ public:
                            int lit_worker_id, int worker_id,
                            uint64_t& read_clauses_cycles, uint64_t& insert_watchers_cycles, 
                            uint64_t& polling_cycles);
-    void analyze();
+    void analyze(Cref conflict, int worker_id = 0);
     void findBtLevel();
     void backtrack(int backtrack_level);
     
@@ -221,10 +221,12 @@ private:
     std::vector<uint> trail_lim;       // Indices in trail for the first literal at each decision level
     
     // Clause learning
-    int conflict;                               // Conflict clause index from propagation
+    std::vector<Cref> conflicts;                // Conflict clauses from propagation
     std::vector<Lit> learnt_clause;             // Learnt clause from conflict analysis
     int bt_level;                               // Backtrack level from conflict analysis
     std::vector<char> seen;                     // Temporary array for conflict analysis
+    std::vector<Cref> c_to_bump;
+    std::vector<Var> v_to_bump;
 
     // Clause minimization
     int ccmin_mode;                             // Conflict clause minimization mode
