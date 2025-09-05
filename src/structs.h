@@ -79,6 +79,28 @@ struct StoreQueueEntry {
         : addr(a), size(s), data(d) {}
 };
 
+// for parallel literal propagation
+class WatchListQueue {
+private:
+    // number of items waiting to be inserted into watchlist
+    std::unordered_map<int, int> counts;
+
+public:
+    void add(int item) { counts[item]++; }
+
+    void remove(int item) {
+        if (counts.find(item) != counts.end()) {
+            counts[item]--;
+            if (counts[item] <= 0) counts.erase(item);
+        }
+    }
+
+    int count(int item) const {
+        auto it = counts.find(item);
+        return (it != counts.end()) ? it->second : 0;
+    }
+};
+
 // Helper functions for literals
 inline Lit mkLit(Var var, bool sign = false) { Lit p; p.x = var + var + (int)sign; return p; }
 inline Lit operator ~(Lit p) { Lit q; q.x = p.x ^ 1; return q; }

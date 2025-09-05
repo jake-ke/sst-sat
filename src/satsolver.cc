@@ -1094,28 +1094,31 @@ void SATSolver::unitPropagate() {
     clause_locks.clear();
 
     while (qhead < trail.size()) {
-        stat_propagations->addData(1);
-
         // Process literals in parallel batches of PARA_LITS
         coro_t::push_type* parent_yield_ptr = yield_ptr;
         int workers = std::min(PARA_LITS, int(trail.size() - qhead));
-        std::vector<coro_t::pull_type*> coroutines(workers);
-        std::vector<coro_t::push_type*> yield_ptrs(workers);
+        std::vector<coro_t::pull_type*> coroutines(PARA_LITS, nullptr);
+        std::vector<coro_t::push_type*> yield_ptrs(PARA_LITS, nullptr);
+        active_workers.resize(PARA_LITS * PROPAGATORS, false);
+        polling.resize(PARA_LITS * PROPAGATORS, false);
 
         // Track times for each literal worker
-        std::vector<uint64_t> lit_read_headptr(workers, 0);
-        std::vector<uint64_t> lit_read_watcher_blocks(workers, 0);
+        std::vector<uint64_t> lit_read_headptr(PARA_LITS, 0);
+        std::vector<uint64_t> lit_read_watcher_blocks(PARA_LITS, 0);
         int last_worker = -1;
 
         // Spawn coroutines for each literal in this batch
         bool done = true;
-        output.verbose(CALL_INFO, 4, 0, "PROPAGATE: spawning %d/%lu literal coroutines\n",
+        // printf("Prop %lu, Cycle %lu\n", getStatCount(stat_propagations), getCurrentSimCycle()/1000);
+        output.verbose(CALL_INFO, 4, 0, "PROPAGATE: spawning literal coroutine (%d/%lu)\n",
             workers, trail.size() - qhead);
         for (int lit_idx = 0; lit_idx < workers; lit_idx++) {
-            // set up coroutines for watchers
-            for (int i = 0; i < PROPAGATORS; i++) {
-                active_workers.push_back(false);
-                polling.push_back(false);
+            // track max literal parallelism
+            if (qhead == batch_end) {
+                stat_para_vars->addData(batch_end - batch_start);
+                // Start tracking a new batch
+                batch_start = batch_end;
+                batch_end = trail.size();
             }
 
             // when watcher coroutines are not launched, assume lit coroutine uses the start
@@ -1124,11 +1127,12 @@ void SATSolver::unitPropagate() {
                 (coro_t::push_type &yield) {
                     yield_ptr = &yield;
                     yield_ptrs[lit_idx] = yield_ptr;
-                    propagateLiteral(lit_idx,
+                    propagateLiteral(trail[qhead++], lit_idx,
                                      lit_read_headptr[lit_idx], 
                                      lit_read_watcher_blocks[lit_idx]);
                 });
             coroutines[lit_idx] = lit_coro;
+            stat_propagations->addData(1);
             if (*lit_coro) done = false; // May finish without yielding
         }
 
@@ -1138,7 +1142,7 @@ void SATSolver::unitPropagate() {
         // Process all coroutines until completion
         while (!done) {
             // Check for active workers within each lit coroutine
-            for (int j = 0; j < coroutines.size(); j++) {
+            for (int j = 0; j < PARA_LITS; j++) {
                 for (int jj = 0; jj < PROPAGATORS; jj++) {
                     if (active_workers[j * PROPAGATORS + jj]) {
                         yield_ptr = yield_ptrs[j];
@@ -1149,7 +1153,7 @@ void SATSolver::unitPropagate() {
                 }
             }
 
-            for (int j = 0; j < coroutines.size(); j++) {
+            for (int j = 0; j < PARA_LITS; j++) {
                 for (int jj = 0; jj < PROPAGATORS; jj++) {
                     if (polling[j * PROPAGATORS + jj]) {
                         yield_ptr = yield_ptrs[j];
@@ -1159,18 +1163,53 @@ void SATSolver::unitPropagate() {
                 }
             }
 
+            // launch new lit coroutines if there are empty slots
+            for (int j = 0; j < PARA_LITS; j++) {
+                bool lit_done = true;
+                if (coroutines[j] != nullptr)
+                    if (*coroutines[j])
+                        lit_done = false;
+
+                if (lit_done && qhead < trail.size() 
+                    && !(MAX_CONFL >= 0 && (int)conflicts.size() >= MAX_CONFL)) {
+                    // printf("Prop %lu, Cycle %lu\n", getStatCount(stat_propagations), getCurrentSimCycle()/1000);
+                    // track max literal parallelism
+                    if (qhead == batch_end) {
+                        stat_para_vars->addData(batch_end - batch_start);
+                        // Start tracking a new batch
+                        batch_start = batch_end;
+                        batch_end = trail.size();
+                    }
+                    // start a new worker right away if available
+                    output.verbose(CALL_INFO, 4, 0,
+                        "PROPAGATE: spawning literal coroutine (1/%lu) at L%d\n",
+                        trail.size() - qhead, j);
+                    delete coroutines[j];
+                    coro_t::pull_type* lit_coro = new coro_t::pull_type(
+                        [this, j, &lit_read_headptr, &lit_read_watcher_blocks, &yield_ptrs]
+                        (coro_t::push_type &yield) {
+                            yield_ptr = &yield;
+                            yield_ptrs[j] = yield_ptr;
+                            propagateLiteral(trail[qhead++], j,
+                                             lit_read_headptr[j], 
+                                             lit_read_watcher_blocks[j]);
+                        });
+                    coroutines[j] = lit_coro;
+                    stat_propagations->addData(1);
+                }
+            }
+
             // Check if any workers are still active
             // we can just check the parent coroutines
             done = true;
-            for (int j = 0; j < coroutines.size(); j++) {
+            for (int j = 0; j < PARA_LITS; j++) {
                 if (coroutines[j] != nullptr) {
                     if (*coroutines[j]) done = false;
                     else {
                         last_worker = j;
                         delete coroutines[j];
                         coroutines[j] = nullptr;
-                        if (j < yield_ptrs.size())
-                            yield_ptrs[j] = nullptr;
+                        yield_ptrs[j] = nullptr;
                     }
                 }
             }
@@ -1189,20 +1228,9 @@ void SATSolver::unitPropagate() {
         polling.clear();
         yield_ptr = parent_yield_ptr;
 
-        // Update qhead for the batch we processed
-        qhead += workers;
-
         // Accumulate timing data of the last finished worker
         cycles_read_headptr += lit_read_headptr[last_worker];
         cycles_read_watcher_blocks += lit_read_watcher_blocks[last_worker];
-
-        // Check if the current batch of vars has been fully processed
-        if (qhead == batch_end) {
-            stat_para_vars->addData(batch_end - batch_start);
-            // Start tracking a new batch
-            batch_end = trail.size();
-            batch_start = qhead;
-        }
 
         // Stop if we've reached MAX_CONFL conflicts (unless MAX_CONFL is -1, meaning no limit)
         if (MAX_CONFL >= 0 && (int)conflicts.size() >= MAX_CONFL) {
@@ -1216,15 +1244,26 @@ void SATSolver::unitPropagate() {
 }
 
 void SATSolver::propagateLiteral(
+    Lit p,
     int lit_worker_id,
     uint64_t& read_headptr_cycles,
     uint64_t& read_watcher_blocks_cycles
 ) {
     // assuming we are using base_worker_id when watcher coroutines are not launched
     int base_worker_id = lit_worker_id * PROPAGATORS;
-    Lit p = trail[qhead + lit_worker_id];
     Lit not_p = ~p;
     int watch_idx = toWatchIndex(p);
+
+    // Wait for any previous watchlist insertion
+    while (wl_q.count(watch_idx) > 0) {
+        polling[base_worker_id] = true;
+        (*yield_ptr)();  // Yield to allow other workers to process
+    }
+    polling[base_worker_id] = false;
+
+    output.verbose(CALL_INFO, 3, 0,
+        "PROPAGATE[L%d]: Processing watchers for literal %d\n", 
+        lit_worker_id, toInt(not_p));
 
     // Measure time to read head pointer
     SST::Cycle_t start_headptr = getCurrentSimCycle() / 1000;
@@ -1233,14 +1272,9 @@ void SATSolver::propagateLiteral(
     read_headptr_cycles += (end_headptr - start_headptr);
 
     // Prefetch the next watch metadata if available
-    if (qhead + lit_worker_id + PARA_LITS < trail.size()) {
-        Lit next_p = trail[qhead + lit_worker_id + PARA_LITS];
-        issuePrefetch(watches.watchesAddr(toWatchIndex(next_p)));
+    if (qhead < trail.size()) {
+        issuePrefetch(watches.watchesAddr(toWatchIndex(trail[qhead])));
     }
-
-    output.verbose(CALL_INFO, 3, 0,
-        "PROPAGATE[L%d]: Processing watchers for literal %d\n", 
-        lit_worker_id, toInt(p));
 
     bool do_prewatch = PRE_WATCHERS > 0;
     uint32_t curr_addr = wmd.head_ptr;
@@ -1471,6 +1505,8 @@ void SATSolver::propagateWatchers(
             output.verbose(CALL_INFO, 4, 0, 
                 "  Found new watch: literal %d at position %zu\n", toInt(c[1]), k);
 
+            wl_q.add(toWatchIndex(~c[1]));
+
             // Time spent polling for busy watches
             SST::Cycle_t start_poll = getCurrentSimCycle() / 1000;
             while (watches.isBusy(toWatchIndex(~c[1]))) {
@@ -1498,6 +1534,7 @@ void SATSolver::propagateWatchers(
 
             // Release the lock on this clause
             clause_locks.erase(clause_addr);
+            wl_q.remove(toWatchIndex(~c[1]));
             return;
         }
     }

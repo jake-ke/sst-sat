@@ -133,7 +133,7 @@ public:
     void initialize();
     bool decide();
     void unitPropagate();
-    void propagateLiteral(int lit_worker_id, 
+    void propagateLiteral(Lit p, int lit_worker_id, 
                           uint64_t& read_headptr_cycles, 
                           uint64_t& read_watcher_blocks_cycles);
     void propagateWatchers(int watcher_i, Lit not_p, bool& block_modified, WatcherBlock& block, 
@@ -290,6 +290,7 @@ private:
     std::vector<bool> active_workers;               // Track completion of sub coroutines
     std::vector<bool> polling;                      // Track workers in polling state
     std::unordered_set<Cref> clause_locks;          // Track locked clauses during parallel propagation
+    WatchListQueue wl_q;                            // Track locked watchlists during parallel propagation
 
 
     // Statistics
