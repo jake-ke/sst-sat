@@ -332,9 +332,27 @@ def save_comparison_to_csv(df_merged, output_file='comparison_results.csv'):
             csv_data[f'{metric}_current'] = df_merged[current_col]
             csv_data[f'{metric}_backup'] = df_merged[backup_col]
             
-            # Calculate difference
-            csv_data[f'{metric}_diff'] = df_merged[current_col] - df_merged[backup_col]
+            if metric == 'sim_time_ms':
+                # Speedup = backup/current (speedup > 1 => current is faster)
+                cur = df_merged[current_col].astype(float)
+                bak = df_merged[backup_col].astype(float)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    speedup = bak / cur
+                    # Only keep valid positive ratios when both are > 0
+                    invalid = (~np.isfinite(speedup)) | (cur <= 0) | (bak <= 0)
+                    speedup[invalid] = np.nan
+                csv_data['sim_time_ms_speedup'] = speedup
+            else:
+                # Calculate difference for non-time metrics
+                csv_data[f'{metric}_diff'] = df_merged[current_col] - df_merged[backup_col]
     
+    # Keep test cases with empty results at the bottom (based on sim_time_ms_speedup availability)
+    if 'sim_time_ms_speedup' in csv_data.columns:
+        csv_data['_missing'] = csv_data['sim_time_ms_speedup'].isna()
+        csv_data = csv_data.sort_values(by=['_missing', 'problem'], ascending=[True, True]).drop(columns=['_missing'])
+    else:
+        csv_data = csv_data.sort_values(by=['problem'])
+
     # Save to CSV
     csv_data.to_csv(output_file, index=False)
     print(f"\nComparison data saved to: {output_file}")
@@ -374,19 +392,30 @@ def print_summary_stats(df_merged):
                 valid_idx = valid_idx & (df_merged[current_col] > 0) & (df_merged[backup_col] > 0)
             
             if valid_idx.sum() > 0:
-                current_vals = df_merged.loc[valid_idx, current_col]
-                backup_vals = df_merged.loc[valid_idx, backup_col]
+                current_vals = df_merged.loc[valid_idx, current_col].astype(float)
+                backup_vals = df_merged.loc[valid_idx, backup_col].astype(float)
                 
                 improved = (current_vals < backup_vals).sum()
                 worse = (current_vals > backup_vals).sum() 
                 same = (current_vals == backup_vals).sum()
 
-                # Calculate average diff (current/backup)
-                diffs = current_vals - backup_vals
-                avg_diff = diffs.mean()
-
-                metric_name = metric.replace('_', ' ').title()
-                print(f"{metric_name:<{metric_col_width}} {improved:>9} {worse:>9} {same:>7} {avg_diff:>14.2f}")
+                if metric == 'sim_time_ms':
+                    # GeoMean speedup = exp(mean(log(backup/current)))
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        ratios = backup_vals / current_vals
+                        ratios = ratios[(ratios > 0) & np.isfinite(ratios)]
+                        if len(ratios) > 0:
+                            geo_speedup = float(np.exp(np.log(ratios).mean()))
+                        else:
+                            geo_speedup = float('nan')
+                    metric_name = metric.replace('_', ' ').title()
+                    print(f"{metric_name:<{metric_col_width}} {improved:>9} {worse:>9} {same:>7} {geo_speedup:>14.3f}")
+                else:
+                    # Calculate average diff (current - backup)
+                    diffs = current_vals - backup_vals
+                    avg_diff = diffs.mean()
+                    metric_name = metric.replace('_', ' ').title()
+                    print(f"{metric_name:<{metric_col_width}} {improved:>9} {worse:>9} {same:>7} {avg_diff:>14.2f}")
 
 def main():
     print("Starting visualization script...")
