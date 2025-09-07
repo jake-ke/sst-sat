@@ -342,9 +342,19 @@ def save_comparison_to_csv(df_merged, output_file='comparison_results.csv'):
                     invalid = (~np.isfinite(speedup)) | (cur <= 0) | (bak <= 0)
                     speedup[invalid] = np.nan
                 csv_data['sim_time_ms_speedup'] = speedup
-            else:
-                # Calculate difference for non-time metrics
+            elif metric.endswith('_miss_rate') or metric.endswith('_pct'):
+                # For percentages, keep using difference
                 csv_data[f'{metric}_diff'] = df_merged[current_col] - df_merged[backup_col]
+            else:
+                # For other metrics, use ratio (current/backup)
+                cur = df_merged[current_col].astype(float)
+                bak = df_merged[backup_col].astype(float)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    ratio = cur / bak
+                    # Only keep valid positive ratios when both values are valid
+                    invalid = (~np.isfinite(ratio)) | (bak == 0)
+                    ratio[invalid] = np.nan
+                csv_data[f'{metric}_ratio'] = ratio
     
     # Keep test cases with empty results at the bottom (based on sim_time_ms_speedup availability)
     if 'sim_time_ms_speedup' in csv_data.columns:
@@ -377,7 +387,7 @@ def print_summary_stats(df_merged):
     print("\n" + "=" * (metric_col_width + 44))
     print("PERFORMANCE COMPARISON SUMMARY")
     print("=" * (metric_col_width + 44))
-    header = f"{'Metric':<{metric_col_width}} {'Improved':>9} {'Worse':>9} {'Same':>7} {'Avg Diff':>14}"
+    header = f"{'Metric':<{metric_col_width}} {'Improved':>9} {'Worse':>9} {'Same':>7} {'Avg Measure':>14}"
     print(header)
     print("-" * (metric_col_width + 44))
     
@@ -410,12 +420,23 @@ def print_summary_stats(df_merged):
                             geo_speedup = float('nan')
                     metric_name = metric.replace('_', ' ').title()
                     print(f"{metric_name:<{metric_col_width}} {improved:>9} {worse:>9} {same:>7} {geo_speedup:>14.3f}")
-                else:
-                    # Calculate average diff (current - backup)
+                elif metric.endswith('_miss_rate') or metric.endswith('_pct'):
+                    # For percentages, use arithmetic mean of differences
                     diffs = current_vals - backup_vals
                     avg_diff = diffs.mean()
                     metric_name = metric.replace('_', ' ').title()
                     print(f"{metric_name:<{metric_col_width}} {improved:>9} {worse:>9} {same:>7} {avg_diff:>14.2f}")
+                else:
+                    # For other metrics, use geometric mean of ratios (current/backup)
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        ratios = current_vals / backup_vals
+                        ratios = ratios[(ratios > 0) & np.isfinite(ratios)]
+                        if len(ratios) > 0:
+                            geo_ratio = float(np.exp(np.log(ratios).mean()))
+                        else:
+                            geo_ratio = float('nan')
+                    metric_name = metric.replace('_', ' ').title()
+                    print(f"{metric_name:<{metric_col_width}} {improved:>9} {worse:>9} {same:>7} {geo_ratio:>14.3f}")
 
 def main():
     print("Starting visualization script...")
