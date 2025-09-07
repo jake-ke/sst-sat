@@ -36,6 +36,9 @@ def parse_args():
     parser.add_argument('--random-freq', dest='random_var_freq', 
                         type=float, default=0.0,
                         help='Frequency of random decisions (0.0-1.0)')
+    parser.add_argument('--rand', dest='random_seed', 
+                        type=int, default=0,
+                        help='Random seed for initializing the heap (0 for no randomization)')
     parser.add_argument('--var-decay', dest='var_decay',
                         type=float, default=0.95,
                         help='Variable activity decay factor')
@@ -174,6 +177,7 @@ params = {
     "clauses_base_addr" : hex(clauses_base_addr),
     "var_act_base_addr" : hex(var_act_base_addr),
     "random_var_freq": str(args.random_var_freq),
+    "random_seed": str(args.random_seed),
     "var_decay": str(args.var_decay),
     "clause_decay": str(args.clause_decay),
     "prefetch_enabled": str(args.enable_prefetch),

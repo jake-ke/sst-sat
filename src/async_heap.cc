@@ -1,5 +1,6 @@
 #include <sst/core/sst_config.h> // This include is REQUIRED for all implementation files
 #include "async_heap.h"
+#include <random>  // For std::mt19937 and std::shuffle
 
 Heap::Heap(SST::ComponentId_t id, SST::Params& params,
            SST::Interfaces::StandardMem* mem, uint64_t heap_base_addr, uint64_t indices_base_addr) 
@@ -510,7 +511,7 @@ void Heap::removeMin() {
     complete(min_var);
 }
 
-void Heap::initHeap() {
+void Heap::initHeap(uint64_t random_seed) {
     output.verbose(CALL_INFO, 1, 0, "Size: %ld decision variables, %lu bytes\n",
                    (heap_size + 1), (heap_size + 1) * sizeof(Var));
     output.verbose(CALL_INFO, 1, 0, "Size: %ld indices, %lu bytes\n",
@@ -519,10 +520,24 @@ void Heap::initHeap() {
     std::vector<uint8_t> heap_data;
     std::vector<int> pos_map(heap_size + 1, -1);  // All indices start as -1 (not in heap)
     
-    int heap_idx = 0;
+    // Collect all decision variables first
+    std::vector<Var> decision_vars;
     for (Var v = 1; v <= (Var)heap_size; v++) {
-        if (!decision[v]) continue;
-        
+        if (decision[v]) {
+            decision_vars.push_back(v);
+        }
+    }
+    
+    // Randomize if a seed is provided
+    if (random_seed != 0) {
+        output.verbose(CALL_INFO, 1, 0, "Randomizing heap with seed %lu\n", random_seed);
+        std::mt19937 rng(random_seed);
+        std::shuffle(decision_vars.begin(), decision_vars.end(), rng);
+    }
+    
+    // Add variables to heap in (potentially randomized) order
+    int heap_idx = 0;
+    for (Var v : decision_vars) {
         // Append to heap array
         heap_data.resize((heap_idx + 1) * sizeof(Var));
         memcpy(heap_data.data() + heap_idx * sizeof(Var), &v, sizeof(Var));

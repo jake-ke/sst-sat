@@ -77,7 +77,7 @@ public:
     bool tick(SST::Cycle_t cycle);
     void handleMem(SST::Interfaces::StandardMem::Request* req);
     void handleRequest(HeapReqEvent* req);
-    void initHeap();
+    void initHeap(uint64_t random_seed = 0);  // 0 means no randomization
 
     size_t size() const { return heap_size; }
     bool empty() const { return heap_size == 0; }

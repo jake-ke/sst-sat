@@ -16,7 +16,6 @@
 SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     SST::Component(id), 
     state(IDLE),
-    random_seed(8888),
     var_inc(1.0),
     cla_inc(1.0),
     learntsize_factor((double)1/(double)3),
@@ -65,6 +64,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
         output.fatal(CALL_INFO, -1, "CNF file path not provided\n");
     }
 
+    random_seed = params.find<uint64_t>("random_seed", 8888);
     sort_clauses = params.find<bool>("sort_clauses", true);
 
     // Initialize activity-related variables
@@ -196,7 +196,7 @@ void SATSolver::init(unsigned int phase) {
         order_heap->decision = decision;
         order_heap->heap_size = num_vars;
         order_heap->var_inc_ptr = &var_inc;
-        order_heap->initHeap();
+        order_heap->initHeap(random_seed);
     }
     output.verbose(CALL_INFO, 3, 0, "SATSolver initialized in phase %u\n", phase);
 }
