@@ -40,6 +40,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     cycles_decision(0),
     cycles_reduce(0),
     cycles_restart(0),
+    cycles_heap_bump(0),
+    cycles_heap_insert(0),
     // Initialize cycle tracking
     prev_state(IDLE),
     last_state_change(0),
@@ -285,8 +287,9 @@ void SATSolver::finish() {
     // output.output("===========================================================================\n");
     
     uint64_t total_counted = cycles_propagate + cycles_analyze + cycles_minimize +
-                            cycles_backtrack + cycles_decision + cycles_reduce + cycles_restart;
-    
+                            cycles_backtrack + cycles_decision + cycles_reduce + cycles_restart +
+                            cycles_heap_insert + cycles_heap_bump;
+
     // Calculate percentages (avoid division by zero)
     double pct_propagate = (double)cycles_propagate * 100.0 / total_cycles;
     double pct_analyze = (double)cycles_analyze * 100.0 / total_cycles;
@@ -295,7 +298,9 @@ void SATSolver::finish() {
     double pct_decision = (double)cycles_decision * 100.0 / total_cycles;
     double pct_reduce = (double)cycles_reduce * 100.0 / total_cycles;
     double pct_restart = (double)cycles_restart * 100.0 / total_cycles;
-    
+    double pct_heap_insert = (double)cycles_heap_insert * 100.0 / total_cycles;
+    double pct_heap_bump = (double)cycles_heap_bump * 100.0 / total_cycles;
+
     // Print cycle count statistics with percentages
     output.output("===========================[ Cycle Statistics ]============================\n");
     output.output("Propagate    : %.2f%% \t(%lu cycles)\n", pct_propagate, cycles_propagate);
@@ -305,6 +310,8 @@ void SATSolver::finish() {
     output.output("Decision     : %.2f%% \t(%lu cycles)\n", pct_decision, cycles_decision);
     output.output("Reduce DB    : %.2f%% \t(%lu cycles)\n", pct_reduce, cycles_reduce);
     output.output("Restart      : %.2f%% \t(%lu cycles)\n", pct_restart, cycles_restart);
+    output.output("Heap Insert  : %.2f%% \t(%lu cycles)\n", pct_heap_insert, cycles_heap_insert);
+    output.output("Heap Bump    : %.2f%% \t(%lu cycles)\n", pct_heap_bump, cycles_heap_bump);
     output.output("Total Counted: %lu cycles\n", total_counted);
     output.output("===========================================================================\n");
     
@@ -548,11 +555,11 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
                 cycles_analyze += elapsed;
                 output.verbose(CALL_INFO, 8, 0, "DEBUG: Analyze cycles %lu\n", cycles_analyze);
                 break;
+            case BTLEVEL:  // count towards minimize
             case MINIMIZE:
                 cycles_minimize += elapsed;
                 output.verbose(CALL_INFO, 8, 0, "DEBUG: Minimize cycles %lu\n", cycles_minimize);
                 break;
-            case BTLEVEL:
             case BACKTRACK:
                 cycles_backtrack += elapsed;
                 output.verbose(CALL_INFO, 8, 0, "DEBUG: Backtrack cycles %lu\n", cycles_backtrack);
@@ -568,6 +575,10 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
             case RESTART:
                 cycles_restart += elapsed;
                 output.verbose(CALL_INFO, 8, 0, "DEBUG: Restart cycles %lu\n", cycles_restart);
+                break;
+            case WAIT_HEAP:
+                if (state == BACKTRACK) cycles_heap_bump += elapsed;
+                else cycles_heap_insert += elapsed;
                 break;
             default:
                 break;

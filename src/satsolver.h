@@ -328,6 +328,8 @@ private:
     uint64_t cycles_decision;
     uint64_t cycles_reduce;
     uint64_t cycles_restart;
+    uint64_t cycles_heap_bump;
+    uint64_t cycles_heap_insert;
     uint64_t total_cycles;
     
     // Cycle tracking
