@@ -275,7 +275,7 @@ run_single_test() {
     append_to_file_safely "$progress_file" "START|$filename|$start_time"
     
     # Build command with timeout and basic arguments
-    local command="timeout 18000 sst ./tests/test_one_level.py -- --cnf \"$file\" --stats-file \"$stats_file\""
+    local command="timeout 10800 sst ./tests/test_one_level.py -- --cnf \"$file\" --stats-file \"$stats_file\""
     
     # Add optional cache/memory parameters only if provided
     [[ -n "$RAM2_CFG" ]] && command+=" --ram2-cfg $RAM2_CFG"

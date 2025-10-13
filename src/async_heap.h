@@ -11,36 +11,6 @@
 #include "async_var_activity.h"
 #include "reorder_buffer.h"
 
-// Events for heap operations
-class HeapReqEvent : public SST::Event {
-public:
-    enum OpType { INSERT, REMOVE_MIN, READ, BUMP, DEBUG_HEAP };
-    OpType op;
-    int arg;
-    HeapReqEvent() : op(HeapReqEvent::READ), arg(0) {}
-    HeapReqEvent(OpType o, int a = 0)
-        : op(o), arg(a) {}
-    
-    void serialize_order(SST::Core::Serialization::serializer& ser) override {
-        Event::serialize_order(ser);
-        SST_SER(op);
-        SST_SER(arg);
-    }
-    ImplementSerializable(HeapReqEvent);
-};
-
-class HeapRespEvent : public SST::Event {
-public:
-    int result;
-    HeapRespEvent() : result(0) {}
-    HeapRespEvent(int r) : result(r) {}
-    
-    void serialize_order(SST::Core::Serialization::serializer& ser) override {
-        Event::serialize_order(ser);
-        SST_SER(result);
-    }
-    ImplementSerializable(HeapRespEvent);
-};
 
 class Heap : public SST::SubComponent {
 public:
@@ -70,15 +40,15 @@ public:
     Heap(SST::ComponentId_t id, SST::Params& params,
          SST::Interfaces::StandardMem* mem, uint64_t heap_base_addr, uint64_t indices_base_addr);
     
-    size_t heap_size;
-    std::vector<bool> decision;         // Whether variable is eligible for decisions
-    double* var_inc_ptr;
-
     bool tick(SST::Cycle_t cycle);
     void handleMem(SST::Interfaces::StandardMem::Request* req);
     void handleRequest(HeapReqEvent* req);
     void initHeap(uint64_t random_seed = 0);  // 0 means no randomization
 
+    void setDecisionFlags(const std::vector<bool>& dec) { decision = dec; }
+    void setHeapSize(size_t size) { heap_size = size; }
+    void setVarIncPtr(double* ptr) { var_inc_ptr = ptr; }
+    void setLineSize(size_t size) { line_size = size; var_activity.setLineSize(size); }
     size_t size() const { return heap_size; }
     bool empty() const { return heap_size == 0; }
     
@@ -95,8 +65,12 @@ private:
     std::vector<coro_t::push_type*> heap_sink_ptrs;
     coro_t::push_type* heap_sink_ptr;  // Pointer to current coroutine sink
     size_t line_size;
+
+    size_t heap_size;
+    std::vector<bool> decision;         // Whether variable is eligible for decisions
+    double* var_inc_ptr;
     bool debugging;  // reading the entire heap, no new requests
-    
+
     VarActivity var_activity;
     uint64_t var_act_base_addr;  // Base address for variable activity array
     bool lt(Var x, Var y, int worker_id = 0);  // Comparison method using var_activity directly
@@ -141,9 +115,6 @@ private:
     void decrease(Var key, int worker_id = 0);
     void removeMin();
     void varBump(Var key, int worker_id = 0);
-
-public:
-    void setLineSize(size_t size) { line_size = size; var_activity.setLineSize(size); }
 };
 
 #endif

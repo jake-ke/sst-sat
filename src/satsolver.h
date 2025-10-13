@@ -9,7 +9,9 @@
 #include <fstream>    // For reading decision file
 #include <boost/coroutine2/all.hpp>
 #include "structs.h"
-#include "async_heap.h"
+// Heap implementations (select via USE_PIPELINED_HEAP build flag)
+#include "async_heap.h"         // classic external memory heap (Heap)
+#include "pipelined_heap.h"     // pipelined heap (PipelinedHeap)
 #include "async_variables.h"
 #include "async_watches.h"
 #include "async_clauses.h"
@@ -93,7 +95,6 @@ public:
     )
 
     SST_ELI_DOCUMENT_PORTS(
-        {"cnf_mem_link", "Connection to CNF memory", {"memHierarchy.MemEventBase"}},
         {"global_mem_link", "Connection to global memory", {"memHierarchy.MemEventBase"}},
         {"heap_port", "Link to external heap subcomponent", {"sst.Event"}},
         {"prefetch_port", "Port to send prefetch requests", {"SST::Event"}}
@@ -253,7 +254,12 @@ private:
     uint64_t var_act_base_addr;         // Base address for variable activity array
     
     // external heap
-    Heap* order_heap;                   // Heap of variables ordered by activity
+    // Selected heap implementation pointer (pipelined by default)
+#ifdef USE_CLASSIC_HEAP
+    Heap* order_heap;                   // Classic external memory heap
+#else
+    PipelinedHeap* order_heap;          // Pipelined implementation
+#endif
     bool unstalled_heap;                // Whether the heap has been unstalled
     int unstalled_cnt;                  // Number of unstalled heap responses to receive
 

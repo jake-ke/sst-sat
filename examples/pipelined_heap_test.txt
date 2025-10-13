@@ -1,0 +1,35 @@
+vars 10
+# Manual verification steps for PipelinedHeapTest
+# Supported commands: insert <var>, bump <var>, remove
+remove
+bump 3
+bump 2
+bump 6
+remove
+remove
+bump 1
+bump 9
+bump 5
+insert 2
+insert 3
+insert 6
+bump 2
+bump 3
+bump 6
+remove
+remove
+remove
+insert 1
+insert 3
+insert 2
+insert 6
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove

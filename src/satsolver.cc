@@ -116,11 +116,16 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     clauses = Clauses(verbose, global_memory, clauses_cmd_base_addr, clauses_base_addr, &yield_ptr);
     clauses.setReorderBuffer(&reorder_buffer);
     
-    // Load the heap subcomponent
+    // Load the selected heap subcomponent depending on build flag
+#ifdef USE_CLASSIC_HEAP
     order_heap = loadUserSubComponent<Heap>("order_heap",
         SST::ComponentInfo::SHARE_PORTS | SST::ComponentInfo::SHARE_STATS,
-        global_memory, heap_base_addr, indices_base_addr
-    );
+        global_memory, heap_base_addr, indices_base_addr);
+#else
+    order_heap = loadUserSubComponent<PipelinedHeap>("order_heap",
+        SST::ComponentInfo::SHARE_PORTS | SST::ComponentInfo::SHARE_STATS,
+        global_memory, var_act_base_addr);
+#endif
     sst_assert(order_heap != nullptr, CALL_INFO, -1, "Unable to load Heap subcomponent\n");
     unstalled_heap = false;
     unstalled_cnt = 0;
@@ -195,9 +200,9 @@ void SATSolver::init(unsigned int phase) {
         watches.initWatches(2 * (num_vars + 1), parsed_clauses);
         clauses.initialize(parsed_clauses);
 
-        order_heap->decision = decision;
-        order_heap->heap_size = num_vars;
-        order_heap->var_inc_ptr = &var_inc;
+        order_heap->setDecisionFlags(decision);
+        order_heap->setHeapSize(num_vars);
+        order_heap->setVarIncPtr(&var_inc);
         order_heap->initHeap(random_seed);
     }
     output.verbose(CALL_INFO, 3, 0, "SATSolver initialized in phase %u\n", phase);
@@ -549,32 +554,32 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
         switch (prev_state) {
             case PROPAGATE:
                 cycles_propagate += elapsed;
-                output.verbose(CALL_INFO, 8, 0, "DEBUG: Propagate cycles %lu\n", cycles_propagate);
+                output.verbose(CALL_INFO, 4, 0, "DEBUG: Propagate cycles %lu\n", cycles_propagate);
                 break;
             case ANALYZE:
                 cycles_analyze += elapsed;
-                output.verbose(CALL_INFO, 8, 0, "DEBUG: Analyze cycles %lu\n", cycles_analyze);
+                output.verbose(CALL_INFO, 4, 0, "DEBUG: Analyze cycles %lu\n", cycles_analyze);
                 break;
             case BTLEVEL:  // count towards minimize
             case MINIMIZE:
                 cycles_minimize += elapsed;
-                output.verbose(CALL_INFO, 8, 0, "DEBUG: Minimize cycles %lu\n", cycles_minimize);
+                output.verbose(CALL_INFO, 4, 0, "DEBUG: Minimize cycles %lu\n", cycles_minimize);
                 break;
             case BACKTRACK:
                 cycles_backtrack += elapsed;
-                output.verbose(CALL_INFO, 8, 0, "DEBUG: Backtrack cycles %lu\n", cycles_backtrack);
+                output.verbose(CALL_INFO, 4, 0, "DEBUG: Backtrack cycles %lu\n", cycles_backtrack);
                 break;
             case DECIDE:
                 cycles_decision += elapsed;
-                output.verbose(CALL_INFO, 8, 0, "DEBUG: Decision cycles %lu\n", cycles_decision);
+                output.verbose(CALL_INFO, 4, 0, "DEBUG: Decision cycles %lu\n", cycles_decision);
                 break;
             case REDUCE:
                 cycles_reduce += elapsed;
-                output.verbose(CALL_INFO, 8, 0, "DEBUG: Reduce cycles %lu\n", cycles_reduce);
+                output.verbose(CALL_INFO, 4, 0, "DEBUG: Reduce cycles %lu\n", cycles_reduce);
                 break;
             case RESTART:
                 cycles_restart += elapsed;
-                output.verbose(CALL_INFO, 8, 0, "DEBUG: Restart cycles %lu\n", cycles_restart);
+                output.verbose(CALL_INFO, 4, 0, "DEBUG: Restart cycles %lu\n", cycles_restart);
                 break;
             case WAIT_HEAP:
                 if (state == BACKTRACK) cycles_heap_bump += elapsed;
@@ -588,7 +593,13 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
         prev_state = state;
         last_state_change = cycle;
     }
-    
+
+    if (cycle % 100000 == 0 && cycle > 0) {
+        output.verbose(CALL_INFO, 2, 0, "Propagations: %lu, Conflicts: %lu, Decisions: %lu, Learnt: %lu\n",
+            getStatCount(stat_propagations), getStatCount(stat_conflicts),
+            getStatCount(stat_decisions), getStatCount(stat_learned));
+    }
+
     switch (state) {
         case IDLE: return false; // skip prints
         case INIT: 
@@ -673,10 +684,13 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
         case BTLEVEL:
             if (learnt_clause.size() == 1) {
                 bt_level = 0;
+                state = BACKTRACK;
+#ifdef USE_CLASSIC_HEAP
                 if (OVERLAP_HEAP_BUMP) {
                     state = WAIT_HEAP;
                     next_state = BACKTRACK;
                 } else state = BACKTRACK;
+#endif
             } else {
                 coroutine = new coro_t::pull_type(
                     [this](coro_t::push_type &yield) {
@@ -770,10 +784,12 @@ void SATSolver::execPropagate() {
     else if (nLearnts() - nAssigns() >= max_learnts) state = REDUCE;
     else state = DECIDE;
 
+#ifdef USE_CLASSIC_HEAP
     if (OVERLAP_HEAP_INSERT) {
         next_state = state;
         state = WAIT_HEAP;
     }
+#endif
 }
 
 void SATSolver::execAnalyze() {
@@ -840,8 +856,10 @@ void SATSolver::execAnalyze() {
 
     for (const Var& v : v_to_bump) {
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::BUMP, v));
-        unstalled_heap = true;
+#ifdef USE_CLASSIC_HEAP
+        if (OVERLAP_HEAP_BUMP) unstalled_heap = true;
         unstalled_cnt++;
+#endif
     }
     for (const Cref& c : c_to_bump) {
         const Clause& cdata = clauses.readClause(c);
@@ -851,11 +869,14 @@ void SATSolver::execAnalyze() {
     output.verbose(CALL_INFO, 3, 0, "Final learnt: %s\n",
         printClause(learnt_clause).c_str());
 
+    state = MINIMIZE;
+#ifdef USE_CLASSIC_HEAP
     if (OVERLAP_HEAP_BUMP) state = MINIMIZE;
     else {
         state = WAIT_HEAP;
         next_state = MINIMIZE;
     }
+#endif
 }
 
 void SATSolver::execMinimize() {
@@ -990,11 +1011,14 @@ void SATSolver::execBacktrack() {
             "LEARN: Adjusted max_learnts to %.0f\n", max_learnts);
     }
 
+    state = PROPAGATE;
+#ifdef USE_CLASSIC_HEAP
     if (OVERLAP_HEAP_INSERT) state = PROPAGATE;
     else {
         state = WAIT_HEAP;
         next_state = PROPAGATE;
     }
+#endif
 }
 
 void SATSolver::execReduce() {
@@ -1005,7 +1029,7 @@ void SATSolver::execReduce() {
 }
 
 void SATSolver::execRestart() {
-    output.verbose(CALL_INFO, 2, 0, "RESTART: Executing restart #%d\n", curr_restarts);
+    output.verbose(CALL_INFO, 3, 0, "RESTART: Executing restart #%d\n", curr_restarts);
     backtrack(0);
     conflictC = 0;
     curr_restarts++;
@@ -1015,14 +1039,17 @@ void SATSolver::execRestart() {
     double rest_base = luby_restart ? luby(restart_inc, curr_restarts) : pow(restart_inc, curr_restarts);
     conflicts_until_restart = rest_base * restart_first;
     
-    output.verbose(CALL_INFO, 2, 0, "RESTART: #%d, new limit=%d\n", 
+    output.verbose(CALL_INFO, 3, 0, "RESTART: #%d, new limit=%d\n", 
         curr_restarts, conflicts_until_restart);
 
+    state = PROPAGATE;
+#ifdef USE_CLASSIC_HEAP
     if (OVERLAP_HEAP_INSERT) state = PROPAGATE;
     else {
         state = WAIT_HEAP;
         next_state = PROPAGATE;
     }
+#endif
 }
 
 void SATSolver::execDecide() {
@@ -1031,6 +1058,7 @@ void SATSolver::execDecide() {
         output.output("SATISFIABLE: All variables assigned\n");
         for (Var v = 1; v <= (Var)num_vars; v++) {
             output.output("x%d=%d ", v, var_value[v] ? 1 : 0);
+            sst_assert(var_assigned[v], CALL_INFO, -1, "Variable %d not assigned at end\n", v);
         }
         output.output("\n");
         return;
@@ -1056,7 +1084,7 @@ bool SATSolver::decide() {
             // Check if variable can be decided on
             if (!var_assigned[next_var] && decision[next_var]) {
                 lit = mkLit(next_var, !next_sign); // Note: mkLit's sign is negated in the API
-                output.verbose(CALL_INFO, 2, 0, 
+                output.verbose(CALL_INFO, 3, 0, 
                     "DECISION: Using predefined decision %zu: var %d = %s\n", 
                     decision_seq_idx, next_var, next_sign ? "true" : "false");
             } else {
@@ -1078,7 +1106,7 @@ bool SATSolver::decide() {
     if (lit == lit_Undef) {
         lit = chooseBranchVariable();
         if (lit == lit_Undef) {
-            output.verbose(CALL_INFO, 2, 0, "DECIDE: No unassigned variables left\n");
+            output.verbose(CALL_INFO, 3, 0, "DECIDE: No unassigned variables left\n");
             return false;
         }
     }
@@ -1245,7 +1273,7 @@ void SATSolver::unitPropagate() {
 
         // Stop if we've reached MAX_CONFL conflicts (unless MAX_CONFL is -1, meaning no limit)
         if (MAX_CONFL >= 0 && (int)conflicts.size() >= MAX_CONFL) {
-            output.verbose(CALL_INFO, 2, 0, "PROPAGATE: MAX_CONFL reached, stop\n");
+            output.verbose(CALL_INFO, 3, 0, "PROPAGATE: MAX_CONFL reached, stop\n");
             qhead = trail.size();
         }
     }
@@ -1714,10 +1742,13 @@ void SATSolver::findBtLevel() {
     output.verbose(CALL_INFO, 3, 0, "Backtrack Level = %d\n", bt_level);
     output.verbose(CALL_INFO, 3, 0, "Final learnt clause: %s\n",
         printClause(learnt_clause).c_str());
+    state = BACKTRACK;
+#ifdef USE_CLASSIC_HEAP
     if (OVERLAP_HEAP_BUMP) {
         state = WAIT_HEAP;
         next_state = BACKTRACK;
     } else state = BACKTRACK;
+#endif
 }
 
 //-----------------------------------------------------------------------------------
@@ -1728,7 +1759,9 @@ void SATSolver::backtrack(int backtrack_level) {
     output.verbose(CALL_INFO, 3, 0, "BACKTRACK From level %d to level %d\n", 
         current_level(), backtrack_level);
     
-    unstalled_heap = true;
+#ifdef USE_CLASSIC_HEAP
+    if (OVERLAP_HEAP_INSERT) unstalled_heap = true;
+#endif
     // Unassign all variables above backtrack_level using the trail
     for (int i = trail.size() - 1; i >= int(trail_lim[backtrack_level]); i--) {
         Lit p = trail[i];
@@ -1737,8 +1770,11 @@ void SATSolver::backtrack(int backtrack_level) {
         polarity[v] = sign(p);
         unassignVariable(v);
 
+        
         insertVarOrder(v);
+#ifdef USE_CLASSIC_HEAP
         unstalled_cnt++;
+#endif
         
         output.verbose(CALL_INFO, 5, 0,
             "BACKTRACK: Unassigning x%d, saved polarity %s\n", 
@@ -1748,7 +1784,7 @@ void SATSolver::backtrack(int backtrack_level) {
     qhead = trail_lim[backtrack_level];
     trail.resize(trail_lim[backtrack_level]);
     trail_lim.resize(backtrack_level);
-    output.verbose(CALL_INFO, 4, 0, "Insert %d vars in heap in parallel\n", unstalled_cnt);
+    // output.verbose(CALL_INFO, 4, 0, "Insert %d vars in heap in parallel\n", unstalled_cnt);
 }
 
 //-----------------------------------------------------------------------------------
@@ -1867,6 +1903,10 @@ void SATSolver::detachClause(Cref clause_addr) {
 // Decision Heuristics
 //-----------------------------------------------------------------------------------
 Lit SATSolver::chooseBranchVariable() {
+    // order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::DEBUG_HEAP));
+    // (*yield_ptr)();
+    // sst_assert(heap_resp == 0, CALL_INFO, -1, "Heap corrupted\n");
+
     Var next = var_Undef;
     if (!order_heap->empty() && drand(random_seed) < random_var_freq) {
         int rand_idx = irand(random_seed, order_heap->size());
@@ -1878,16 +1918,12 @@ Lit SATSolver::chooseBranchVariable() {
             output.verbose(CALL_INFO, 3, 0, "DECISION: Random selection of var %d\n", next);
         }
     }
-    
+
     while (next == var_Undef || var_assigned[next] || !decision[next]) {
-        if (order_heap->empty()) {
-            next = var_Undef;
-            break;
-        }
-        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::REMOVE_MIN));
+        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::REMOVE_MAX));
         (*yield_ptr)();
         next = heap_resp;
-        assert(next != var_Undef);
+        if (next == var_Undef && order_heap->empty()) break;
     }
 
     output.verbose(CALL_INFO, 3, 0, "DECISION: Selected lit %d \n", toInt(mkLit(next, polarity[next])));

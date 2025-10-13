@@ -130,7 +130,7 @@ void Heap::startNewWorker(size_t idx) {
                     insert(req->arg, idx);
                 });
             break;
-        case HeapReqEvent::REMOVE_MIN:
+        case HeapReqEvent::REMOVE_MAX:
             heap_sources[idx] = new coro_t::pull_type(
                 [this, req, idx](coro_t::push_type &heap_sink) { 
                     heap_sink_ptr = &heap_sink;
@@ -489,7 +489,10 @@ void Heap::insert(Var key, int worker_id) {
 
 void Heap::removeMin() {
     output.verbose(CALL_INFO, 7, 0, "RemoveMin, heap size %ld\n", heap_size);
-    sst_assert(heap_size > 0, CALL_INFO, -1, "Heap is empty, cannot remove min\n");
+    if (heap_size == 0) {
+        complete(var_Undef);
+        return;
+    }
 
     Var min_var = read(heapAddr(0));
 

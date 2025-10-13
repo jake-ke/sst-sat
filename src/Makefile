@@ -4,6 +4,17 @@ BUILD_DIR = ../build
 # Compiler configuration
 CXX = $(shell sst-config --CXX)
 CXXFLAGS = $(shell sst-config --ELEMENT_CXXFLAGS) -DBOOST_COROUTINES_NO_DEPRECATION_WARNING
+
+# Heap implementation selection
+# Default (no flag): pipelined heap
+# Use: make HEAP_IMPL=classic   to use classic external heap
+HEAP_IMPL ?= pipelined
+ifeq ($(HEAP_IMPL),classic)
+  CXXFLAGS += -DUSE_CLASSIC_HEAP=1
+  $(info Building with classic external Heap implementation)
+else
+  $(info Building with PipelinedHeap implementation)
+endif
 LDFLAGS = $(shell sst-config --ELEMENT_LDFLAGS)
 
 # Add SST Elements include path
@@ -11,7 +22,7 @@ SST_ELEMENTS_INCLUDE = -I$(SST_ELEMENTS_HOME)/include
 CXXFLAGS += $(SST_ELEMENTS_INCLUDE)
 
 # Source files
-SOURCES = memory_allocator.cc cache_profiler.cc async_base.cc async_heap.cc async_watches.cc async_clauses.cc async_activity.cc async_var_activity.cc satsolver.cc directedprefetch.cc
+SOURCES = memory_allocator.cc cache_profiler.cc async_base.cc async_heap.cc async_watches.cc async_clauses.cc async_activity.cc async_var_activity.cc satsolver.cc directedprefetch.cc pipelined_heap.cc pipelined_heap_test.cc
 OBJECTS = $(SOURCES:%.cc=$(BUILD_DIR)/%.o)
 TARGET = $(BUILD_DIR)/libsatsolver.so
 

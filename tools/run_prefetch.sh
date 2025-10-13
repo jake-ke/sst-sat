@@ -2,7 +2,7 @@
 
 # Check if help is requested or show usage
 show_usage() {
-    echo "Usage: $0 [--ram2-cfg FILE] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--prefetch] [--folder FOLDER] [-j jobs]"
+    echo "Usage: $0 [--ram2-cfg FILE] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--prefetch] [--folder FOLDER] [--num-seeds NUM] [-j jobs]"
     echo "Options:"
     echo "  --ram2-cfg FILE       Ramulator2 configuration file"
     echo "  --l1-size SIZE        L1 cache size"
@@ -10,8 +10,9 @@ show_usage() {
     echo "  --mem-latency LATENCY External memory latency"
     echo "  --prefetch            Enable prefetching"
     echo "  --folder FOLDER       Name for the logs folder (default: logs)"
+    echo "  --num-seeds NUM       Number of random seeds to run (default: 1)"
     echo "  -j, --jobs JOBS       Number of parallel jobs"
-    echo "Example: $0 --l1-size 32KiB --l1-latency 2 --mem-latency 200ns --prefetch --folder quick_test -j 8"
+    echo "Example: $0 --l1-size 32KiB --l1-latency 2 --mem-latency 200ns --prefetch --folder quick_test --num-seeds 5 -j 8"
 }
 
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
@@ -26,6 +27,7 @@ L1_LATENCY=""
 MEM_LATENCY=""
 FOLDER_NAME="logs"
 PREFETCH=""
+NUM_SEEDS=1
 
 # Default number of parallel jobs (use available CPU cores)
 MAX_JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
@@ -112,6 +114,16 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        --num-seeds)
+            if [[ "$2" =~ ^[0-9]+$ ]]; then
+                NUM_SEEDS=$2
+                shift 2
+            else
+                echo "Error: --num-seeds requires a number argument"
+                show_usage
+                exit 1
+            fi
+            ;;
         -j|--jobs)
             if [[ "$2" =~ ^[0-9]+$ ]]; then
                 MAX_JOBS=$2
@@ -181,6 +193,7 @@ log_message "RAMULATOR2 configuration: ${RAM2_CFG:-default}"
 log_message "L1 cache size: ${L1_SIZE:-default}"
 log_message "L1 cache latency: ${L1_LATENCY:-default}"
 log_message "Memory latency: ${MEM_LATENCY:-default}"
+log_message "Number of random seeds: $NUM_SEEDS"
 log_message "==============================================="
 
 # Array to store all child PIDs for cleanup
@@ -238,99 +251,108 @@ run_single_test() {
     local progress_file=$3
     
     filename=$(basename "$file")
+    local overall_result="PASSED"  # Track overall result across seeds
+    local all_seeds_passed=true    # Flag to track if all seeds passed
     
-    # Check if test already has existing log files
-    if is_test_already_run "$filename"; then
-        # Report skipped test
-        append_to_file_safely "$progress_file" "DONE|$filename|SKIPPED"
-        append_to_file_safely "$temp_result_file" "$filename|SKIPPED"
-        return
-    fi
-    
-    local log_file="$LOGS_DIR/${filename}.log"
-    local stats_file="$LOGS_DIR/${filename}.stats.csv"
-    local start_time=$(date +"%H:%M:%S")
-    
-    # Report test started
-    append_to_file_safely "$progress_file" "START|$filename|$start_time"
-
-    # Build command with 2-hour timeout and basic arguments
-    local command="timeout 7200 sst ./tests/test_one_level.py -- --cnf \"$file\" --stats-file \"$stats_file\""
-    
-    # Add optional cache/memory parameters only if provided
-    [[ -n "$RAM2_CFG" ]] && command+=" --ram2-cfg $RAM2_CFG"
-    [[ -n "$L1_SIZE" ]] && command+=" --l1-size $L1_SIZE"
-    [[ -n "$L1_LATENCY" ]] && command+=" --l1-latency $L1_LATENCY"
-    [[ -n "$MEM_LATENCY" ]] && command+=" --mem-latency $MEM_LATENCY"
-    [[ -n "$PREFETCH" ]] && command+=" --prefetch"
-
-    # Run the test with proper command
-    eval $command > "$log_file" 2>&1
-    local exit_status=$?
-    
-    # Run the parse_stats.py script with the unique stats file
-    if [ -f "$stats_file" ]; then
-        echo -e "\nParsing statistics file: $stats_file" >> "$log_file"
-        python3 ./tools/parse_stats.py "$stats_file" >> "$log_file" 2>&1
-    else
-        echo -e "\nWarning: Statistics file not found at $stats_file" >> "$log_file"
-    fi
-    
-    # Extract and verify solution for SAT cases
-    local verifier_status=1  # Default to failed
-    
-    if [ $exit_status -eq 0 ] && grep -q "SATISFIABLE: All variables assigned" "$log_file"; then
-        # Create a temporary solution file
-        local solution_file=$(mktemp)
+    # Run the test multiple times with different random seeds
+    for ((seed=0; seed<NUM_SEEDS; seed++)); do
+        # Define file paths for this seed run
+        local seed_dir="$LOGS_DIR/seed$seed"
+        mkdir -p "$seed_dir"
+        local log_file="$seed_dir/${filename}.log"
+        local stats_file="$seed_dir/${filename}.stats.csv"
         
-        # Extract the solution line after "SATISFIABLE: All variables assigned"
-        grep -A 2 "SATISFIABLE: All variables assigned" "$log_file" | grep -E 'x[0-9]+=' > "$solution_file"
-        
-        # Run the verifier if we got a solution
-        if [ -s "$solution_file" ]; then
-            python3 ./tools/verifier.py "$solution_file" "$file" > /dev/null 2>&1
-            verifier_status=$?
-            
-            # If verification failed, log the output
-            if [ $verifier_status -ne 0 ]; then
-                echo -e "\nVerification FAILED." >> "$log_file"
-            else
-                echo -e "\nVerification PASSED." >> "$log_file"
-            fi
+        # Check if test already has existing log files for this seed
+        if [[ -f "$log_file" ]]; then
+            # Mark skipped runs as completed so progress and summary are correct
+            append_to_file_safely "$progress_file" "DONE|$filename (seed $seed)|SKIPPED|-|-"
+            append_to_file_safely "$temp_result_file" "$filename|SKIPPED|-|-"
+            continue
         fi
         
-        # Clean up the temporary file
-        rm -f "$solution_file"
-    fi
-    
-    local end_time=$(date +"%H:%M:%S")
-    local result=""
-    
-    # Check exit status and determine result
-    if [ $exit_status -eq 0 ]; then
-        # Check for successful completion (either SAT or UNSAT)
-        error_count=$(grep -i -c -E "error|fault" "$log_file")
-        if [ $error_count -gt 0 ]; then
-            result="FAILED"
-        elif grep -q "SATISFIABLE: All variables assigned" "$log_file" && [ $verifier_status -eq 0 ]; then
-            result="PASSED"
-        elif grep -q "UNSATISFIABLE" "$log_file"; then
-            result="PASSED"
+        local start_time=$(date +"%H:%M:%S")
+        
+        # Report test started with seed
+        append_to_file_safely "$progress_file" "START|$filename (seed $seed)|$start_time"
+
+        # Build command with 2-hour timeout and basic arguments
+        local command="timeout 7200 sst ./tests/test_one_level.py -- --cnf \"$file\" --stats-file \"$stats_file\" --rand $seed"
+        
+        # Add optional cache/memory parameters only if provided
+        [[ -n "$RAM2_CFG" ]] && command+=" --ram2-cfg $RAM2_CFG"
+        [[ -n "$L1_SIZE" ]] && command+=" --l1-size $L1_SIZE"
+        [[ -n "$L1_LATENCY" ]] && command+=" --l1-latency $L1_LATENCY"
+        [[ -n "$MEM_LATENCY" ]] && command+=" --mem-latency $MEM_LATENCY"
+        [[ -n "$PREFETCH" ]] && command+=" --prefetch"
+
+        # Run the test with proper command
+        eval $command > "$log_file" 2>&1
+        local exit_status=$?
+        
+        # Run the parse_stats.py script with the unique stats file
+        if [ -f "$stats_file" ]; then
+            echo -e "\nParsing statistics file: $stats_file" >> "$log_file"
+            python3 ./tools/parse_stats.py "$stats_file" >> "$log_file" 2>&1
+        else
+            echo -e "\nWarning: Statistics file not found at $stats_file" >> "$log_file"
+        fi
+        
+        # Extract and verify solution for SAT cases
+        local verifier_status=1  # Default to failed
+        
+        if [ $exit_status -eq 0 ] && grep -q "SATISFIABLE: All variables assigned" "$log_file"; then
+            # Create a temporary solution file
+            local solution_file=$(mktemp)
+            
+            # Extract the solution line after "SATISFIABLE: All variables assigned"
+            grep -A 2 "SATISFIABLE: All variables assigned" "$log_file" | grep -E 'x[0-9]+=' > "$solution_file"
+            
+            # Run the verifier if we got a solution
+            if [ -s "$solution_file" ]; then
+                python3 ./tools/verifier.py "$solution_file" "$file" > /dev/null 2>&1
+                verifier_status=$?
+                
+                # If verification failed, log the output
+                if [ $verifier_status -ne 0 ]; then
+                    echo -e "\nVerification FAILED." >> "$log_file"
+                else
+                    echo -e "\nVerification PASSED." >> "$log_file"
+                fi
+            fi
+            
+            # Clean up the temporary file
+            rm -f "$solution_file"
+        fi
+        
+        local end_time=$(date +"%H:%M:%S")
+        local result=""
+        
+        # Check exit status and determine result
+        if [ $exit_status -eq 0 ]; then
+            # Check for successful completion (either SAT or UNSAT)
+            error_count=$(grep -i -c -E "error|fault" "$log_file")
+            if [ $error_count -gt 0 ]; then
+                result="FAILED"
+            elif grep -q "SATISFIABLE: All variables assigned" "$log_file" && [ $verifier_status -eq 0 ]; then
+                result="PASSED"
+            elif grep -q "UNSATISFIABLE" "$log_file"; then
+                result="PASSED"
+            else
+                result="FAILED"
+            fi
+        elif [ $exit_status -eq 124 ] || [ $exit_status -eq 142 ]; then
+            # 124 and 142 are timeout's exit codes
+            result="TIMEOUT"
         else
             result="FAILED"
         fi
-    elif [ $exit_status -eq 124 ] || [ $exit_status -eq 142 ]; then
-        # 124 and 142 are timeout's exit codes
-        result="TIMEOUT"
-    else
-        result="FAILED"
-    fi
-    
-    # Signal that this test is complete
-    append_to_file_safely "$progress_file" "DONE|$filename|$result|$start_time|$end_time"
-    
-    # Write result to temporary file (thread-safe way to collect results)
-    append_to_file_safely "$temp_result_file" "$filename|$result|$start_time|$end_time"
+        
+        # Signal that this test is complete (include seed for clarity)
+        append_to_file_safely "$progress_file" "DONE|$filename (seed $seed)|$result|$start_time|$end_time"
+        
+        # Write result to temporary file (thread-safe way to collect results)
+        append_to_file_safely "$temp_result_file" "$filename|$result|$start_time|$end_time"
+    done
 }
 
 # Function for thread-safe file operations
@@ -389,13 +411,17 @@ run_tests() {
     total=${#all_files}
     
     log_message "Found $total benchmark files to test"
+
+    # Count total runs across seeds for accurate progress
+    local total_runs=$(( total * NUM_SEEDS ))
+    log_message "Total runs to execute: $total_runs"
     
     if [[ $total -eq 0 ]]; then
         log_message "No benchmark files found. Exiting."
         return
     fi
     
-    echo "Starting tests (0/$total)"
+    echo "Starting tests (0/$total_runs)"
     
     # Create temporary files for results and progress tracking
     local temp_result_file=$(mktemp)
@@ -427,8 +453,8 @@ run_tests() {
                         
                         # Log the result to the main log with color for console
                         local colored_result=$(colorize_result "$result")
-                        local plain_message="$filename: $result ($start_time-$end_time) ($completed/$total)"
-                        local colored_message="$filename: $colored_result ($start_time-$end_time) ($completed/$total)"
+                        local plain_message="$filename: $result ($start_time-$end_time) ($completed/$total_runs)"
+                        local colored_message="$filename: $colored_result ($start_time-$end_time) ($completed/$total_runs)"
                         log_message_with_color "$plain_message" "$colored_message"
                     fi
                 fi
@@ -436,8 +462,8 @@ run_tests() {
             
             sleep 0.1
             
-            # Check if all tests are complete
-            [[ $completed -eq $total ]] && break
+            # Check if all runs are complete
+            [[ $completed -eq $total_runs ]] && break
         done
     } &
     local monitor_pid=$!

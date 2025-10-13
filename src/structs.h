@@ -101,6 +101,37 @@ public:
     }
 };
 
+// Events for heap operations
+class HeapReqEvent : public SST::Event {
+public:
+    enum OpType { INSERT, REMOVE_MAX, READ, BUMP, DEBUG_HEAP };
+    OpType op;
+    int arg;
+    HeapReqEvent() : op(HeapReqEvent::INSERT), arg(0) {}
+    HeapReqEvent(OpType o, int a = 0)
+        : op(o), arg(a) {}
+    
+    void serialize_order(SST::Core::Serialization::serializer& ser) override {
+        Event::serialize_order(ser);
+        SST_SER(op);
+        SST_SER(arg);
+    }
+    ImplementSerializable(HeapReqEvent);
+};
+
+class HeapRespEvent : public SST::Event {
+public:
+    int result;
+    HeapRespEvent() : result(0) {}
+    HeapRespEvent(int r) : result(r) {}
+    
+    void serialize_order(SST::Core::Serialization::serializer& ser) override {
+        Event::serialize_order(ser);
+        SST_SER(result);
+    }
+    ImplementSerializable(HeapRespEvent);
+};
+
 // Helper functions for literals
 inline Lit mkLit(Var var, bool sign = false) { Lit p; p.x = var + var + (int)sign; return p; }
 inline Lit operator ~(Lit p) { Lit q; q.x = p.x ^ 1; return q; }
