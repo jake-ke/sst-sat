@@ -220,6 +220,7 @@ private:
     void setVar(int level, int idx, Var value);
     void setVarMem(Var v, VarMem p);
     void getVarMem(Var v, bool bump);
+    void rescaleAct(Var v, VarMem& vmem);
     void readBurstAll(uint64_t start_addr, size_t total_size);
     void verifyDebugHeap();
 

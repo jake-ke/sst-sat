@@ -60,7 +60,10 @@ def parse_args():
     parser.add_argument('--prefetch', dest='enable_prefetch', 
                         action='store_true', default=False,
                         help='Enable directed prefetching')
-                        
+    parser.add_argument('--no-spec', dest='disable_speculative',
+                        action='store_true', default=False,
+                        help='Disable speculative propagation')
+
     args = parser.parse_args()
     
     # Validate file existence
@@ -166,6 +169,7 @@ var_act_base_addr       = 0x70000000
 params = {
     "clock" : "1GHz",
     "verbose" : str(args.verbose),
+    # "verbose" : "2",
     "sort_clauses": args.sort_clauses,
     "cnf_file" : actual_cnf_path,
     "heap_base_addr" : hex(heap_base_addr),
@@ -181,6 +185,7 @@ params = {
     "var_decay": str(args.var_decay),
     "clause_decay": str(args.clause_decay),
     "prefetch_enabled": str(args.enable_prefetch),
+    "enable_speculative": str(not args.disable_speculative),
 }
 if args.decision_path:
     params["decision_file"] = args.decision_path
@@ -190,7 +195,8 @@ solver.addParams(params)
 
 
 # Create the external heap subcomponent
-heap = solver.setSubComponent("order_heap", "satsolver.Heap")
+heap = solver.setSubComponent("order_heap", "satsolver.PipelinedHeap")
+# heap = solver.setSubComponent("order_heap", "satsolver.Heap")
 heap.addParams({
     "verbose" : str(args.verbose),
 })
@@ -303,7 +309,9 @@ sst.enableStatisticsForComponentName("solver", [
     "removed",
     "db_reductions",
     "minimized_literals",
-    "restarts"
+    "restarts",
+    "spec_started",
+    "spec_finished",
 ], {
     "type": "sst.AccumulatorStatistic",
     "rate": "1s"

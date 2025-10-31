@@ -14,13 +14,15 @@ public:
 
     int lookUpWorkerId(uint64_t req_id) {
         auto it = req_to_worker.find(req_id);
-        assert(it != req_to_worker.end());
+        // discarded requests may happen
+        if (it == req_to_worker.end()) return -1;
         return it->second;
     }
     
     // Store response data for a specific request ID
     void storeResponse(uint64_t req_id, const std::vector<uint8_t> data, bool burst = false, uint64_t offset = 0) {
         int worker_id = lookUpWorkerId(req_id);
+        if (worker_id < 0) return;  // invalid worker_id, skip storing
         if (burst) {
             std::memcpy(worker_to_data[worker_id].data() + offset, data.data(), data.size());
         }
@@ -39,6 +41,11 @@ public:
         auto it = worker_to_data.find(worker_id);
         assert(it != worker_to_data.end());
         return it->second;
+    }
+
+    void reset() {
+        req_to_worker.clear();
+        worker_to_data.clear();
     }
 
     void startBurst(int worker_id, uint64_t bytes) { worker_to_data[worker_id].resize(bytes); }

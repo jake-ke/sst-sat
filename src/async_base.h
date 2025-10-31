@@ -39,6 +39,7 @@ public:
     virtual void setReorderBuffer(ReorderBuffer* rb) { reorder_buffer = rb; }
     size_t size() const { return size_; }
     bool empty() const { return size_ == 0; }
+    void reset() { burst_states.clear(); }
 
 protected:
     // Helper method to perform the yield operation

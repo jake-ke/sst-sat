@@ -36,6 +36,7 @@ uint32_t Clauses::getClauseSize(Cref addr, int worker_id) {
 // read the clause literals from clause address
 Clause Clauses::readClause(Cref addr, int worker_id) {
     uint32_t num_lits = getClauseSize(addr, worker_id);
+    assert(num_lits >= 2);
     
     // Read the rest of clause data (activity + literals)
     readBurst(clauseAddr(addr + offsetof(Clause, activity)), CLAUSE_MEMBER_SIZE * (num_lits + 1), worker_id);

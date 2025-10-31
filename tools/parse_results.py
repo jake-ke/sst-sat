@@ -34,7 +34,7 @@ def write_csv_report(results, output_file):
         'total_memory_bytes', 'total_memory_formatted', 'sim_time_ms',
         # Solver statistics
         'decisions', 'propagations', 'conflicts', 'learned', 'removed',
-        'db_reductions', 'minimized', 'restarts',
+        'db_reductions', 'minimized', 'restarts', 'spec_started', 'spec_finished',
         # L1 cache totals first
         'l1_total_requests', 'l1_total_miss_rate',
         # L1 cache by data structure

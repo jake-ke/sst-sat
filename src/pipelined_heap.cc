@@ -48,114 +48,6 @@ PipelinedHeap::PipelinedHeap(
     }
 }
 
-bool PipelinedHeap::tick(SST::Cycle_t cycle) {
-    // output.verbose(CALL_INFO, 7, 0, "=============== Tick %lu =============== \n", cycle);
-
-    if (!insert_queue.empty() && canStartOperation(HEAP_OP_INSERT) && !rescale) {
-        InsReq& op = insert_queue.front();
-
-        if (op.bump) {
-            // check for rescale before popping
-            if (op.activity + *(var_inc_ptr) > 1e100) {
-                // if (!store_queue.empty()) return false;
-
-                output.verbose(CALL_INFO, 2, 0, "Rescaling variable activities\n");
-                rescale = true;
-                for (int level = 0; level < MAX_HEAP_LEVELS; level++) {
-                    for (int i = 0; i < (1 << level); i++){
-                        heap_activities[level][i] *= 1e-100;
-                    }
-                    assert(req_to_op.empty());
-                }
-                op.activity *= 1e-100;
-                // rescale all var mem
-                readBurstAll(var_ptr_base_addr, (num_vars + 1) * sizeof(VarMem));
-                *var_inc_ptr *= 1e-100;
-                output.verbose(CALL_INFO, 2, 0, "Rescaled Var Inc %f\n", *var_inc_ptr);
-                return false;
-            }
-
-            // update ptr and activity
-            op.activity += *(var_inc_ptr);
-        } else active_inserts++;
-        startOperation(HEAP_OP_INSERT, op.arg, op.activity, op.bump, op.dest);
-        insert_queue.pop_front();
-    }
-
-    if (!request_queue.empty()) {
-        const PendingRequest& pending = request_queue.front();
-        switch (pending.op) {
-            case HeapReqEvent::BUMP:
-                // can only start with an empty pipeline
-                if (!bump_active && req_to_op.empty() && isPipelineIdle()) {
-                    bump_active = true;
-                    bump_mem_inflight = true;
-                    getVarMem(pending.arg, true);
-                    request_queue.pop_front();
-                }
-                break;
-            case HeapReqEvent::INSERT:
-                // can fetch var mem when not bump or bump has started
-                if (!bump_mem_inflight && !rescale){
-                    // discards the requests for vars already in progress
-                    if (in_progress_vars.find(pending.arg) == in_progress_vars.end()) {
-                        in_progress_vars.insert(pending.arg);
-                        getVarMem(pending.arg, false);
-                    }
-                    request_queue.pop_front();
-                }
-                break;
-            case HeapReqEvent::REMOVE_MAX:
-                // after previous insert/bump have started
-                if (!bump_active && (active_inserts == 0) && req_to_op.empty()
-                    && canStartOperation(HEAP_OP_REPLACE)) {
-                    startOperation(HEAP_OP_REPLACE, 0, 0, 0, 0);
-                    request_queue.pop_front();
-                }
-                break;
-            case HeapReqEvent::DEBUG_HEAP:
-                // Wait for all previous requests and pipeline to finish
-                if (active_inserts == 0 && !bump_active && req_to_op.empty() && isPipelineIdle() && !rescale) {
-                // if (active_inserts == 0 && !bump_active && req_to_op.empty() && isPipelineIdle() && store_queue.empty() && !rescale) {
-                    // Start debug heap check
-                    debug_heap_pending = true;
-                    debug_heap_errors = 0;
-                    debug_heap_varmem.clear();
-                    debug_heap_varmem.reserve(num_vars + 1);  // Reserve enough space for all variables
-                    
-                    // Use readBurstAll to read all VarMem entries
-                    if (heap_size == 0) {
-                        sendResp(0);
-                        debug_heap_pending = false;
-                    } else {
-                        output.verbose(CALL_INFO, 5, 0, "DEBUG_HEAP: Reading memory for heap verification\n");
-                        readBurstAll(var_ptr_base_addr, (num_vars + 1) * sizeof(VarMem));
-                    }
-                    request_queue.pop_front();
-                }
-                break;
-            default:
-                request_queue.pop_front();
-                break;
-        }
-    }
-
-    advancePipeline();
-    return false;
-}
-
-void PipelinedHeap::advancePipeline() {
-    // Process each level in reverse order (bottom-up)
-    for (int level = MAX_HEAP_LEVELS - 1; level >= 0; level--) {
-        // Process each stage within the level in reverse order (WRITE->READ)
-        for (int stage = PIPELINE_DEPTH - 1; stage >= 0; stage--) {
-            if (stages[level][stage].valid) {
-                executeStageOp(level, stage);
-            }
-        }
-    }
-}
-
 uint32_t bit_reverse(uint32_t x) {
     x = ((x & 0x55555555) << 1) | ((x >> 1) & 0x55555555);
     x = ((x & 0x33333333) << 2) | ((x >> 2) & 0x33333333);
@@ -176,6 +68,102 @@ uint32_t priority_encoder(uint32_t x) {
         cnt -= (one_hot_m1 >> i) & 1;
     }
     return cnt;
+}
+
+bool PipelinedHeap::tick(SST::Cycle_t cycle) {
+    // output.verbose(CALL_INFO, 7, 0, "=============== Tick %lu =============== \n", cycle);
+
+    if (!insert_queue.empty() && canStartOperation(HEAP_OP_INSERT) && !rescale) {
+        InsReq& op = insert_queue.front();
+        if (!op.bump) active_inserts++;
+        startOperation(HEAP_OP_INSERT, op.arg, op.activity, op.bump, op.dest);
+        insert_queue.pop_front();
+    }
+
+    if (!request_queue.empty()) {
+        const PendingRequest& pending = request_queue.front();
+        switch (pending.op) {
+            case HeapReqEvent::READ: {
+                // READ is expensive to support in hardware
+                int lvl = priority_encoder(pending.arg);
+                int idx = pending.arg & ~(1 << lvl);
+                sendResp(getVar(lvl, idx));
+                request_queue.pop_front();
+                break;
+            }
+            case HeapReqEvent::BUMP: {
+                // can only start with an empty pipeline
+                if (!bump_active && !rescale && req_to_op.empty() && isPipelineIdle()) {
+                    bump_active = true;
+                    getVarMem(pending.arg, true);
+                    request_queue.pop_front();
+                }
+                break;
+            }
+            case HeapReqEvent::INSERT: {
+                // can fetch var mem when not bump or bump has started
+                if (!bump_active && !rescale){
+                    // discards the requests for vars already in progress
+                    if (in_progress_vars.find(pending.arg) == in_progress_vars.end()) {
+                        in_progress_vars.insert(pending.arg);
+                        getVarMem(pending.arg, false);
+                    }
+                    request_queue.pop_front();
+                }
+                break;
+            }
+            case HeapReqEvent::REMOVE_MAX: {
+                // after previous insert/bump have started
+                if (!bump_active && (active_inserts == 0) && req_to_op.empty()
+                    && canStartOperation(HEAP_OP_REPLACE)) {
+                    startOperation(HEAP_OP_REPLACE, 0, 0, 0, 0);
+                    request_queue.pop_front();
+                }
+                break;
+            }
+            case HeapReqEvent::DEBUG_HEAP: {
+                // Wait for all previous requests and pipeline to finish
+                if (active_inserts == 0 && !bump_active && req_to_op.empty() && isPipelineIdle() && !rescale) {
+                // if (active_inserts == 0 && !bump_active && req_to_op.empty() && isPipelineIdle() && store_queue.empty() && !rescale) {
+                    // Start debug heap check
+                    debug_heap_pending = true;
+                    debug_heap_errors = 0;
+                    debug_heap_varmem.clear();
+                    debug_heap_varmem.reserve(num_vars + 1);  // Reserve enough space for all variables
+                    
+                    // Use readBurstAll to read all VarMem entries
+                    if (heap_size == 0) {
+                        sendResp(0);
+                        debug_heap_pending = false;
+                    } else {
+                        output.verbose(CALL_INFO, 6, 0, "DEBUG_HEAP: Reading memory for heap verification\n");
+                        readBurstAll(var_ptr_base_addr, (num_vars + 1) * sizeof(VarMem));
+                    }
+                    request_queue.pop_front();
+                }
+                break;
+            }
+            default: {
+                request_queue.pop_front();
+                break;
+            }
+        }
+    }
+
+    advancePipeline();
+    return false;
+}
+
+void PipelinedHeap::advancePipeline() {
+    // Process each level in reverse order (bottom-up)
+    for (int level = MAX_HEAP_LEVELS - 1; level >= 0; level--) {
+        // Process each stage within the level in reverse order (WRITE->READ)
+        for (int stage = PIPELINE_DEPTH - 1; stage >= 0; stage--) {
+            if (stages[level][stage].valid) {
+                executeStageOp(level, stage);
+            }
+        }
+    }
 }
 
 bool PipelinedHeap::canStartOperation(HeapOpType op) {
@@ -216,7 +204,7 @@ void PipelinedHeap::startOperation(HeapOpType op, Var arg, double activity, bool
         uint32_t path = dest << (31 - target_level);
         stages[0][STAGE_READ].path = path << 1;  // remove the leading 1 bit
 
-        output.verbose(CALL_INFO, 5, 0,
+        output.verbose(CALL_INFO, 6, 0,
             "Start INSERT: heap_size=%lu, var %d (%.2f), idx=%u, path=0x%x, depth=%d, bump=%d\n", 
             heap_size, arg, activity, dest, path, target_level, bump);
 
@@ -259,10 +247,10 @@ void PipelinedHeap::startOperation(HeapOpType op, Var arg, double activity, bool
         }
         // removes the last node from the heap
         setVar(last_level, last_node_idx, var_Undef);
-        output.verbose(CALL_INFO, 5, 0, "set last level %d, idx %d, addr %d, to var_Undef\n", last_level, last_node_idx, (1 << last_level) | last_node_idx);
+        output.verbose(CALL_INFO, 6, 0, "set last level %d, idx %d, addr %d, to var_Undef\n", last_level, last_node_idx, (1 << last_level) | last_node_idx);
         if (last_node_idx > 1)
-            output.verbose(CALL_INFO, 5, 0, "current last level %d, idx %d, addr %d, is var %d\n", last_level, last_node_idx - 1, (1 << last_level) | (last_node_idx - 1), getVar(last_level, last_node_idx - 1));
-        output.verbose(CALL_INFO, 5, 0, "Start REPLACE: heap_size=%lu, last var %d (%.2f)\n",
+            output.verbose(CALL_INFO, 6, 0, "current last level %d, idx %d, addr %d, is var %d\n", last_level, last_node_idx - 1, (1 << last_level) | (last_node_idx - 1), getVar(last_level, last_node_idx - 1));
+        output.verbose(CALL_INFO, 6, 0, "Start REPLACE: heap_size=%lu, last var %d (%.2f)\n",
             heap_size, arg, activity);
 
         heap_size--;
@@ -299,7 +287,7 @@ void PipelinedHeap::handleStageInsert(int level, int stage) {
                 stages[level][stage].ready = false;
                 break;
             }
-            output.verbose(CALL_INFO, 5, 0, "INSERT[L%d-READ]: var %d (%.2f), node %d, depth %d, path 0x%x\n",
+            output.verbose(CALL_INFO, 6, 0, "INSERT[L%d-READ]: var %d (%.2f), node %d, depth %d, path 0x%x\n",
                 level, curr_stage.var, curr_stage.act, node_idx, curr_stage.depth, curr_stage.path);
 
             // always ready for onchip
@@ -322,9 +310,9 @@ void PipelinedHeap::handleStageInsert(int level, int stage) {
                 stages[level+1][STAGE_READ].path = next_path;
                 stages[level+1][STAGE_READ].valid = true;
                 stages[level+1][STAGE_READ].ready = false;
-                output.verbose(CALL_INFO, 5, 0, "INSERT[L%d-READ]: inducing L%d node %d, %s child\n",
+                output.verbose(CALL_INFO, 6, 0, "INSERT[L%d-READ]: inducing L%d node %d, %s child\n",
                                level, level+1, child_idx, go_left ? "left" : "right");
-            } else output.verbose(CALL_INFO, 5, 0, "INSERT[L%d-READ]: insertion ends this level\n", level);
+            } else output.verbose(CALL_INFO, 6, 0, "INSERT[L%d-READ]: insertion ends this level\n", level);
 
             stages[level][STAGE_COMPARE].op_type = curr_stage.op_type;
             stages[level][STAGE_COMPARE].node_idx = node_idx;
@@ -360,7 +348,7 @@ void PipelinedHeap::handleStageInsert(int level, int stage) {
             int new_var = curr_stage.var;
             double new_act = curr_stage.act;
 
-            output.verbose(CALL_INFO, 5, 0, "INSERT[L%d-COMP]: new var %d (%.2f), cur_var %d (%.2f) node %d, depth %d\n",
+            output.verbose(CALL_INFO, 6, 0, "INSERT[L%d-COMP]: new var %d (%.2f), cur_var %d (%.2f) node %d, depth %d\n",
                 level, new_var, new_act, curr_var, curr_act, node_idx, curr_stage.depth);
 
             // Compare and determine which value stays at this level
@@ -406,7 +394,7 @@ void PipelinedHeap::handleStageInsert(int level, int stage) {
             setVar(level, node_idx, curr_stage.var);
             setActivity(level, node_idx, curr_stage.act);
             setVarMem(curr_stage.var, VarMem((1 << level) | node_idx, curr_stage.act));
-            output.verbose(CALL_INFO, 5, 0, "INSERT[L%d-WRITE]: Write back node %d: var=%d (%.2f)\n",
+            output.verbose(CALL_INFO, 6, 0, "INSERT[L%d-WRITE]: Write back node %d: var=%d (%.2f)\n",
                            level, node_idx, curr_stage.var, curr_stage.act);
 
             if (in_progress_vars.find(curr_stage.var) != in_progress_vars.end())
@@ -441,7 +429,7 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
                 assert(root != var_Undef);
                 sendResp(root);
                 setVarMem(root, VarMem(0, getActivity(0, 0)));
-                output.verbose(CALL_INFO, 5, 0, "REPLACE[L%d-READ]: removing Min %d\n", level, root);
+                output.verbose(CALL_INFO, 6, 0, "REPLACE[L%d-READ]: removing Min %d\n", level, root);
                 if (heap_size == 0) {
                     // If heap will be empty after removal, skip compare stage
                     // assume write stage is always ready
@@ -474,7 +462,7 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
                 stages[level+1][STAGE_READ].node_idx = child_idx;
                 stages[level+1][STAGE_READ].valid = true;
                 stages[level+1][STAGE_READ].ready = false;
-                output.verbose(CALL_INFO, 5, 0, "REPLACE[L%d-READ]: inducing L%d children of node %d\n",
+                output.verbose(CALL_INFO, 6, 0, "REPLACE[L%d-READ]: inducing L%d children of node %d\n",
                                level, level+1, node_idx);
             }
 
@@ -542,7 +530,7 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
                     stages[level+1][STAGE_COMPARE].ready = true;
                 }
 
-                output.verbose(CALL_INFO, 5, 0, "REPLACE[L%d-COMP]: %s child %d (%.2f) > repl_var %d (%.2f), swapping\n",
+                output.verbose(CALL_INFO, 6, 0, "REPLACE[L%d-COMP]: %s child %d (%.2f) > repl_var %d (%.2f), swapping\n",
                     level, use_right ? "right" : "left", max_child, max_act, repl_var, repl_act);
             } else {
                 // Current value is already the max, no swap needed
@@ -564,7 +552,7 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
                     stages[level+2][STAGE_READ].ready = true;
                 }
                 
-                output.verbose(CALL_INFO, 5, 0, "REPLACE[L%d-COMP]: repl_var %d (%.2f) >= both children, ends here\n",
+                output.verbose(CALL_INFO, 6, 0, "REPLACE[L%d-COMP]: repl_var %d (%.2f) >= both children, ends here\n",
                     level, repl_var, repl_act);
             }
 
@@ -579,7 +567,7 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
             setActivity(level, node_idx, curr_stage.act);
             setVarMem(curr_stage.var, VarMem((1 << level) | node_idx, curr_stage.act));
 
-            output.verbose(CALL_INFO, 5, 0, "REPLACE[L%d-WRITE]: Write back node %d: var=%d (%.2f)\n",
+            output.verbose(CALL_INFO, 6, 0, "REPLACE[L%d-WRITE]: Write back node %d: var=%d (%.2f)\n",
                          level, node_idx, curr_stage.var, curr_stage.act);
             if (level != 0) assert(curr_stage.var != 0);
             // Mark this stage as ready for new operations
@@ -592,8 +580,6 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
 void PipelinedHeap::handleRequest(HeapReqEvent* req) {
     output.verbose(CALL_INFO, 6, 0, "Received request: op=%d, arg=%d\n", 
                    req->op, req->arg);
-
-    sst_assert(req->op != HeapReqEvent::READ, CALL_INFO, -1, "READ operation not supported in PipelinedHeap\n");
 
     // Assert var is valid
     sst_assert(req->arg != var_Undef || (req->op != HeapReqEvent::INSERT || req->op != HeapReqEvent::BUMP),
@@ -627,14 +613,23 @@ void PipelinedHeap::handleMem(SST::Interfaces::StandardMem::Request* req) {
             op.dest = data.addr;
             op.activity = data.act;
 
-            if ((!op.bump && data.addr == 0)  // insert and var not in heap
-                || (op.bump && data.addr != 0))  // bump and var in the heap
-                insert_queue.emplace_back(op);
-            else if (bump_active && bump_mem_inflight) bump_active = false;
-            else if (in_progress_vars.find(op.arg) != in_progress_vars.end())
-                in_progress_vars.erase(op.arg);
-
-            bump_mem_inflight = false;
+            if (bump_active) {
+                if (data.act + *(var_inc_ptr) > 1e100)
+                    rescaleAct(op.arg, data);
+                data.act += *(var_inc_ptr);
+                op.activity = data.act;
+                if (data.addr != 0)  // bump and var in the heap
+                    insert_queue.emplace_back(op);
+                else {
+                    if (!rescale) setVarMem(op.arg, data);  // update the varmem with bumped activity
+                    bump_active = false;
+                }
+            } else {
+                if (data.addr == 0)  // insert if var not in heap
+                    insert_queue.emplace_back(op);
+                else if (in_progress_vars.find(op.arg) != in_progress_vars.end())
+                    in_progress_vars.erase(op.arg);
+            }
         } else if (pending.type == PendingMemOpType::RESCALE) {
             const size_t chunk_size = pending.size;
             const size_t entry_size = sizeof(VarMem);
@@ -787,6 +782,7 @@ Var PipelinedHeap::getVar(int level, int idx) {
 
 void PipelinedHeap::setActivity(int level, int idx, double value) {
     assert(idx >= 0 && idx < heap_activities[level].size());
+    sst_assert(value <= 1e100, CALL_INFO, -1, "activity out of bound\n");
     heap_activities[level][idx] = value;
 }
 
@@ -797,6 +793,7 @@ void PipelinedHeap::setVar(int level, int idx, Var value) {
 
 void PipelinedHeap::setVarMem(Var v, VarMem p) {
     // update the var_act memory copy
+    sst_assert(p.act <= 1e100, CALL_INFO, -1, "activity out of bound\n");
     size_t size = sizeof(VarMem);
     uint64_t addr = varMemAddr(v);
     std::vector<uint8_t> data(size);
@@ -811,7 +808,7 @@ void PipelinedHeap::setVarMem(Var v, VarMem p) {
 }
 
 void PipelinedHeap::getVarMem(Var v, bool bump) {
-    output.verbose(CALL_INFO, 5, 0, "Get VarMem: var %d, bump=%d\n", v, bump);
+    output.verbose(CALL_INFO, 6, 0, "Get VarMem: var %d, bump=%d\n", v, bump);
     size_t size = sizeof(VarMem);
     uint64_t addr = varMemAddr(v);
     if (WRITE_BUFFER) {
@@ -821,13 +818,22 @@ void PipelinedHeap::getVarMem(Var v, bool bump) {
             assert(size == store_queue[idx].size);
             VarMem data;
             memcpy(&data, store_queue[idx].data.data(), size);
-            if ((!bump && data.addr == 0)  // insert and var not in heap
-                || (bump && data.addr != 0))  // bump and var in the heap
-                insert_queue.push_back(InsReq(v, data.act, bump, data.addr));
-            else if (bump_active && bump_mem_inflight) bump_active = false;
-            else if (in_progress_vars.find(v) != in_progress_vars.end())
-                in_progress_vars.erase(v);
-            bump_mem_inflight = false;
+            if (bump_active) {
+                if (data.act + *(var_inc_ptr) > 1e100)
+                    rescaleAct(v, data);
+                data.act += *(var_inc_ptr);
+                if (data.addr != 0)  // bump and var in the heap
+                    insert_queue.emplace_back(InsReq(v, data.act, bump, data.addr));
+                else {
+                    if (!rescale) setVarMem(v, data);  // update the varmem with bumped activity
+                    bump_active = false;
+                }
+            } else {
+                if (data.addr == 0)  // insert if var not in heap
+                    insert_queue.emplace_back(InsReq(v, data.act, bump, data.addr));
+                else if (in_progress_vars.find(v) != in_progress_vars.end())
+                    in_progress_vars.erase(v);
+            }
             return;
         }
     }
@@ -836,6 +842,25 @@ void PipelinedHeap::getVarMem(Var v, bool bump) {
     auto req = new SST::Interfaces::StandardMem::Read(addr, size);
     req_to_op[req->getID()] = PendingMemOp(InsReq(v, 0.0, bump, 0));
     memory->send(req);
+}
+
+void PipelinedHeap::rescaleAct(Var v, VarMem& vmem) {
+    output.verbose(CALL_INFO, 2, 0, "Rescaling variable activities\n");
+    rescale = true;
+    *var_inc_ptr *= 1e-100;
+    vmem.act *= 1e-100;
+
+    VarMem bumped = vmem;
+    bumped.act += *(var_inc_ptr);
+    setVarMem(v, bumped);
+    for (int level = 0; level < MAX_HEAP_LEVELS; level++) {
+        for (int i = 0; i < (1 << level); i++){
+            heap_activities[level][i] *= 1e-100;
+        }
+        assert(req_to_op.empty());
+    }
+    readBurstAll(var_ptr_base_addr, (num_vars + 1) * sizeof(VarMem));
+    output.verbose(CALL_INFO, 2, 0, "Rescaled Var Inc %f\n", *var_inc_ptr);
 }
 
 int PipelinedHeap::findStoreQueueEntry(uint64_t addr, size_t size) {
@@ -873,7 +898,7 @@ void PipelinedHeap::readBurstAll(uint64_t start_addr, size_t total_size) {
 }
 
 void PipelinedHeap::verifyDebugHeap() {
-    output.verbose(CALL_INFO, 5, 0, "DEBUG_HEAP: Verifying heap consistency...\n");
+    output.verbose(CALL_INFO, 6, 0, "DEBUG_HEAP: Verifying heap consistency...\n");
     
     // Create a set of all variables that exist in the heap for quick lookup
     std::unordered_map<Var, std::pair<int, int>> heap_var_locations;
@@ -937,7 +962,7 @@ void PipelinedHeap::verifyDebugHeap() {
         }
     }
     
-    output.verbose(CALL_INFO, 5, 0, "DEBUG_HEAP: Verification complete, found %d errors\n", debug_heap_errors);
+    output.verbose(CALL_INFO, 6, 0, "DEBUG_HEAP: Verification complete, found %d errors\n", debug_heap_errors);
     
     // Send the response and clear the debug state
     sendResp(debug_heap_errors);

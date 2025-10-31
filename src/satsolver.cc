@@ -50,7 +50,13 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     cycles_read_watcher_blocks(0),
     cycles_read_clauses(0),
     cycles_insert_watchers(0),
-    cycles_polling(0) {
+    cycles_polling(0),
+    main_active(false),
+    spec_literal(lit_Undef),
+    spec_active(false),
+    spec_conflicts(0),
+    spec_coroutine(nullptr),
+    spec_yield_ptr(nullptr) {
     
     // Initialize output
     int verbose = params.find<int>("verbose", 0);
@@ -141,6 +147,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
         sst_assert(prefetch_link != nullptr, CALL_INFO, -1, "Error: 'prefetch_port' is not connected to a link\n");
     }
 
+    enable_speculative = params.find<bool>("enable_speculative", false);
+
     // Open decision output file if specified
     std::string decision_output_file = params.find<std::string>("decision_output_file", "");
     if (!decision_output_file.empty()) {
@@ -168,6 +176,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_watcher_blocks = registerStatistic<uint64_t>("watcher_blocks");
     stat_para_watchers = registerStatistic<uint64_t>("para_watchers");
     stat_para_vars = registerStatistic<uint64_t>("para_vars");
+    stat_spec_started = registerStatistic<uint64_t>("spec_started");
+    stat_spec_finished = registerStatistic<uint64_t>("spec_finished");
 
     // Component should not end simulation until solution is found
     registerAsPrimaryComponent();
@@ -194,6 +204,7 @@ void SATSolver::init(unsigned int phase) {
         decision.resize(num_vars + 1, true);  // All variables are decision variables
         var_assigned.resize(num_vars + 1, false);
         var_value.resize(num_vars + 1);
+        resetSpecState();
 
         // Untimed data structure initialization
         variables.init(num_vars);
@@ -247,6 +258,9 @@ void SATSolver::finish() {
     output.output("UnAssigns    : %lu\n", getStatCount(stat_unassigns));
     output.output("Minimized    : %lu\n", getStatCount(stat_minimized_literals));
     output.output("Restarts     : %lu\n", getStatCount(stat_restarts));
+    // Speculative propagation statistics
+    output.output("Spec Started : %lu\n", getStatCount(stat_spec_started));
+    output.output("Spec Finished: %lu\n", getStatCount(stat_spec_finished));
     output.output("Variables    : %u (Total), %lu (Assigned)\n", num_vars,
         getStatCount(stat_assigns) - getStatCount(stat_unassigns));
     output.output("Clauses      : %lu (Total), %lu (Learned)\n", 
@@ -319,6 +333,74 @@ void SATSolver::finish() {
     output.output("Heap Bump    : %.2f%% \t(%lu cycles)\n", pct_heap_bump, cycles_heap_bump);
     output.output("Total Counted: %lu cycles\n", total_counted);
     output.output("===========================================================================\n");
+    
+    // Add speculative propagation profiling
+    output.output("===================[ Speculative Propagation Profiling ]===================\n");
+    if (normal_metrics.count > 0) {
+        double avg_normal_headptr = (double)normal_metrics.read_headptr_cycles / normal_metrics.count;
+        double avg_normal_blocks = (double)normal_metrics.read_watcher_blocks_cycles / normal_metrics.count;
+        double avg_normal_clauses = (double)normal_metrics.read_clauses_cycles / normal_metrics.count;
+        double avg_normal_total = avg_normal_headptr + avg_normal_blocks + avg_normal_clauses;
+        
+        output.output("Normal Propagations (count: %lu):\n", normal_metrics.count);
+        output.output("  Avg cycles to read head pointer   : %.2f\n", avg_normal_headptr);
+        output.output("  Avg cycles to read watcher blocks : %.2f\n", avg_normal_blocks);
+        output.output("  Avg cycles to read clauses        : %.2f\n", avg_normal_clauses);
+        output.output("  Avg total memory latency          : %.2f\n", avg_normal_total);
+    } else {
+        output.output("Normal Propagations: No data collected\n");
+    }
+    
+    if (speculative_metrics.count > 0) {
+        double avg_spec_headptr = (double)speculative_metrics.read_headptr_cycles / speculative_metrics.count;
+        double avg_spec_blocks = (double)speculative_metrics.read_watcher_blocks_cycles / speculative_metrics.count;
+        double avg_spec_clauses = (double)speculative_metrics.read_clauses_cycles / speculative_metrics.count;
+        double avg_spec_total = avg_spec_headptr + avg_spec_blocks + avg_spec_clauses;
+        
+        output.output("Speculative Propagations (count: %lu):\n", speculative_metrics.count);
+        output.output("  Avg cycles to read head pointer   : %.2f\n", avg_spec_headptr);
+        output.output("  Avg cycles to read watcher blocks : %.2f\n", avg_spec_blocks);
+        output.output("  Avg cycles to read clauses        : %.2f\n", avg_spec_clauses);
+        output.output("  Avg total memory latency          : %.2f\n", avg_spec_total);
+        
+        // Calculate speedup if both have data
+        if (normal_metrics.count > 0) {
+            double avg_normal_total = (double)(normal_metrics.read_headptr_cycles + 
+                                               normal_metrics.read_watcher_blocks_cycles + 
+                                               normal_metrics.read_clauses_cycles) / normal_metrics.count;
+            double speedup = avg_normal_total / avg_spec_total;
+            double reduction = (1.0 - (avg_spec_total / avg_normal_total)) * 100.0;
+            output.output("Speedup: %.2fx (%.1f%% latency reduction)\n", speedup, reduction);
+        }
+    } else {
+        output.output("Speculative Propagations: No data collected\n");
+    }
+    output.output("===========================================================================\n");
+    
+    // Add cache line statistics for speculative propagations
+    if (!spec_prop_cache_lines.empty()) {
+        output.output("==============[ Speculative Propagation Cache Line Stats ]================\n");
+        
+        // Calculate all statistics in a single pass
+        uint64_t total_cache_lines = 0;
+        uint64_t min_cache_lines = spec_prop_cache_lines[0];
+        uint64_t max_cache_lines = spec_prop_cache_lines[0];
+        
+        for (uint64_t cache_lines : spec_prop_cache_lines) {
+            total_cache_lines += cache_lines;
+            if (cache_lines < min_cache_lines) min_cache_lines = cache_lines;
+            if (cache_lines > max_cache_lines) max_cache_lines = cache_lines;
+        }
+        
+        double avg_cache_lines = (double)total_cache_lines / spec_prop_cache_lines.size();
+        
+        output.output("Number of speculative propagations: %zu\n", spec_prop_cache_lines.size());
+        output.output("Total cache lines brought in: %lu\n", total_cache_lines);
+        output.output("Average cache lines per propagation: %.2f\n", avg_cache_lines);
+        output.output("Min cache lines per propagation: %lu\n", min_cache_lines);
+        output.output("Max cache lines per propagation: %lu\n", max_cache_lines);
+        output.output("===========================================================================\n");
+    }
     
     // Add new detailed propagation statistics
     output.output("======================[ Propagation Detail Statistics ]===================\n");
@@ -500,19 +582,41 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
         } else if (addr >= clauses_cmd_base_addr) {  // Clauses request
             worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
             clauses.handleMem(req);
-            state = STEP;
+            if (worker_id >= 0 && state != STEP) {
+                saved_state = state;
+                state = STEP;
+            }
         } else if (addr >= watches_base_addr) {  // Watches request
             worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
             watches.handleMem(req);
-            state = STEP;
+            if (worker_id >= 0 && state != STEP) {
+                saved_state = state;
+                state = STEP;
+            }
         } else if (addr >= variables_base_addr) {  // Variables request
             worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
             variables.handleMem(req);
-            state = STEP;
+            if (worker_id >= 0 && state != STEP) {
+                saved_state = state;
+                state = STEP;
+            }
         } else order_heap->handleMem(req);  // Heap request
 
-        if (active_workers.size() > 0 && worker_id >= 0 && worker_id < (int)active_workers.size()) {
-            active_workers[worker_id] = true;
+        // Activate appropriate workers based on worker_id range
+        if (worker_id >= 0) {
+            // Check if it's a speculative worker (IDs >= PARA_LITS * PROPAGATORS)
+            if (worker_id >= PARA_LITS * PROPAGATORS) {
+                int spec_worker = worker_id - PARA_LITS * PROPAGATORS;
+                assert(spec_worker <= (int)spec_active_workers.size());
+                if (spec_active_workers.size() > 0)
+                    spec_active_workers[spec_worker] = true;
+                spec_active = true;
+            } else {
+                assert(worker_id <= (int)active_workers.size());
+                if (active_workers.size() > 0)
+                    active_workers[worker_id] = true;
+                main_active = true;
+            }
         }
         output.verbose(CALL_INFO, 8, 0, "handleGlobalMemEvent received for 0x%lx, worker %d\n", addr, worker_id);
     } else if (auto* write_resp = dynamic_cast<SST::Interfaces::StandardMem::WriteResp*>(req)) {
@@ -538,7 +642,11 @@ void SATSolver::handleHeapResponse(SST::Event* ev) {
     sst_assert(resp != nullptr, CALL_INFO, -1, "Invalid heap response event\n");
     output.verbose(CALL_INFO, 8, 0, "HandleHeapResponse: response %d\n", resp->result);
     heap_resp = resp->result;
-    if (!unstalled_heap) state = STEP;
+    if (!unstalled_heap) {
+        saved_state = state;
+        state = STEP;
+        main_active = true;
+    }
     else unstalled_cnt--;
     delete resp;
 }
@@ -616,15 +724,38 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
             } else state = IDLE;
             break;
         case STEP: {
-            (*coroutine)();
-            if (*coroutine) {
-                output.verbose(CALL_INFO, 8, 0, "coroutine paused\n");
-                state = IDLE;  // Continue coroutine later
-            } else {
-                output.verbose(CALL_INFO, 8, 0, "coroutine completed\n");
-                delete coroutine;
-                coroutine = nullptr;  // coroutine will set the next state
-                yield_ptr = nullptr;  // Clear yield pointer when coroutine completes
+            sst_assert(main_active || spec_active, CALL_INFO, -1, "STEP state entered without active coroutines\n");
+            state = saved_state;
+            if (main_active) {
+                (*coroutine)();
+                if (*coroutine) {
+                    output.verbose(CALL_INFO, 8, 0, "coroutine paused\n");
+                    state = IDLE;  // Continue coroutine later
+                } else {
+                    output.verbose(CALL_INFO, 8, 0, "coroutine completed\n");
+                    assert(state != STEP);
+                    delete coroutine;
+                    coroutine = nullptr;  // coroutine will set the next state
+                    yield_ptr = nullptr;  // Clear yield pointer when coroutine completes
+                }
+                main_active = false;
+            }
+
+            if (spec_active) {
+                assert(state != STEP);  // does not modify state
+                coro_t::push_type* saved_yield_ptr = yield_ptr;
+                yield_ptr = spec_yield_ptr;
+                (*spec_coroutine)();
+                if (*spec_coroutine) {
+                    output.verbose(CALL_INFO, 8, 0, "speculative coroutine paused\n");
+                } else {
+                    output.verbose(CALL_INFO, 8, 0, "speculative coroutine completed\n");
+                    delete spec_coroutine;
+                    spec_coroutine = nullptr;  // coroutine will set the next state
+                    spec_yield_ptr = nullptr;  // Clear yield pointer when coroutine completes
+                }
+                spec_active = false;
+                yield_ptr = saved_yield_ptr;  // Restore original yield_ptr
             }
             break;
         }
@@ -639,6 +770,24 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
                 coroutine = nullptr;
                 yield_ptr = nullptr;
             } else state = IDLE;
+            
+            // Launch speculative propagation coroutine if spec_literal is defined
+            if (spec_literal != lit_Undef && spec_coroutine == nullptr) {
+                coro_t::push_type* saved_yield_ptr = yield_ptr;
+                resetSpecState();
+                spec_coroutine = new coro_t::pull_type(
+                    [this](coro_t::push_type &yield) {
+                        yield_ptr = &yield;
+                        spec_yield_ptr = &yield;
+                        speculativePropagate();
+                    });
+                if (!(*spec_coroutine)) {
+                    delete spec_coroutine;
+                    spec_coroutine = nullptr;
+                    spec_yield_ptr = nullptr;
+                } else state = IDLE;
+                yield_ptr = saved_yield_ptr; // Restore original yield_ptr
+            }
             break;
         case DECIDE:
             coroutine = new coro_t::pull_type(
@@ -886,7 +1035,7 @@ void SATSolver::execMinimize() {
 
     // Minimize conflict clause:
     int i, j;
-    output.verbose(CALL_INFO, 3, 0,
+    output.verbose(CALL_INFO, 4, 0,
         "ANALYZE: Minimizing clause (size %zu): %s\n", learnt_clause.size(),
         printClause(learnt_clause).c_str());
 
@@ -970,7 +1119,7 @@ void SATSolver::execMinimize() {
     // Update statistics - count how many literals were removed
     if (i - j > 0) {
         stat_minimized_literals->addDataNTimes(i - j, 1);
-        output.verbose(CALL_INFO, 3, 0, 
+        output.verbose(CALL_INFO, 4, 0, 
             "MINIMIZE: removed %d literals\n", i - j);
         output.verbose(CALL_INFO, 3, 0, "MINIMIZE: Final minimized clause: %s\n",
             printClause(learnt_clause).c_str());
@@ -996,7 +1145,23 @@ void SATSolver::execBacktrack() {
         trailEnqueue(learnt_clause[0], addr);
         stat_learned->addData(1);
     }
-    
+
+    // terminate speculative propagation if conflict after backtracking
+    if (spec_literal != lit_Undef
+        && var_assigned[var(spec_literal)] 
+        && var_value[var(spec_literal)] != !sign(spec_literal)) {
+        if (spec_coroutine != nullptr) terminateSpecPropagate();
+        insertVarOrder(var(spec_literal));
+        spec_literal = lit_Undef;
+    }
+
+    // do not redo speculative propagation if completed
+    if (spec_literal != lit_Undef
+        && spec_coroutine == nullptr) {
+        insertVarOrder(var(spec_literal));
+        spec_literal = lit_Undef;
+    }
+
     varDecayActivity();
     claDecayActivity();
     
@@ -1029,18 +1194,25 @@ void SATSolver::execReduce() {
 }
 
 void SATSolver::execRestart() {
-    output.verbose(CALL_INFO, 3, 0, "RESTART: Executing restart #%d\n", curr_restarts);
+    output.verbose(CALL_INFO, 4, 0, "RESTART: Executing restart #%d\n", curr_restarts);
     backtrack(0);
     conflictC = 0;
     curr_restarts++;
     stat_restarts->addData(1);
-    
+
+    // terminate speculative propagation because we are ready to choose a new decision
+    if (spec_literal != lit_Undef) {
+        if (spec_coroutine != nullptr) terminateSpecPropagate();
+        insertVarOrder(var(spec_literal));
+        spec_literal = lit_Undef;
+    }
+
     // Update the restart limit using Luby sequence or geometric progression
     double rest_base = luby_restart ? luby(restart_inc, curr_restarts) : pow(restart_inc, curr_restarts);
     conflicts_until_restart = rest_base * restart_first;
     
-    output.verbose(CALL_INFO, 3, 0, "RESTART: #%d, new limit=%d\n", 
-        curr_restarts, conflicts_until_restart);
+    output.verbose(CALL_INFO, 3, 0, "RESTART: #%d executed, new limit=%d\n", 
+        curr_restarts - 1, conflicts_until_restart);
 
     state = PROPAGATE;
 #ifdef USE_CLASSIC_HEAP
@@ -1053,6 +1225,9 @@ void SATSolver::execRestart() {
 }
 
 void SATSolver::execDecide() {
+    // Finish any previous speculative propagation early
+    if (spec_coroutine != nullptr) terminateSpecPropagate();
+
     if (!decide()) {
         state = DONE;
         output.output("SATISFIABLE: All variables assigned\n");
@@ -1101,12 +1276,19 @@ bool SATSolver::decide() {
             has_decision_sequence = false;
         }
     }
-    
-    // If couldn't use the decision sequence, fall back to normal heuristic
+
+    // Check if we have a speculative literal to use for the main propagation
+    // if (spec_literal != lit_Undef && !var_assigned[var(spec_literal)]) {
+    //     lit = spec_literal;
+    //     output.verbose(CALL_INFO, 2, 0, "DECISION: Using speculative lit %d\n", toInt(lit));
+    // }
+
+    // If couldn't use the decision sequence and no speculative literal, remove from heap
     if (lit == lit_Undef) {
         lit = chooseBranchVariable();
+        output.verbose(CALL_INFO, 2, 0, "DECISION: Selected lit %d \n", toInt(lit));
         if (lit == lit_Undef) {
-            output.verbose(CALL_INFO, 3, 0, "DECIDE: No unassigned variables left\n");
+            output.verbose(CALL_INFO, 2, 0, "DECISION: No unassigned variables left\n");
             return false;
         }
     }
@@ -1114,6 +1296,14 @@ bool SATSolver::decide() {
     if (decision_output_stream.is_open()) dumpDecision(lit);
     trail_lim.push_back(trail.size());  // new decision level
     trailEnqueue(lit);
+
+    // Extract speculative literal for next decision
+    if (enable_speculative) {
+        // spec_literal = chooseBranchVariable();
+        spec_literal = peekBranchVariable();
+        output.verbose(CALL_INFO, 2, 0, "Selected next speculative lit %d \n", toInt(spec_literal));
+    }
+
     return true;
 }
 
@@ -1122,7 +1312,7 @@ bool SATSolver::decide() {
 //-----------------------------------------------------------------------------------
 
 void SATSolver::unitPropagate() {
-    output.verbose(CALL_INFO, 3, 0, "PROPAGATE: Starting unit propagation\n");
+    output.verbose(CALL_INFO, 4, 0, "PROPAGATE: Starting unit propagation\n");
     conflicts.clear();
 
     // Track the current batch of variables that can be processed in parallel
@@ -1144,6 +1334,7 @@ void SATSolver::unitPropagate() {
         // Track times for each literal worker
         std::vector<uint64_t> lit_read_headptr(PARA_LITS, 0);
         std::vector<uint64_t> lit_read_watcher_blocks(PARA_LITS, 0);
+        std::vector<uint64_t> lit_read_clauses(PARA_LITS, 0);
         int last_worker = -1;
 
         // Spawn coroutines for each literal in this batch
@@ -1162,13 +1353,14 @@ void SATSolver::unitPropagate() {
 
             // when watcher coroutines are not launched, assume lit coroutine uses the start
             coro_t::pull_type* lit_coro = new coro_t::pull_type(
-                [this, lit_idx, &lit_read_headptr, &lit_read_watcher_blocks, &yield_ptrs]
+                [this, lit_idx, &lit_read_headptr, &lit_read_watcher_blocks, &lit_read_clauses, &yield_ptrs]
                 (coro_t::push_type &yield) {
                     yield_ptr = &yield;
                     yield_ptrs[lit_idx] = yield_ptr;
                     propagateLiteral(trail[qhead++], lit_idx,
                                      lit_read_headptr[lit_idx], 
-                                     lit_read_watcher_blocks[lit_idx]);
+                                     lit_read_watcher_blocks[lit_idx],
+                                     lit_read_clauses[lit_idx]);
                 });
             coroutines[lit_idx] = lit_coro;
             stat_propagations->addData(1);
@@ -1225,13 +1417,14 @@ void SATSolver::unitPropagate() {
                         trail.size() - qhead, j);
                     delete coroutines[j];
                     coro_t::pull_type* lit_coro = new coro_t::pull_type(
-                        [this, j, &lit_read_headptr, &lit_read_watcher_blocks, &yield_ptrs]
+                        [this, j, &lit_read_headptr, &lit_read_watcher_blocks, &lit_read_clauses, &yield_ptrs]
                         (coro_t::push_type &yield) {
                             yield_ptr = &yield;
                             yield_ptrs[j] = yield_ptr;
                             propagateLiteral(trail[qhead++], j,
                                              lit_read_headptr[j], 
-                                             lit_read_watcher_blocks[j]);
+                                             lit_read_watcher_blocks[j],
+                                             lit_read_clauses[j]);
                         });
                     coroutines[j] = lit_coro;
                     stat_propagations->addData(1);
@@ -1270,6 +1463,7 @@ void SATSolver::unitPropagate() {
         // Accumulate timing data of the last finished worker
         cycles_read_headptr += lit_read_headptr[last_worker];
         cycles_read_watcher_blocks += lit_read_watcher_blocks[last_worker];
+        cycles_read_clauses += lit_read_clauses[last_worker];
 
         // Stop if we've reached MAX_CONFL conflicts (unless MAX_CONFL is -1, meaning no limit)
         if (MAX_CONFL >= 0 && (int)conflicts.size() >= MAX_CONFL) {
@@ -1286,8 +1480,22 @@ void SATSolver::propagateLiteral(
     Lit p,
     int lit_worker_id,
     uint64_t& read_headptr_cycles,
-    uint64_t& read_watcher_blocks_cycles
+    uint64_t& read_watcher_blocks_cycles,
+    uint64_t& read_clauses_cycles
 ) {
+    // Check if this literal's variable was PROPAGATED (not just assigned) during speculative propagation
+    // Check both current and previous speculative propagations with matching values
+    Var v = var(p);
+    bool is_speculative = false;
+    if (spec_var_propagated[v] && spec_var_value[v] == var_value[v]) {
+        is_speculative = true;
+    } else if (prev_spec_var_propagated[v] && prev_spec_var_value[v] == var_value[v]) {
+        is_speculative = true;
+    }
+
+    if (is_speculative)
+        output.verbose(CALL_INFO, 2, 0, "lit %d was speculatively propagated\n", toInt(p));
+    
     // assuming we are using base_worker_id when watcher coroutines are not launched
     int base_worker_id = lit_worker_id * PROPAGATORS;
     Lit not_p = ~p;
@@ -1300,7 +1508,7 @@ void SATSolver::propagateLiteral(
     }
     polling[base_worker_id] = false;
 
-    output.verbose(CALL_INFO, 3, 0,
+    output.verbose(CALL_INFO, 2, 0,
         "PROPAGATE[L%d]: Processing watchers for literal %d\n", 
         lit_worker_id, toInt(not_p));
 
@@ -1442,7 +1650,7 @@ void SATSolver::propagateLiteral(
         output.verbose(CALL_INFO, 4, 0, "PROPAGATE[L%d]: Finished a watch block\n", lit_worker_id);
 
         // After all workers finished, accumulate timing data
-        cycles_read_clauses += worker_read_clauses[last_worker];
+        read_clauses_cycles += worker_read_clauses[last_worker];
         cycles_insert_watchers += worker_insert_watchers[last_worker];
         cycles_polling += worker_polling[last_worker];
         
@@ -1468,6 +1676,21 @@ void SATSolver::propagateLiteral(
 
     stat_para_watchers->addData(para_watchers);
     stat_watcher_occ->addData(watcher_occ);
+    
+    // Track metrics based on whether this literal was speculative
+    if (is_speculative) {
+        // This variable was assigned during speculative propagation
+        speculative_metrics.read_headptr_cycles += read_headptr_cycles;
+        speculative_metrics.read_watcher_blocks_cycles += read_watcher_blocks_cycles;
+        speculative_metrics.read_clauses_cycles += read_clauses_cycles;
+        speculative_metrics.count++;
+    } else {
+        // Normal (non-speculative) propagation
+        normal_metrics.read_headptr_cycles += read_headptr_cycles;
+        normal_metrics.read_watcher_blocks_cycles += read_watcher_blocks_cycles;
+        normal_metrics.read_clauses_cycles += read_clauses_cycles;
+        normal_metrics.count++;
+    }
 }
 
 void SATSolver::propagateWatchers(
@@ -1593,7 +1816,7 @@ void SATSolver::propagateWatchers(
         } else { output.verbose(CALL_INFO, 3, 0, "  Conflict, but ignored\n"); }
     } else {
         // Unit clause found, propagate
-        output.verbose(CALL_INFO, 3, 0, "  forces literal %d (to true)\n", toInt(first));
+        output.verbose(CALL_INFO, 4, 0, "  forces literal %d (to true)\n", toInt(first));
         if (conflicts.empty()) trailEnqueue(first, clause_addr);
     }
 
@@ -1614,7 +1837,7 @@ void SATSolver::issuePrefetch(uint64_t addr) {
 //-----------------------------------------------------------------------------------
 
 void SATSolver::analyze(Cref conflict, int worker_id) {
-    output.verbose(CALL_INFO, 3, 0,
+    output.verbose(CALL_INFO, 4, 0,
         "ANALYZE[%d]: Starting conflict analysis of clause 0x%x\n", worker_id, conflict);
 
     // First UIP scheme
@@ -1632,7 +1855,8 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     
     // Add literals from conflict clause to learnt clause
     do {
-        assert(conflict != ClauseRef_Undef); // (otherwise should be UIP)
+        sst_assert(conflict != ClauseRef_Undef, CALL_INFO, -1,  // (otherwise should be UIP)
+            "ANALYZE[%d]: conflict clause is undefined\n", worker_id);
         const Clause& c = clauses.readClause(conflict, worker_id);
         
         // Bump activity for learnt clauses
@@ -1739,8 +1963,8 @@ void SATSolver::findBtLevel() {
         bt_level = variables.getLevel(var(p));
     }
 
-    output.verbose(CALL_INFO, 3, 0, "Backtrack Level = %d\n", bt_level);
-    output.verbose(CALL_INFO, 3, 0, "Final learnt clause: %s\n",
+    output.verbose(CALL_INFO, 4, 0, "Backtrack Level = %d\n", bt_level);
+    output.verbose(CALL_INFO, 4, 0, "Final learnt clause: %s\n",
         printClause(learnt_clause).c_str());
     state = BACKTRACK;
 #ifdef USE_CLASSIC_HEAP
@@ -1756,7 +1980,7 @@ void SATSolver::findBtLevel() {
 //-----------------------------------------------------------------------------------
 
 void SATSolver::backtrack(int backtrack_level) {
-    output.verbose(CALL_INFO, 3, 0, "BACKTRACK From level %d to level %d\n", 
+    output.verbose(CALL_INFO, 4, 0, "BACKTRACK From level %d to level %d\n", 
         current_level(), backtrack_level);
     
 #ifdef USE_CLASSIC_HEAP
@@ -1770,11 +1994,16 @@ void SATSolver::backtrack(int backtrack_level) {
         polarity[v] = sign(p);
         unassignVariable(v);
 
-        
-        insertVarOrder(v);
+        // Skip reinserting the speculative literal back into the heap
+        if (v != var(spec_literal)) {
+            insertVarOrder(v);
 #ifdef USE_CLASSIC_HEAP
-        unstalled_cnt++;
+            unstalled_cnt++;
 #endif
+        } else {
+            output.verbose(CALL_INFO, 4, 0, 
+                "BACKTRACK: Skipping reinsertion of speculative variable x%d\n", v);
+        }
         
         output.verbose(CALL_INFO, 5, 0,
             "BACKTRACK: Unassigning x%d, saved polarity %s\n", 
@@ -1795,7 +2024,7 @@ void SATSolver::backtrack(int backtrack_level) {
 // Locked clauses are clauses that are reason to some assignment. 
 // Binary clauses are never removed.
 void SATSolver::reduceDB() {
-    output.verbose(CALL_INFO, 3, 0, "REDUCEDB: Starting clause database reduction\n");
+    output.verbose(CALL_INFO, 4, 0, "REDUCEDB: Starting clause database reduction\n");
     
     size_t nl = nLearnts();
     std::vector<Cref> learnts_addr = clauses.readAllAddr();
@@ -1816,7 +2045,7 @@ void SATSolver::reduceDB() {
     // 3. Extra activity limit for removal
     double extra_lim = learnts.size() > 0 ? cla_inc / learnts.size() : 0;
     
-    output.verbose(CALL_INFO, 3, 0, 
+    output.verbose(CALL_INFO, 4, 0, 
         "REDUCEDB: Found %zu learnt clauses, extra_lim = %f\n", 
         learnts.size(), extra_lim);
     
@@ -1844,7 +2073,7 @@ void SATSolver::reduceDB() {
     // 5. Compact clauses by moving non-removed learnt clauses forward
     clauses.reduceDB(to_keep);
 
-    output.verbose(CALL_INFO, 3, 0, 
+    output.verbose(CALL_INFO, 4, 0, 
         "REDUCEDB: Removed %d learnt clauses, new clause count: %zu\n", 
         removed, clauses.size());
         
@@ -1926,8 +2155,24 @@ Lit SATSolver::chooseBranchVariable() {
         if (next == var_Undef && order_heap->empty()) break;
     }
 
-    output.verbose(CALL_INFO, 3, 0, "DECISION: Selected lit %d \n", toInt(mkLit(next, polarity[next])));
     if (next == var_Undef) return lit_Undef;
+    return mkLit(next, polarity[next]);
+}
+
+Lit SATSolver::peekBranchVariable() {
+    if (order_heap->empty()) return lit_Undef;
+
+    Var next = var_Undef;
+    int idx = 1;
+    while (next == var_Undef) {
+        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::READ, idx));
+        (*yield_ptr)();
+        sst_assert(heap_resp != var_Undef, CALL_INFO, -1, "var_Undef during heap peek\n");
+        if (!var_assigned[heap_resp] && decision[heap_resp]) next = heap_resp;
+        if (idx >= order_heap->size()) break;
+        idx++;
+    }
+
     return mkLit(next, polarity[next]);
 }
 
@@ -2177,4 +2422,276 @@ void SATSolver::dumpDecision(Lit lit) {
     // Note: sign(lit) is inverted because in the solver, sign true means negative
     int value = sign(lit) ? 0 : 1;
     decision_output_stream << v << " " << value << std::endl;
+}
+
+//-----------------------------------------------------------------------------------
+// Speculative Propagation
+//-----------------------------------------------------------------------------------
+
+// Reset speculative propagation state
+void SATSolver::terminateSpecPropagate() {
+    output.verbose(CALL_INFO, 2, 0, "Terminated previous speculative propagation\n");
+    for (auto corot : spec_sub_coroutines) {
+        if (corot != nullptr) delete corot;
+    }
+    spec_sub_coroutines.clear();
+    spec_sub_yield_ptrs.clear();
+    spec_active_workers.clear();
+    // Terminate the speculative coroutine
+    delete spec_coroutine;
+    spec_coroutine = nullptr;
+    spec_active = false;
+    spec_trail.clear();
+    // clear any pending requests
+    reorder_buffer.reset();
+    clauses.reset();
+    watches.reset();
+    variables.reset();
+}
+
+void SATSolver::resetSpecState() {
+    // Save the current speculative assignments before resetting
+    prev_spec_var_assigned = spec_var_assigned;
+    prev_spec_var_value = spec_var_value;
+    prev_spec_var_propagated = spec_var_propagated;
+    
+    spec_trail.clear();
+    
+    // Initialize or reset speculative assignment tracking
+    if (spec_var_assigned.size() != num_vars + 1) {
+        spec_var_assigned.resize(num_vars + 1, false);
+        spec_var_value.resize(num_vars + 1, false);
+        spec_var_propagated.resize(num_vars + 1, false);
+        prev_spec_var_assigned.resize(num_vars + 1, false);
+        prev_spec_var_value.resize(num_vars + 1, false);
+        prev_spec_var_propagated.resize(num_vars + 1, false);
+    } else {
+        spec_var_assigned.assign(num_vars + 1, false);
+        spec_var_value.assign(num_vars + 1, false);
+        spec_var_propagated.assign(num_vars + 1, false);
+    }
+    
+    spec_conflicts = 0;
+}
+
+// Check if a variable is assigned in speculative propagation
+bool SATSolver::isSpecAssigned(Var v) const {
+    return var_assigned[v] || spec_var_assigned[v];
+}
+
+// Get the value of a variable (considering both main and speculative assignments)
+bool SATSolver::getSpecValue(Var v) const {
+    if (var_assigned[v]) return var_value[v];
+    return spec_var_value[v];
+}
+
+// Get the value of a literal (considering both main and speculative assignments)
+bool SATSolver::getSpecValue(Lit p) const {
+    return getSpecValue(var(p)) ^ sign(p);
+}
+
+// Speculative propagation - reads watchlists and clauses without making writes
+void SATSolver::speculativePropagate() {
+    if (spec_literal == lit_Undef) return;
+
+    // Add the speculative literal to the temporary trail
+    spec_trail.push_back(spec_literal);
+    Var v = var(spec_literal);
+    spec_var_assigned[v] = true;
+    spec_var_value[v] = !sign(spec_literal);
+    output.verbose(CALL_INFO, 2, 0, "SPEC: propagate %d (decision)\n", toInt(spec_literal));
+
+    // Initialize cache line counter for this speculativePropagate() call
+    // Push immediately so it's preserved even if speculation terminates early
+    spec_prop_cache_lines.push_back(0);
+    uint64_t& cache_lines_read = spec_prop_cache_lines.back();
+
+    uint spec_qhead = 0;
+    while (spec_qhead < spec_trail.size() && spec_conflicts < MAX_CONFL) {
+        Lit p = spec_trail[spec_qhead];
+        Lit not_p = ~p;
+        int watch_idx = toWatchIndex(p);
+        
+        // Mark this variable as speculatively propagated (not just assigned)
+        spec_var_propagated[var(p)] = true;
+        
+        output.verbose(CALL_INFO, 2, 0, "SPEC: Processing literal %d\n", toInt(not_p));
+        
+        // Use dedicated worker IDs starting from PARA_LITS * PROPAGATORS
+        int base_worker_id = PARA_LITS * PROPAGATORS;
+        
+        // Read watch metadata - count as 1 cache line read
+        cache_lines_read++;
+        WatchMetaData wmd = watches.readMetaData(watch_idx, base_worker_id);
+        stat_spec_started->addData(1);
+        // if (var_assigned[var(spec_literal)]) {
+        //     output.verbose(CALL_INFO, 4, 0, "Spec Literal propagated by main, early exit speculation\n");
+        //     return;
+        // }
+        
+        bool do_prewatch = PRE_WATCHERS > 0;
+        uint32_t curr_addr = wmd.head_ptr;
+        
+        // Traverse the watchlist (prewatchers and blocks)
+        while (curr_addr != 0 || do_prewatch) {
+            WatcherBlock curr_block;
+            if (do_prewatch) {
+                curr_block.setNextBlock(curr_addr);
+                for (int i = 0; i < PRE_WATCHERS; i++) {
+                    curr_block.nodes[i] = wmd.pre_watchers[i];
+                }
+                do_prewatch = false;
+            } else {
+                // Read watcher block - count as 1 cache line read
+                cache_lines_read++;
+                curr_block = watches.readBlock(curr_addr, base_worker_id);
+                // if (var_assigned[var(spec_literal)]) {
+                //     output.verbose(CALL_INFO, 4, 0, "Spec Literal propagated by main, early exit speculation\n");
+                //     return;
+                // }
+            }
+            
+            // Collect valid nodes
+            std::vector<int> valid_nodes;
+            for (int i = 0; i < PROPAGATORS; i++) {
+                if (!curr_block.nodes[i].valid) continue;
+
+                Lit blocker = curr_block.nodes[i].blocker;
+                if (isSpecAssigned(var(blocker)) && getSpecValue(blocker)) {
+                    // Blocker is true, skip to next watcher
+                    output.verbose(CALL_INFO, 4, 0,
+                        "SPEC: Watch block[%d]: clause 0x%x, blocker %d = True, skipping\n", 
+                        i, curr_block.nodes[i].getClauseAddr(), toInt(blocker));
+                    continue;
+                }
+
+                valid_nodes.push_back(i);
+            }
+            
+            // Process watchers in parallel batches
+            coro_t::push_type* parent_yield_ptr = yield_ptr;
+            int workers = std::min(PROPAGATORS, (int)valid_nodes.size());
+            spec_sub_coroutines.resize(workers);
+            spec_sub_yield_ptrs.resize(workers);
+            assert(spec_active_workers.size() == 0);
+            spec_active_workers.resize(workers, false);
+            bool done = true;
+            
+            output.verbose(CALL_INFO, 4, 0, "SPEC: spawning %d watcher coroutines\n", workers);
+            
+            // Create watcher coroutines
+            for (int worker_id = 0; worker_id < workers; worker_id++) {
+                int watcher_i = valid_nodes[worker_id];
+                spec_sub_coroutines[worker_id] = new coro_t::pull_type(
+                    [this, watcher_i, not_p, &curr_block, worker_id, base_worker_id, &cache_lines_read]
+                    (coro_t::push_type &yield) {
+
+                    spec_sub_yield_ptrs[worker_id] = &yield;
+                    yield_ptr = &yield;
+
+                    Cref clause_addr = curr_block.nodes[watcher_i].getClauseAddr();
+                    int global_worker_id = base_worker_id + worker_id;
+                    
+                    // Read clause - 1 line for size if not terminated
+                    cache_lines_read++;
+                    Clause c = clauses.readClause(clause_addr, global_worker_id);
+
+                    // additional lines if clause spans multiple cache lines
+                    cache_lines_read += std::ceil(c.size() / 64) - 1;
+
+                    output.verbose(CALL_INFO, 4, 0, "SPEC[W%d]: blocker %d, clause 0x%x: %s\n",
+                        worker_id, toInt(curr_block.nodes[watcher_i].blocker),
+                        clause_addr, printClause(c.literals).c_str());
+
+                    // Make sure the false literal is at position 1
+                    if (c[0] == not_p) std::swap(c.literals[0], c.literals[1]);
+
+                    Lit first = c[0];
+                    // If first literal is satisfied, skip
+                    if (isSpecAssigned(var(first)) && getSpecValue(first)) {
+                        return;
+                    }
+                    
+                    // Look for a new watch
+                    bool found_new_watch = false;
+                    for (size_t k = 2; k < c.litSize(); k++) {
+                        Lit lit = c[k];
+                        if (!isSpecAssigned(var(lit)) || getSpecValue(lit)) {
+                            found_new_watch = true;
+                            break;
+                        }
+                    }
+                    
+                    // If no new watch found, check for propagation or conflict
+                    if (!found_new_watch) {
+                        if (isSpecAssigned(var(first)) && (getSpecValue(first) == false)) {
+                            // Conflict
+                            spec_conflicts++;
+                            output.verbose(CALL_INFO, 4, 0,
+                                "SPEC: conflict found, count=%d\n", spec_conflicts);
+                        } else {
+                            // Propagate
+                            spec_trail.push_back(first);
+                            spec_var_assigned[var(first)] = true;
+                            spec_var_value[var(first)] = !sign(first);
+                            output.verbose(CALL_INFO, 4, 0, "SPEC: propagate %d\n", toInt(first));
+                        }
+                    }
+                });
+
+                if (*spec_sub_coroutines[worker_id]) done = false;
+            }
+            
+            if (!done) (*parent_yield_ptr)();  // yield back to main
+            
+            // Step sub-coroutines
+            while (!done) {
+                done = true;
+                for (int worker_id = 0; worker_id < workers; worker_id++) {
+                    if (spec_active_workers[worker_id]) {
+                        (*spec_sub_coroutines[worker_id])();
+                        spec_active_workers[worker_id] = false;
+                        if (!(*spec_sub_coroutines[worker_id])) {
+                            delete spec_sub_coroutines[worker_id];
+                            spec_sub_coroutines[worker_id] = nullptr;
+                            spec_sub_yield_ptrs[worker_id] = nullptr;
+                        } else {
+                            done = false;
+                        }
+                    } else if (spec_sub_coroutines[worker_id] != nullptr)
+                        done = false;
+                }
+                if (!done) (*parent_yield_ptr)();
+            }
+
+            // Cleanup coroutines
+            spec_sub_coroutines.clear();
+            spec_sub_yield_ptrs.clear();
+            spec_active_workers.clear();
+            yield_ptr = parent_yield_ptr;
+
+            // early stop
+            // if (var_assigned[var(spec_literal)]) {
+            //     output.verbose(CALL_INFO, 4, 0, "Spec Literal propagated by main, early exit speculation\n");
+            //     return;
+            // }
+
+            // Stop if too many conflicts
+            if (spec_conflicts >= MAX_CONFL) break;
+
+            // Move to next block
+            curr_addr = curr_block.getNextBlock();
+        }
+        spec_qhead++;
+    }
+
+    // Cache line count already stored in vector via reference
+    output.verbose(CALL_INFO, 2, 0, 
+        "SPEC: speculativePropagate() processed %zu literals and brought in %lu cache lines\n",
+        spec_trail.size(), cache_lines_read);
+
+    stat_spec_finished->addDataNTimes(spec_trail.size(), 1);
+    output.verbose(CALL_INFO, 2, 0,
+        "Speculative propagation finished: trail_size=%zu, conflicts=%d\n", 
+        spec_trail.size(), spec_conflicts);
 }

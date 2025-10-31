@@ -64,7 +64,10 @@ def parse_solver_statistics(content):
             'assigns': r'Assigns\s*:\s*(\d+)',
             'unassigns': r'UnAssigns\s*:\s*(\d+)',
             'minimized': r'Minimized\s*:\s*(\d+)',
-            'restarts': r'Restarts\s*:\s*(\d+)'
+            'restarts': r'Restarts\s*:\s*(\d+)',
+            # Speculation stats
+            'spec_started': r'Spec\s+Started\s*:\s*(\d+)',
+            'spec_finished': r'Spec\s+Finished\s*:\s*(\d+)'
         }
         
         for key, pattern in patterns.items():

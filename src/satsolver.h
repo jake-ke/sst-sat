@@ -75,6 +75,7 @@ public:
         {"watch_nodes_base_addr", "Base address for watch nodes memory", "0x60000000"},
         {"var_act_base_addr", "Base address for variable activity memory", "0x70000000"},
         {"prefetch_enabled", "Enable prefetching", "false"},
+        {"enable_speculative", "Enable speculative propagation", "false"}
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -92,6 +93,8 @@ public:
         {"watcher_blocks", "Number of blocks visited during watcher insertions", "count", 1},
         {"para_watchers", "Number of watchers inspected per propagation", "count", 1},
         {"para_vars", "Number of variables processed per unitPropagate before conflict", "count", 1},
+        {"spec_started", "Total literals started in speculative propagation", "count", 1},
+        {"spec_finished", "Total literals finished in speculative propagation", "count", 1},
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -139,7 +142,8 @@ public:
     void unitPropagate();
     void propagateLiteral(Lit p, int lit_worker_id, 
                           uint64_t& read_headptr_cycles, 
-                          uint64_t& read_watcher_blocks_cycles);
+                          uint64_t& read_watcher_blocks_cycles,
+                          uint64_t& read_clauses_cycles);
     void propagateWatchers(int watcher_i, Lit not_p, bool& block_modified, WatcherBlock& block, 
                            int lit_worker_id, int worker_id,
                            uint64_t& read_clauses_cycles, uint64_t& insert_watchers_cycles, 
@@ -159,6 +163,7 @@ public:
     
     // Decision Heuristics
     Lit chooseBranchVariable();
+    Lit peekBranchVariable();
     void insertVarOrder(Var v);   // Insert variable into order heap
     void varDecayActivity();       // Decay all variable activities
     void varBumpActivity(Var v);   // Bump a variable's activity
@@ -199,7 +204,7 @@ private:
     };
   
     // State Variables
-    SolverState state, next_state;
+    SolverState state, next_state, saved_state;
     SST::Output output;
     SST::Interfaces::StandardMem* global_memory; // For heap and variables operations
     std::string dimacs_content;
@@ -296,6 +301,7 @@ private:
     ReorderBuffer reorder_buffer;                   // Reorder buffer for managing parallel read requests
     coro_t::pull_type* coroutine;                   // coroutine in the top level FSM
     coro_t::push_type* yield_ptr;                   // current yield pointer
+    bool main_active;
     std::vector<bool> active_workers;               // Track completion of sub coroutines
     std::vector<bool> polling;                      // Track workers in polling state
     std::unordered_set<Cref> clause_locks;          // Track locked clauses during parallel propagation
@@ -317,6 +323,8 @@ private:
     Statistic<uint64_t>* stat_watcher_blocks;
     Statistic<uint64_t>* stat_para_watchers;
     Statistic<uint64_t>* stat_para_vars;
+    Statistic<uint64_t>* stat_spec_started;
+    Statistic<uint64_t>* stat_spec_finished;
 
     // User-defined decision sequence
     std::vector<std::pair<Var, bool>> decision_sequence; // (variable, sign) pairs
@@ -353,6 +361,47 @@ private:
     uint64_t cycles_read_clauses;        // Time spent reading clauses in subPropagate
     uint64_t cycles_insert_watchers;     // Time spent inserting watchers
     uint64_t cycles_polling;             // Time spent polling for busy watchers
+
+    // Structure for tracking propagation metrics
+    struct PropagationMetrics {
+        uint64_t read_headptr_cycles;
+        uint64_t read_watcher_blocks_cycles;
+        uint64_t read_clauses_cycles;
+        uint64_t count;  // number of literals propagated
+
+        PropagationMetrics() : read_headptr_cycles(0), read_watcher_blocks_cycles(0),
+                               read_clauses_cycles(0), count(0) {}
+    };
+
+    PropagationMetrics normal_metrics;      // Non-speculative propagations
+    PropagationMetrics speculative_metrics; // Speculative propagations that became actual
+    std::vector<uint64_t> spec_prop_cache_lines; // Number of cache lines each spec propagation brought in
+
+    // Speculative Propagation
+    bool enable_speculative;
+    Lit spec_literal;                    // Next decision literal for speculative propagation
+    bool spec_active;                    // Whether speculative propagation is active
+    std::vector<Lit> spec_trail;         // Temporary trail for speculative assignments
+    std::vector<bool> spec_var_assigned; // Temporary assignments for speculative propagation
+    std::vector<bool> spec_var_value;    // Temporary values for speculative propagation
+    std::vector<bool> prev_spec_var_assigned; // Copy of spec_var_assigned before reset
+    std::vector<bool> prev_spec_var_value;    // Copy of spec_var_value before reset
+    std::vector<bool> spec_var_propagated;    // Track which variables have been speculatively PROPAGATED
+    std::vector<bool> prev_spec_var_propagated; // Copy before reset
+    int spec_conflicts;                  // Number of conflicts in speculative propagation
+    coro_t::pull_type* spec_coroutine;   // Coroutine for speculative propagation
+    coro_t::push_type* spec_yield_ptr;   // current yield pointer
+    std::vector<bool> spec_active_workers; // Track completion of spec propagation workers
+    std::vector<coro_t::pull_type*> spec_sub_coroutines;
+    std::vector<coro_t::push_type*> spec_sub_yield_ptrs;
+
+    // Speculative propagation methods
+    void terminateSpecPropagate();
+    void speculativePropagate();
+    void resetSpecState();
+    bool isSpecAssigned(Var v) const;
+    bool getSpecValue(Var v) const;
+    bool getSpecValue(Lit p) const;
 };
 
 #endif // SATSOLVER_H
