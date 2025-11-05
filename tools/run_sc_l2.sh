@@ -1,9 +1,13 @@
 #!/bin/zsh
 
+# Preserve script name for usage printing (zsh sets $0 to function name inside functions)
+SCRIPT_NAME=$(basename "$0")
+
 # Check if help is requested or show usage
 show_usage() {
-    echo "Usage: $0 [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--prefetch] [--folder FOLDER] [--num-seeds NUM] [-j jobs]"
+    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--prefetch] [--folder FOLDER] [--num-seeds NUM] [-j jobs]"
     echo "Options:"
+    echo "  -b, --bench-dir DIR  Directory containing benchmark CNF files (required)"
     echo "  --ram2-cfg FILE       Ramulator2 configuration file"
     echo "  --classic-heap        Use classic heap implementation instead of pipelined"
     echo "  --l1-size SIZE        L1 cache size"
@@ -16,7 +20,7 @@ show_usage() {
     echo "  --folder FOLDER       Name for the logs folder (default: logs)"
     echo "  --num-seeds NUM       Number of random seeds to run (default: 1)"
     echo "  -j, --jobs JOBS       Number of parallel jobs"
-    echo "Example: $0 --l1-size 32KiB --l1-latency 2 --mem-latency 200ns --prefetch --folder quick_test --num-seeds 5 -j 8"
+    echo "Example: $SCRIPT_NAME --bench-dir /path/to/benchmarks --l1-size 32KiB --l1-latency 2 --mem-latency 200ns --prefetch --folder quick_test --num-seeds 5 -j 8"
 }
 
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
@@ -25,6 +29,7 @@ if [[ "$1" == "-h" || "$1" == "--help" ]]; then
 fi
 
 # Optional values (no defaults - let Python script handle defaults)
+BENCHMARK_DIR=""
 RAM2_CFG=""
 CLASSIC_HEAP=""
 L1_SIZE=""
@@ -68,6 +73,16 @@ colorize_result() {
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -b|--bench-dir|--benchmark-dir)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                BENCHMARK_DIR="$2"
+                shift 2
+            else
+                echo "Error: --bench-dir requires a directory argument"
+                show_usage
+                exit 1
+            fi
+            ;;
         --ram2-cfg)
             if [[ -n "$2" && "$2" != -* ]]; then
                 RAM2_CFG="$2"
@@ -202,10 +217,13 @@ timedout=0
 skipped=0
 total=0
 
-# Define benchmark directory
-BENCHMARK_DIR=/home/jakeke/sat_benchmarks/satcomp_sim
+# Ensure benchmark directory was provided and exists
+if [[ -z "$BENCHMARK_DIR" ]]; then
+    echo "Error: --bench-dir is required and must point to a directory containing benchmark files"
+    show_usage
+    exit 1
+fi
 
-# Check if benchmark directory exists
 if [[ ! -d "$BENCHMARK_DIR" ]]; then
     echo "Error: Benchmark directory not found: $BENCHMARK_DIR"
     exit 1
@@ -231,6 +249,7 @@ log_message "SAT Competition Quick Test"
 log_message "Test run started at $(date)"
 log_message "Output directory: $LOGS_DIR"
 log_message "Parallel jobs: $MAX_JOBS"
+log_message "Benchmark directory: $BENCHMARK_DIR"
 log_message "RAMULATOR2 configuration: ${RAM2_CFG:-default}"
 log_message "L1 cache size: ${L1_SIZE:-default}"
 log_message "L1 cache latency: ${L1_LATENCY:-default}"
