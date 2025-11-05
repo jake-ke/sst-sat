@@ -21,6 +21,14 @@ LDFLAGS = $(shell sst-config --ELEMENT_LDFLAGS)
 SST_ELEMENTS_INCLUDE = -I$(SST_ELEMENTS_HOME)/include
 CXXFLAGS += $(SST_ELEMENTS_INCLUDE)
 
+# Add Boost include and library paths if BOOST_ROOT is defined by the module
+ifdef BOOST_ROOT
+	BOOST_INCLUDE := -I$(BOOST_ROOT)/include
+	BOOST_LIBDIR := $(BOOST_ROOT)/lib
+	CXXFLAGS += $(BOOST_INCLUDE)
+	LDFLAGS += -L$(BOOST_LIBDIR) -Wl,-rpath,$(BOOST_LIBDIR)
+endif
+
 # Source files
 SOURCES = memory_allocator.cc cache_profiler.cc async_base.cc async_heap.cc async_watches.cc async_clauses.cc async_activity.cc async_var_activity.cc satsolver.cc directedprefetch.cc pipelined_heap.cc pipelined_heap_test.cc
 OBJECTS = $(SOURCES:%.cc=$(BUILD_DIR)/%.o)
