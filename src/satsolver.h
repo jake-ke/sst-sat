@@ -265,8 +265,8 @@ private:
 #else
     PipelinedHeap* order_heap;          // Pipelined implementation
 #endif
-    bool unstalled_heap;                // Whether the heap has been unstalled
-    int unstalled_cnt;                  // Number of unstalled heap responses to receive
+    bool in_decision;                // Whether the heap has been unstalled
+    int heap_resp_cnt;                  // Number of unstalled heap responses to receive
 
     // external memory controller for struct Variable
     Variables variables;                // Replaces std::vector<Variable> variables

@@ -133,8 +133,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
         global_memory, var_act_base_addr);
 #endif
     sst_assert(order_heap != nullptr, CALL_INFO, -1, "Unable to load Heap subcomponent\n");
-    unstalled_heap = false;
-    unstalled_cnt = 0;
+    in_decision = false;
+    heap_resp_cnt = 0;
 
     // Configure the link to the heap subcomponent
     heap_link = configureLink("heap_port", 
@@ -642,12 +642,12 @@ void SATSolver::handleHeapResponse(SST::Event* ev) {
     sst_assert(resp != nullptr, CALL_INFO, -1, "Invalid heap response event\n");
     output.verbose(CALL_INFO, 8, 0, "HandleHeapResponse: response %d\n", resp->result);
     heap_resp = resp->result;
-    if (!unstalled_heap) {
-        saved_state = state;
+    heap_resp_cnt--;
+    if (in_decision && heap_resp_cnt == 0) {
         state = STEP;
         main_active = true;
     }
-    else unstalled_cnt--;
+    assert(heap_resp_cnt >= 0);
     delete resp;
 }
 
@@ -890,11 +890,7 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
             } else state = IDLE;
             break;
         case WAIT_HEAP:
-            assert(unstalled_cnt >= 0);
-            if (unstalled_cnt == 0) {
-                unstalled_heap = false;
-                state = next_state;
-            }
+            if (heap_resp_cnt == 0) state = next_state;
             return false;
         case DONE: total_cycles = cycle; primaryComponentOKToEndSim(); return true;
         default: output.fatal(CALL_INFO, -1, "Invalid state: %d\n", state);
@@ -1006,8 +1002,7 @@ void SATSolver::execAnalyze() {
     for (const Var& v : v_to_bump) {
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::BUMP, v));
 #ifdef USE_CLASSIC_HEAP
-        if (OVERLAP_HEAP_BUMP) unstalled_heap = true;
-        unstalled_cnt++;
+        heap_resp_cnt++;
 #endif
     }
     for (const Cref& c : c_to_bump) {
@@ -1151,14 +1146,14 @@ void SATSolver::execBacktrack() {
         && var_assigned[var(spec_literal)] 
         && var_value[var(spec_literal)] != !sign(spec_literal)) {
         if (spec_coroutine != nullptr) terminateSpecPropagate();
-        insertVarOrder(var(spec_literal));
+        // insertVarOrder(var(spec_literal));
         spec_literal = lit_Undef;
     }
 
     // do not redo speculative propagation if completed
     if (spec_literal != lit_Undef
         && spec_coroutine == nullptr) {
-        insertVarOrder(var(spec_literal));
+        // insertVarOrder(var(spec_literal));
         spec_literal = lit_Undef;
     }
 
@@ -1203,7 +1198,7 @@ void SATSolver::execRestart() {
     // terminate speculative propagation because we are ready to choose a new decision
     if (spec_literal != lit_Undef) {
         if (spec_coroutine != nullptr) terminateSpecPropagate();
-        insertVarOrder(var(spec_literal));
+        // insertVarOrder(var(spec_literal));
         spec_literal = lit_Undef;
     }
 
@@ -1228,6 +1223,7 @@ void SATSolver::execDecide() {
     // Finish any previous speculative propagation early
     if (spec_coroutine != nullptr) terminateSpecPropagate();
 
+    in_decision = true;
     if (!decide()) {
         state = DONE;
         output.output("SATISFIABLE: All variables assigned\n");
@@ -1238,6 +1234,7 @@ void SATSolver::execDecide() {
         output.output("\n");
         return;
     }
+    in_decision = false;
     state = PROPAGATE;
 }
 
@@ -1983,9 +1980,6 @@ void SATSolver::backtrack(int backtrack_level) {
     output.verbose(CALL_INFO, 4, 0, "BACKTRACK From level %d to level %d\n", 
         current_level(), backtrack_level);
     
-#ifdef USE_CLASSIC_HEAP
-    if (OVERLAP_HEAP_INSERT) unstalled_heap = true;
-#endif
     // Unassign all variables above backtrack_level using the trail
     for (int i = trail.size() - 1; i >= int(trail_lim[backtrack_level]); i--) {
         Lit p = trail[i];
@@ -1995,15 +1989,12 @@ void SATSolver::backtrack(int backtrack_level) {
         unassignVariable(v);
 
         // Skip reinserting the speculative literal back into the heap
-        if (v != var(spec_literal)) {
+        // if (v != var(spec_literal)) {
             insertVarOrder(v);
-#ifdef USE_CLASSIC_HEAP
-            unstalled_cnt++;
-#endif
-        } else {
-            output.verbose(CALL_INFO, 4, 0, 
-                "BACKTRACK: Skipping reinsertion of speculative variable x%d\n", v);
-        }
+        // } else {
+        //     output.verbose(CALL_INFO, 4, 0, 
+        //         "BACKTRACK: Skipping reinsertion of speculative variable x%d\n", v);
+        // }
         
         output.verbose(CALL_INFO, 5, 0,
             "BACKTRACK: Unassigning x%d, saved polarity %s\n", 
@@ -2013,7 +2004,6 @@ void SATSolver::backtrack(int backtrack_level) {
     qhead = trail_lim[backtrack_level];
     trail.resize(trail_lim[backtrack_level]);
     trail_lim.resize(backtrack_level);
-    // output.verbose(CALL_INFO, 4, 0, "Insert %d vars in heap in parallel\n", unstalled_cnt);
 }
 
 //-----------------------------------------------------------------------------------
@@ -2140,6 +2130,7 @@ Lit SATSolver::chooseBranchVariable() {
     if (!order_heap->empty() && drand(random_seed) < random_var_freq) {
         int rand_idx = irand(random_seed, order_heap->size());
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::READ, rand_idx));
+        heap_resp_cnt++;
         (*yield_ptr)();
         next = heap_resp;
 
@@ -2150,6 +2141,7 @@ Lit SATSolver::chooseBranchVariable() {
 
     while (next == var_Undef || var_assigned[next] || !decision[next]) {
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::REMOVE_MAX));
+        heap_resp_cnt++;
         (*yield_ptr)();
         next = heap_resp;
         if (next == var_Undef && order_heap->empty()) break;
@@ -2166,8 +2158,8 @@ Lit SATSolver::peekBranchVariable() {
     int idx = 1;
     while (next == var_Undef) {
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::READ, idx));
+        heap_resp_cnt++;
         (*yield_ptr)();
-        sst_assert(heap_resp != var_Undef, CALL_INFO, -1, "var_Undef during heap peek\n");
         if (!var_assigned[heap_resp] && decision[heap_resp]) next = heap_resp;
         if (idx >= order_heap->size()) break;
         idx++;
@@ -2179,6 +2171,9 @@ Lit SATSolver::peekBranchVariable() {
 void SATSolver::insertVarOrder(Var v) {
     if (decision[v]) {
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INSERT, v));
+#ifdef USE_CLASSIC_HEAP
+        heap_resp_cnt++;
+#endif
         output.verbose(CALL_INFO, 7, 0, "Insert var %d into order heap\n", v);
     }
 }
