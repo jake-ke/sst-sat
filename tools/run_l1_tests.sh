@@ -2,9 +2,10 @@
 
 # Check if help is requested or show usage
 show_usage() {
-    echo "Usage: $0 [--ram2-cfg FILE] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--folder FOLDER] [-j jobs] [--decision-dir DIR]"
+    echo "Usage: $0 [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--folder FOLDER] [-j jobs] [--decision-dir DIR]"
     echo "Options:"
     echo "  --ram2-cfg FILE       Ramulator2 configuration file"
+    echo "  --classic-heap        Use classic heap implementation instead of pipelined"
     echo "  --l1-size SIZE        L1 cache size"
     echo "  --l1-latency LATENCY  L1 cache latency cycles"
     echo "  --mem-latency LATENCY External memory latency"
@@ -25,31 +26,11 @@ L1_SIZE=""
 L1_LATENCY=""
 MEM_LATENCY=""
 FOLDER_NAME="logs"
+CLASSIC_HEAP=""
 DECISION_DIR=""
 
 # Default number of parallel jobs (use available CPU cores)
 MAX_JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
-
-# Color codes
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m' # No Color
-
-# Function to colorize result text
-colorize_result() {
-    local result=$1
-    case "$result" in
-        "PASSED")
-            echo "${GREEN}${result}${NC}"
-            ;;
-        "FAILED"|"TIMEOUT")
-            echo "${RED}${result}${NC}"
-            ;;
-        *)
-            echo "$result"
-            ;;
-    esac
-}
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -63,6 +44,10 @@ while [[ $# -gt 0 ]]; do
                 show_usage
                 exit 1
             fi
+            ;;
+        --classic-heap)
+            CLASSIC_HEAP=1
+            shift
             ;;
         --l1-size)
             if [[ -n "$2" && "$2" != -* ]]; then
@@ -203,6 +188,11 @@ log_message "RAMULATOR2 configuration: ${RAM2_CFG:-default}"
 log_message "L1 cache size: ${L1_SIZE:-default}"
 log_message "L1 cache latency: ${L1_LATENCY:-default}"
 log_message "Memory latency: ${MEM_LATENCY:-default}"
+if [[ -n "$CLASSIC_HEAP" ]]; then
+    log_message "Using Classic heap"
+else
+    log_message "Using Pipelined heap"
+fi
 log_message "==============================================="
 
 # Array to store all child PIDs for cleanup
@@ -279,6 +269,7 @@ run_single_test() {
     
     # Add optional cache/memory parameters only if provided
     [[ -n "$RAM2_CFG" ]] && command+=" --ram2-cfg $RAM2_CFG"
+    [[ -n "$CLASSIC_HEAP" ]] && command+=" --classic-heap"
     [[ -n "$L1_SIZE" ]] && command+=" --l1-size $L1_SIZE"
     [[ -n "$L1_LATENCY" ]] && command+=" --l1-latency $L1_LATENCY"
     [[ -n "$MEM_LATENCY" ]] && command+=" --mem-latency $MEM_LATENCY"

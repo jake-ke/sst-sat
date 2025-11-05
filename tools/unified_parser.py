@@ -28,6 +28,18 @@ import csv
 from pathlib import Path
 
 
+def detect_log_format(content):
+    """Detect whether this is a minisat or satsolver log."""
+    # Check for satsolver format indicators
+    if 'Using CNF file:' in content and 'Simulation is complete' in content:
+        return 'satsolver'
+    # Check for minisat format indicators
+    elif 'Problem Statistics' in content and 'conflicts             :' in content:
+        return 'minisat'
+    else:
+        return 'unknown'
+
+
 def format_bytes(bytes_value):
     """Convert bytes to appropriate unit (KB/MB/GB) with rounding."""
     if bytes_value < 1024:
@@ -38,6 +50,106 @@ def format_bytes(bytes_value):
         return f"{bytes_value / (1024 * 1024):.1f} MB"
     else:
         return f"{bytes_value / (1024 * 1024 * 1024):.1f} GB"
+
+
+def parse_minisat_log(log_file_path, content):
+    """Parse minisat format log file.
+    
+    Extracts a subset of information available in minisat logs:
+    - Test case name and SAT/UNSAT result (or TIMEDOUT/UNKNOWN)
+    - Number of variables and clauses
+    - Memory used
+    - Runtime (converted to ms for consistency)
+    - Solver statistics (decisions, propagations, conflicts, etc.)
+    
+    Always returns a result dictionary with whatever data could be parsed.
+    """
+    result = {
+        'test_case': '',
+        'result': 'UNKNOWN',
+        'variables': 0,
+        'clauses': 0,
+        'total_memory_bytes': 0,
+        'total_memory_formatted': '0 B',
+        'sim_time_ms': 0.0,
+        'decisions': 0,
+        'propagations': 0,
+        'conflicts': 0,
+        'learned': 0,
+        'removed': 0,
+        'db_reductions': 0,
+        'minimized': 0,
+        'restarts': 0,
+    }
+    
+    try:
+        # Extract test case name from filename
+        filename = os.path.basename(log_file_path)
+        # Remove .log extension first
+        base_no_log = re.sub(r'\.log$', '', filename)
+        # Remove timestamp pattern _YYYYMMDD_HHMMSS if present
+        test_case = re.sub(r'_\d{8}_\d{6}$', '', base_no_log)
+        # Remove compression extensions
+        test_case = re.sub(r'\.(xz|gz|bz2)$', '', test_case)
+        result['test_case'] = test_case
+        
+        # Extract variables and clauses from Problem Statistics section
+        vars_match = re.search(r'Number of variables:\s*(\d+)', content)
+        if vars_match:
+            result['variables'] = int(vars_match.group(1))
+        
+        clauses_match = re.search(r'Number of clauses:\s*(\d+)', content)
+        if clauses_match:
+            result['clauses'] = int(clauses_match.group(1))
+        
+        # Extract memory usage (convert to bytes)
+        memory_match = re.search(r'Memory used\s*:\s*([\d.]+)\s*MB', content)
+        if memory_match:
+            memory_mb = float(memory_match.group(1))
+            result['total_memory_bytes'] = int(memory_mb * 1024 * 1024)
+            result['total_memory_formatted'] = format_bytes(result['total_memory_bytes'])
+        
+        # Extract CPU time and convert to milliseconds
+        cpu_match = re.search(r'CPU time\s*:\s*([\d.]+)\s*s', content, re.IGNORECASE)
+        if cpu_match:
+            cpu_seconds = float(cpu_match.group(1))
+            result['sim_time_ms'] = cpu_seconds * 1000.0
+        else:
+            # Fallback: try without 's' unit
+            cpu_match_alt = re.search(r'CPU time\s*:\s*([\d.]+)', content, re.IGNORECASE)
+            if cpu_match_alt:
+                cpu_seconds = float(cpu_match_alt.group(1))
+                result['sim_time_ms'] = cpu_seconds * 1000.0
+        
+        # Extract solver statistics
+        solver_patterns = {
+            'decisions': r'decisions\s*:\s*(\d+)',
+            'propagations': r'propagations\s*:\s*(\d+)',
+            'conflicts': r'conflicts\s*:\s*(\d+)',
+            'learned': r'learned\s*:\s*(\d+)',
+            'removed': r'removed\s*:\s*(\d+)',
+            'db_reductions': r'db_reductions\s*:\s*(\d+)',
+            'minimized': r'minimized\s*:\s*(\d+)',
+            'restarts': r'restarts\s*:\s*(\d+)',
+        }
+        
+        for stat, pattern in solver_patterns.items():
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                result[stat] = int(match.group(1))
+        
+        # Determine SAT/UNSAT result
+        if 'UNSATISFIABLE' in content:
+            result['result'] = 'UNSAT'
+        elif 'SATISFIABLE' in content and 'UNSATISFIABLE' not in content:
+            result['result'] = 'SAT'
+        # Any other case (INDETERMINATE, timeout, incomplete, etc.) stays as UNKNOWN
+        
+    except Exception as e:
+        print(f"Warning: Partial parse of minisat log {log_file_path}: {e}")
+        # Still return the partial result with UNKNOWN status
+    
+    return result
 
 
 def parse_solver_statistics(content):
@@ -308,6 +420,72 @@ def parse_log_file(log_file_path):
     """
     Parse a single log file and extract all relevant information.
     
+    Automatically detects whether the log is from minisat or satsolver format
+    and uses the appropriate parser.
+    
+    Returns a dictionary containing:
+    - Basic info: test_case, result, variables, clauses
+    - Memory: total_memory_bytes, total_memory_formatted  
+    - Solver stats: decisions, propagations, conflicts, etc.
+    - L1 cache stats: l1_total_requests, l1_total_miss_rate, l1_{component}_total, l1_{component}_miss_rate (satsolver only)
+    - Fragmentation: heap_bytes, reserved_bytes, etc. (satsolver only)
+    - Cycles: propagate_cycles, analyze_cycles, etc. (satsolver only)
+    - Timing: sim_time_ms
+    - Histogram data: watchers and variables histograms (satsolver only)
+    
+    Always returns a result dictionary, even for failed/timed-out runs.
+    """
+    try:
+        with open(log_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
+        # Detect log format
+        log_format = detect_log_format(content)
+        
+        if log_format == 'minisat':
+            # Use minisat parser
+            return parse_minisat_log(log_file_path, content)
+        elif log_format == 'satsolver':
+            # Use satsolver parser
+            return parse_satsolver_log(log_file_path, content)
+        else:
+            # Unknown format - try to extract minimal information
+            print(f"Warning: Unknown log format for {log_file_path}, extracting basic info")
+            filename = os.path.basename(log_file_path)
+            test_case = re.sub(r'\.log$', '', filename)
+            test_case = re.sub(r'_\d{8}_\d{6}$', '', test_case)
+            test_case = re.sub(r'\.(xz|gz|bz2)$', '', test_case)
+            
+            return {
+                'test_case': test_case,
+                'result': 'UNKNOWN',
+                'variables': 0,
+                'clauses': 0,
+                'total_memory_bytes': 0,
+                'total_memory_formatted': '0 B',
+                'sim_time_ms': 0.0,
+            }
+    
+    except Exception as e:
+        print(f"Error reading {log_file_path}: {e}")
+        # Still return a minimal result
+        filename = os.path.basename(log_file_path)
+        test_case = re.sub(r'\.log$', '', filename)
+        return {
+            'test_case': test_case,
+            'result': 'UNKNOWN',
+            'variables': 0,
+            'clauses': 0,
+            'total_memory_bytes': 0,
+            'total_memory_formatted': '0 B',
+            'sim_time_ms': 0.0,
+        }
+
+
+def parse_satsolver_log(log_file_path, content):
+    """
+    Parse a satsolver format log file and extract all relevant information.
+    
     Returns a dictionary containing:
     - Basic info: test_case, result, variables, clauses
     - Memory: total_memory_bytes, total_memory_formatted  
@@ -329,9 +507,6 @@ def parse_log_file(log_file_path):
     }
     
     try:
-        with open(log_file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-
         # Extract test case name from filename
         filename = os.path.basename(log_file_path)
         test_case_match = re.match(r'(.+?)_(sat|unsat)_\d{8}_\d{6}\.log$', filename)
@@ -340,7 +515,8 @@ def parse_log_file(log_file_path):
             result['result'] = test_case_match.group(2).upper()
         else:
             result['test_case'] = os.path.splitext(filename)[0]
-    # Extract variables and clauses
+        
+        # Extract variables and clauses
         problem_match = re.search(r'MAIN-> Problem: vars=(\d+) clauses=(\d+)', content)
         if problem_match:
             result['variables'] = int(problem_match.group(1))
@@ -402,9 +578,14 @@ def parse_log_file(log_file_path):
 
         result.update(parse_propagation_detail_statistics(content))
         result.update(parse_directed_prefetcher_statistics(content))
+        
+        # Check result status - any case without SAT/UNSAT stays as UNKNOWN
+        if not result['result'] or result['result'] not in ['SAT', 'UNSAT']:
+            result['result'] = 'UNKNOWN'
+                
     except Exception as e:
-        print(f"Error parsing {log_file_path}: {e}")
-        return None
+        print(f"Warning: Partial parse of satsolver log {log_file_path}: {e}")
+        # Still return the partial result with UNKNOWN status
     
     return result
 
@@ -432,7 +613,6 @@ def parse_log_directory(logs_dir, exclude_summary=True):
         return []
     
     results = []
-    failed_files = []
     
     for log_file in sorted(log_files):
         # Skip summary files if requested
@@ -440,13 +620,9 @@ def parse_log_directory(logs_dir, exclude_summary=True):
             continue
             
         result = parse_log_file(log_file)
+        # Always include result, even if partial or failed
         if result:
             results.append(result)
-        else:
-            failed_files.append(log_file.name)
-    
-    if failed_files:
-        print(f"Failed to parse {len(failed_files)} files: {failed_files}")
     
     return results
 

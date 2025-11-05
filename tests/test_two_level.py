@@ -54,9 +54,18 @@ def parse_args():
     parser.add_argument('--l1-latency', dest='l1_latency',
                         type=str, default="1",
                         help='L1 cache latency cycles (1GHz)')
+    parser.add_argument('--l1-bw', dest='l1_bw',
+                        type=str, default="-1",
+                        help='L1 cache bandwidth (max requests per cycle)')
+    parser.add_argument('--l2-latency', dest='l2_latency',
+                        type=str, default="100",
+                        help='L2 cache latency cycles (1GHz)')
+    parser.add_argument('--l2-bw', dest='l2_bw',
+                        type=str, default="2",
+                        help='L2 cache bandwidth (max requests per cycle)')
     parser.add_argument('--mem-latency', dest='mem_latency',
                         type=str, default="100ns",
-                        help='External Memory latency')
+                        help='External Memory latency if using simpleMem')
     parser.add_argument('--prefetch', dest='enable_prefetch', 
                         action='store_true', default=False,
                         help='Enable directed prefetching')
@@ -146,13 +155,15 @@ if args.decision_output_path:
     print(f"Will output decisions to: {args.decision_output_path}")
 print(f"L1 cache size: {args.l1_size}")
 print(f"L1 cache latency: {args.l1_latency} cycles")
+print(f"L1 cache bandwidth: {args.l1_bw} requests/cycle")
+print(f"L2 cache latency: {args.l2_latency} cycles")
+print(f"L2 cache bandwidth: {args.l2_bw} requests/cycle")
 if (args.ram2_config):
     print(f"Using ramulator2 config: {args.ram2_config}")
 else:
     print(f"Using simple memory latency: {args.mem_latency}")
 if args.enable_prefetch:
     print(f"Directed prefetching enabled")
-print()
 
 # Create the SAT solver component
 solver = sst.Component("solver", "satsolver.SATSolver")
@@ -207,6 +218,7 @@ else:
 heap.addParams({
     "verbose" : str(args.verbose),
 })
+print()
 
 # Configure memory interface for global operations (heap and variables)
 global_iface = solver.setSubComponent("global_memory", "memHierarchy.standardInterface")
@@ -219,7 +231,7 @@ global_cache.addParams({
     "cache_line_size"    : "64",
     "associativity"      : "8",
     "access_latency_cycles" : args.l1_latency,
-    "max_requests_per_cycle" : "-1",
+    "max_requests_per_cycle" : args.l1_bw,
     "request_link_width" : "64B",
     "response_link_width" : "64B",
     "L1"                 : "1",
@@ -229,10 +241,6 @@ global_cache.addParams({
     "statistics" : "1",           # Enable statistics for cache
     "collect_stats" : "1"         # Make sure stats are collected
 })
-
-# prefetcher1 = global_cache.setSubComponent("prefetcher", "cassini.NextBlockPrefetcher", 1)
-# prefetcher1 = global_cache.setSubComponent("prefetcher", "cassini.StridePrefetcher", 1)
-# prefetcher1 = global_cache.setSubComponent("prefetcher", "cassini.PalaPrefetcher", 1)
 
 # Add CacheProfiler to L1 cache
 global_cache_profiler = global_cache.setSubComponent("prefetcher", "satsolver.CacheProfiler", 0)
@@ -246,6 +254,56 @@ global_cache_profiler.addParams({
     "verbose": str(args.verbose),
     "exclude_cold_misses": "1"
 })
+
+# Create the directed prefetcher if enabled
+# prefetcher1 = global_cache.setSubComponent("prefetcher", "cassini.NextBlockPrefetcher", 1)
+# prefetcher1 = global_cache.setSubComponent("prefetcher", "cassini.StridePrefetcher", 1)
+# prefetcher1 = global_cache.setSubComponent("prefetcher", "cassini.PalaPrefetcher", 1)
+if args.enable_prefetch:
+    prefetcher = global_cache.setSubComponent("prefetcher", "satsolver.DirectedPrefetcher", 1)
+    prefetcher.addParams({"cache_line_size": "64"})
+    
+    # Connect prefetcher to solver
+    prefetch_link = sst.Link("prefetch_link")
+    prefetch_link.connect((solver, "prefetch_port", "1ns"), (prefetcher, "cmd_port", "1ns"))
+
+    sst.enableAllStatisticsForComponentType("satsolver.DirectedPrefetcher")
+
+
+# Create L2 cache
+global_l2cache = sst.Component("global_l2cache", "memHierarchy.Cache")
+global_l2cache.addParams({
+    "cache_frequency"    : "1GHz",
+    "cache_size"         : "24MiB",
+    "cache_line_size"    : "64",
+    "associativity"      : "16",
+    "access_latency_cycles" : args.l2_latency,
+    "max_requests_per_cycle" : args.l2_bw,
+    "request_link_width" : "64B",
+    "response_link_width" : "64B",
+    "L1"                 : "0",
+    "replacement_policy" : "lru",
+    "coherence_protocol" : "MSI",
+    "verbose"            : "0",
+    "debug" : "0",
+    "debug_level" : "10",
+    "statistics" : "1",
+    "collect_stats" : "1"
+})
+
+# Add CacheProfiler to L2 cache
+global_l2cache_profiler = global_l2cache.setSubComponent("prefetcher", "satsolver.CacheProfiler")
+global_l2cache_profiler.addParams({
+    "cache_level": "L2",
+    "heap_base_addr": hex(heap_base_addr),
+    "variables_base_addr": hex(variables_base_addr),
+    "watches_base_addr": hex(watches_base_addr),
+    "clauses_cmd_base_addr": hex(clauses_cmd_base_addr),
+    "var_act_base_addr": hex(var_act_base_addr),
+    "verbose": str(args.verbose),
+    "exclude_cold_misses": "1"
+})
+
 
 # Create memory controller for global operations
 global_memctrl = sst.Component("global_memory", "memHierarchy.MemController")
@@ -275,32 +333,25 @@ else:
     global_memory.addParams({
         "access_time" : args.mem_latency,
         "mem_size" : "4GiB",
-        "max_requests_per_cycle" : "-1",
+        "max_requests_per_cycle" : "2",
         "request_width" : "64",
     })
 
 # Connect solver to heap
 solver_heap_link = sst.Link("solver_heap_link")
-solver_heap_link.connect((solver, "heap_port", "1ns"), (heap, "response", "1ns"))
+solver_heap_link.connect((solver, "heap_port", "50ps"), (heap, "response", "50ps"))
 
 # Connect solver to L1 cache
 cpu_to_cache_link = sst.Link("cpu_to_cache_link")
 cpu_to_cache_link.connect((global_iface, "lowlink", "1ns"), (global_cache, "highlink", "1ns"))
 
-# Connect L1 cache to mem
-l1_to_mem_link = sst.Link("l1_to_mem_link")
-l1_to_mem_link.connect((global_cache, "lowlink", "1ns"), (global_memctrl, "highlink", "1ns"))
+# Connect L1 cache to L2 cache
+l1_to_l2_link = sst.Link("l1_to_l2_link")
+l1_to_l2_link.connect((global_cache, "lowlink", "1ns"), (global_l2cache, "highlink", "1ns"))
 
-# Create the directed prefetcher if enabled
-if args.enable_prefetch:
-    prefetcher = global_cache.setSubComponent("prefetcher", "satsolver.DirectedPrefetcher", 1)
-    prefetcher.addParams({"cache_line_size": "64"})
-    
-    # Connect prefetcher to solver
-    prefetch_link = sst.Link("prefetch_link")
-    prefetch_link.connect((solver, "prefetch_port", "1ns"), (prefetcher, "cmd_port", "1ns"))
-
-    sst.enableAllStatisticsForComponentType("satsolver.DirectedPrefetcher")
+# Connect L2 cache to mem
+l2_to_mem_link = sst.Link("l2_to_mem_link")
+l2_to_mem_link.connect((global_l2cache, "lowlink", "1ns"), (global_memctrl, "highlink", "1ns"))
 
 # Enable statistics - different types for different stats
 sst.setStatisticLoadLevel(7)

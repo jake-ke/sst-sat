@@ -8,6 +8,9 @@ show_usage() {
     echo "  --classic-heap        Use classic heap implementation instead of pipelined"
     echo "  --l1-size SIZE        L1 cache size"
     echo "  --l1-latency LATENCY  L1 cache latency cycles"
+    echo "  --l1-bw BW            L1 cache bandwidth (max requests per cycle)"
+    echo "  --l2-latency LATENCY  L2 cache latency cycles"
+    echo "  --l2-bw BW            L2 cache bandwidth (max requests per cycle)"
     echo "  --mem-latency LATENCY External memory latency"
     echo "  --prefetch            Enable prefetching"
     echo "  --folder FOLDER       Name for the logs folder (default: logs)"
@@ -26,6 +29,9 @@ RAM2_CFG=""
 CLASSIC_HEAP=""
 L1_SIZE=""
 L1_LATENCY=""
+L1_BW=""
+L2_LATENCY=""
+L2_BW=""
 MEM_LATENCY=""
 FOLDER_NAME="logs"
 PREFETCH=""
@@ -92,6 +98,36 @@ while [[ $# -gt 0 ]]; do
                 shift 2
             else
                 echo "Error: --l1-latency requires a latency argument"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --l1-bw)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                L1_BW="$2"
+                shift 2
+            else
+                echo "Error: --l1-bw requires a bandwidth argument"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --l2-latency)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                L2_LATENCY="$2"
+                shift 2
+            else
+                echo "Error: --l2-latency requires a latency argument"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --l2-bw)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                L2_BW="$2"
+                shift 2
+            else
+                echo "Error: --l2-bw requires a bandwidth argument"
                 show_usage
                 exit 1
             fi
@@ -287,13 +323,16 @@ run_single_test() {
         append_to_file_safely "$progress_file" "START|$filename (seed $seed)|$start_time"
 
         # Build command with 2-hour timeout and basic arguments
-        local command="timeout 7200 sst ./tests/test_one_level.py -- --cnf \"$file\" --stats-file \"$stats_file\" --rand $seed"
+        local command="timeout 7200 sst ./tests/test_two_level.py -- --cnf \"$file\" --stats-file \"$stats_file\" --rand $seed"
         
         # Add optional cache/memory parameters only if provided
         [[ -n "$RAM2_CFG" ]] && command+=" --ram2-cfg $RAM2_CFG"
         [[ -n "$CLASSIC_HEAP" ]] && command+=" --classic-heap"
         [[ -n "$L1_SIZE" ]] && command+=" --l1-size $L1_SIZE"
         [[ -n "$L1_LATENCY" ]] && command+=" --l1-latency $L1_LATENCY"
+        [[ -n "$L1_BW" ]] && command+=" --l1-bw $L1_BW"
+        [[ -n "$L2_LATENCY" ]] && command+=" --l2-latency $L2_LATENCY"
+        [[ -n "$L2_BW" ]] && command+=" --l2-bw $L2_BW"
         [[ -n "$MEM_LATENCY" ]] && command+=" --mem-latency $MEM_LATENCY"
         [[ -n "$PREFETCH" ]] && command+=" --prefetch"
 
