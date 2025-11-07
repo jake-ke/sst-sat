@@ -135,7 +135,7 @@ def write_csv_report(results, output_file, *, par2_score_seconds=None, solved_co
             writer.writerow(summary_row)
 
 
-def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
+def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600, dump_best=False):
     """Parse all log files in the given folder and generate a report.
     
     Supports multi-seed folders: if the folder contains subfolders named
@@ -256,11 +256,19 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
             per_seed_par2 = []
             per_seed_solved = []
             per_seed_counts = []
-            # Build test_case union
+            # Build test_case union from logs and also include tests that only have stats CSVs
             all_cases = set()
             for res in seed_results:
                 for r in res:
                     all_cases.add(r.get('test_case', ''))
+            # Also add any cases that appear only in <test_case>.stats.csv (timeouts may not write logs)
+            for sd in seed_dirs:
+                for stats_csv in sd.glob('*.stats.csv'):
+                    name = stats_csv.name
+                    if name.endswith('.stats.csv'):
+                        case = name[:-10]  # strip '.stats.csv'
+                        if case:
+                            all_cases.add(case)
 
             # Map seed index -> {test_case -> result}
             seed_maps = []
@@ -387,6 +395,39 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
             print(f"Successfully parsed: {total_files} files across {len(seed_results)} seeds")
             print(f"Average across seeds -> Solved: {avg_solved:.2f}/{avg_num_cases:.2f}, PAR-2: {avg_par2_seconds:.2f} s (timeout: {timeout_seconds}s)")
 
+            # Compute best-of-seeds PAR-2 and solved: for each test case take the minimal PAR-2
+            # contribution across seeds (actual sim time if solved within timeout, else 2*timeout),
+            # then average those minimal contributions over all test cases and count solved ones.
+            best_par2_seconds = None
+            best_solved_count = None
+            if all_cases:
+                timeout_ms = timeout_seconds * 1000.0
+                par2_penalty_ms = 2 * timeout_ms
+                best_total_ms = 0.0
+                solved_best_total = 0
+                for case in all_cases:
+                    best_contrib = par2_penalty_ms  # Initialize with penalty
+                    for m in seed_maps:
+                        if case not in m:
+                            continue
+                        entry = m[case]
+                        try:
+                            sim_ms = float(entry.get('sim_time_ms', 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            sim_ms = 0.0
+                        if entry.get('result') in ('SAT', 'UNSAT') and sim_ms <= timeout_ms:
+                            contrib = sim_ms
+                        else:
+                            contrib = par2_penalty_ms
+                        if contrib < best_contrib:
+                            best_contrib = contrib
+                    best_total_ms += best_contrib
+                    if best_contrib < par2_penalty_ms:
+                        solved_best_total += 1
+                best_par2_seconds = (best_total_ms / len(all_cases)) / 1000.0
+                best_solved_count = solved_best_total
+                print(f"Best-of-seeds -> Solved: {best_solved_count}/{len(all_cases)}, PAR-2: {best_par2_seconds:.2f} s (timeout: {timeout_seconds}s)")
+
             # Compute max simulated time across all seeds/examples. For unfinished (UNKNOWN/ERROR/UNKNOWN N) results,
             # use last stats CSV dump time as fallback. We look inside each seed directory for <test_case>.stats.csv.
             max_sim_ms = 0.0
@@ -402,16 +443,69 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
                         max_sim_ms = sim_ms
             print(f"Max simulated time across all seeds: {max_sim_ms:.2f} ms")
 
-            # Generate output of aggregated results
+            # Generate output: aggregated results by default; best-of-seeds if requested
             if output_file:
-                write_csv_report(
-                    aggregated_results,
-                    output_file,
-                    par2_score_seconds=avg_par2_seconds,
-                    solved_count=avg_solved,
-                    total_problems=avg_num_cases,
-                )
-                print(f"CSV report written to: {output_file}")
+                if dump_best and all_cases:
+                    # Build best-of-seeds result rows by selecting the seed entry with minimal PAR-2 contribution per test
+                    timeout_ms = timeout_seconds * 1000.0
+                    par2_penalty_ms = 2 * timeout_ms
+                    best_results = []
+                    for case in sorted(all_cases):
+                        best_entry = None
+                        best_contrib = par2_penalty_ms
+                        for m in seed_maps:
+                            if case not in m:
+                                continue
+                            entry = m[case]
+                            try:
+                                sim_ms = float(entry.get('sim_time_ms', 0.0) or 0.0)
+                            except (TypeError, ValueError):
+                                sim_ms = 0.0
+                            if entry.get('result') in ('SAT', 'UNSAT') and sim_ms <= timeout_ms:
+                                contrib = sim_ms
+                            else:
+                                contrib = par2_penalty_ms
+                            if contrib < best_contrib:
+                                best_contrib = contrib
+                                best_entry = entry
+                        if best_entry is None:
+                            # Synthesize a placeholder UNKNOWN row so timeouts/missing logs are represented
+                            row = {
+                                'test_case': case,
+                                'result': 'UNKNOWN',
+                                'sim_time_ms': par2_penalty_ms,
+                                'total_memory_bytes': 0,
+                            }
+                        else:
+                            row = dict(best_entry)
+                        if best_contrib >= par2_penalty_ms:
+                            row['result'] = 'UNKNOWN'
+                            row['sim_time_ms'] = par2_penalty_ms
+                        else:
+                            try:
+                                row['sim_time_ms'] = float(row.get('sim_time_ms', 0.0) or 0.0)
+                            except (TypeError, ValueError):
+                                row['sim_time_ms'] = 0.0
+                        row['total_memory_formatted'] = format_bytes(int(row.get('total_memory_bytes', 0) or 0))
+                        best_results.append(row)
+
+                    write_csv_report(
+                        best_results,
+                        output_file,
+                        par2_score_seconds=(best_par2_seconds or 0.0),
+                        solved_count=(best_solved_count or 0),
+                        total_problems=len(all_cases),
+                    )
+                    print(f"CSV report (best-of-seeds) written to: {output_file}")
+                else:
+                    write_csv_report(
+                        aggregated_results,
+                        output_file,
+                        par2_score_seconds=avg_par2_seconds,
+                        solved_count=avg_solved,
+                        total_problems=avg_num_cases,
+                    )
+                    print(f"CSV report written to: {output_file}")
 
             # In multi-seed mode, we've already printed a clear per-seed and
             # averaged summary and (optionally) written the CSV. Avoid falling
@@ -507,13 +601,9 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
     print(f"Total problems: {len(results)} (SAT: {sat_count}, UNSAT: {unsat_count}, UNKNOWN: {unknown_count})\n")
     print(f"Solved: {solved_within_timeout}/{len(results)} ({100.0 * solved_within_timeout / len(results) if results else 0:.1f}%)")
     print(f"PAR-2 score: {par2_score:.2f} s (timeout: {timeout_seconds}s)\n")
-    print(f"Average memory per problem: {format_bytes(avg_memory)}")
     
     # Runtime statistics
     if results:
-        total_time = sum(r.get('sim_time_ms', 0) for r in results)
-        avg_time = total_time / len(results)
-        print(f"Average runtime per problem: {avg_time:.2f} ms")
         # Max simulated time across problems. For unfinished tests, use last
         # statistics dump time from the corresponding <test_case>.stats.csv
         max_sim_ms = 0.0
@@ -526,8 +616,14 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
             if sim_ms > max_sim_ms:
                 max_sim_ms = sim_ms
         print(f"Max simulated time: {max_sim_ms:.2f} ms")
+
+        total_time = sum(r.get('sim_time_ms', 0) for r in results)
+        avg_time = total_time / len(results)
+        print(f"Average runtime per problem: {avg_time:.2f} ms")
     
     # Solver statistics
+    print(f"Average memory per problem: {format_bytes(avg_memory)}")
+    print()
     print(f"Average decisions per problem: {avg_decisions:.1f}")
     
     if results:
@@ -583,14 +679,15 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python parse_results.py <results_folder> [output_file] [--timeout SECONDS]")
+        print("Usage: python parse_results.py <results_folder> [output_file] [--timeout SECONDS] [--dump-best]")
         print("Example: python parse_results.py ../runs/logs results.csv")
-        print("Example: python parse_results.py ../runs/logs results.csv --timeout 3600")
+        print("Example: python parse_results.py ../runs/logs results.csv --timeout 3600 --dump-best")
         sys.exit(1)
     
     results_folder = sys.argv[1]
     output_file = None
     timeout_seconds = 3600  # Default timeout
+    dump_best = False
     
     # Parse arguments
     i = 2
@@ -598,13 +695,16 @@ def main():
         if sys.argv[i] == '--timeout' and i + 1 < len(sys.argv):
             timeout_seconds = float(sys.argv[i + 1])
             i += 2
+        elif sys.argv[i] == '--dump-best':
+            dump_best = True
+            i += 1
         else:
             # Assume it's the output file if not a flag
             if output_file is None and not sys.argv[i].startswith('--'):
                 output_file = sys.argv[i]
             i += 1
-    
-    parse_results_folder(results_folder, output_file, timeout_seconds)
+
+    parse_results_folder(results_folder, output_file, timeout_seconds, dump_best)
 
 
 if __name__ == "__main__":
