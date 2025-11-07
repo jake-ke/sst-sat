@@ -156,6 +156,42 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
     # Detect multi-seed layout
     seed_dirs = [p for p in sorted(folder_path.glob('seed*')) if p.is_dir()]
 
+    def _get_last_stats_time_ms(stats_dir: Path, test_case: str) -> float:
+        """Return the last statistics dump time in ms from <test_case>.stats.csv.
+
+        The stats CSV is expected to have a simulated time column in picoseconds.
+        Common headers include 'SimTimeps' or variants. We try a small set of
+        candidate column names and take the maximum value across rows.
+        """
+        try:
+            stats_csv = stats_dir / f"{test_case}.stats.csv"
+            if not stats_csv.exists() or not stats_csv.is_file():
+                return 0.0
+            last_ps = 0.0
+            with stats_csv.open('r', newline='') as f:
+                reader = csv.DictReader(f)
+                # Candidate column names for simulated time in ps
+                candidates = (
+                    'SimTimeps', 'SimTime', 'SimTime_ps', 'SimTime(ps)'
+                )
+                for row in reader:
+                    ps_val = None
+                    for key in candidates:
+                        if key in row and row.get(key) not in (None, ''):
+                            try:
+                                ps_val = float(row.get(key))
+                            except (TypeError, ValueError):
+                                ps_val = None
+                            if ps_val is not None:
+                                break
+                    if ps_val is not None:
+                        if ps_val > last_ps:
+                            last_ps = ps_val
+            # Convert picoseconds to milliseconds: 1 ms = 1e9 ps
+            return last_ps / 1e9
+        except Exception:
+            return 0.0
+
     def _compute_par2_and_solved(res_list):
         """Return (par2_seconds, solved_count) for a list of parsed results."""
         if not res_list:
@@ -165,10 +201,12 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
         par2_total = 0.0
         solved = 0
         for r in res_list:
-            if r.get('result') in ('SAT', 'UNSAT'):
-                par2_total += float(r.get('sim_time_ms', 0.0) or 0.0)
+            sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+            if r.get('result') in ('SAT', 'UNSAT') and sim_ms <= timeout_ms:
+                par2_total += sim_ms
                 solved += 1
             else:
+                # Unknown or exceeded timeout -> treat as timeout penalty
                 par2_total += par2_penalty
         return (par2_total / len(res_list)) / 1000.0, solved
 
@@ -201,6 +239,16 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
         for sd in seed_dirs:
             res = parse_log_directory(sd, exclude_summary=True)
             if res:
+                # Apply timeout classification before further aggregation
+                timeout_ms = timeout_seconds * 1000.0
+                for r in res:
+                    try:
+                        sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        sim_ms = 0.0
+                    # If a run exceeded timeout, treat as UNKNOWN to reflect penalty in CSV as well
+                    if r.get('result') in ('SAT', 'UNSAT') and sim_ms > timeout_ms:
+                        r['result'] = 'UNKNOWN'
                 seed_results.append(res)
         if seed_results:
             print(f"Detected {len(seed_results)} seed folders under {folder_path}")
@@ -261,7 +309,18 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
                 # - We cannot have both SAT and UNSAT, so finished labels should be unanimous when present.
                 # - Show SAT/UNSAT along with the number of UNKNOWN seeds if any exist, e.g., "SAT 3".
                 # - If all seeds are UNKNOWN, fall back to "UNKNOWN <count>".
-                seed_labels = [e.get('result') for e in entries]
+                seed_labels = []
+                timeout_ms = timeout_seconds * 1000.0
+                for e in entries:
+                    try:
+                        sim_ms = float(e.get('sim_time_ms', 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        sim_ms = 0.0
+                    # Treat over-time solved runs as UNKNOWN in aggregation labels
+                    if e.get('result') in ('SAT','UNSAT') and sim_ms > timeout_ms:
+                        seed_labels.append('UNKNOWN')
+                    else:
+                        seed_labels.append(e.get('result'))
                 unknown_count = sum(1 for lbl in seed_labels if lbl not in ('SAT', 'UNSAT'))
                 finished_labels = [lbl for lbl in seed_labels if lbl in ('SAT', 'UNSAT')]
                 base_label = None
@@ -279,8 +338,16 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
                     agg['result'] = f"UNKNOWN {unknown_count}" if unknown_count > 0 else 'UNKNOWN'
                 else:
                     agg['result'] = f"{base_label} {unknown_count}" if unknown_count > 0 else base_label
-                # Finished entries for averaging (exclude UNKNOWN)
-                finished = [e for e in entries if e.get('result') in ('SAT', 'UNSAT')]
+                # Finished entries for averaging (exclude UNKNOWN and timeouts that exceeded the limit)
+                finished = []
+                for e in entries:
+                    if e.get('result') in ('SAT', 'UNSAT'):
+                        try:
+                            if float(e.get('sim_time_ms', 0.0) or 0.0) <= timeout_ms:
+                                finished.append(e)
+                        except (TypeError, ValueError):
+                            # If time can't be parsed, treat as unfinished
+                            pass
 
                 # Average non-time numeric fields using finished only
                 for key in numeric_fields_excluding_time:
@@ -298,13 +365,14 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
                 # sim_time_ms uses PAR-2 semantics per seed (2*timeout for unfinished)
                 time_vals = []
                 for e in entries:
-                    if e.get('result') in ('SAT', 'UNSAT'):
-                        v = e.get('sim_time_ms', 0.0) or 0.0
-                        try:
-                            time_vals.append(float(v))
-                        except (TypeError, ValueError):
-                            time_vals.append(0.0)
+                    try:
+                        v = float(e.get('sim_time_ms', 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        v = 0.0
+                    if e.get('result') in ('SAT', 'UNSAT') and v <= timeout_ms:
+                        time_vals.append(v)
                     else:
+                        # Unknown or exceeded timeout -> treat as timeout penalty
                         time_vals.append(par2_penalty_ms)
                 agg['sim_time_ms'] = _avg_of(time_vals)
                 # Memory formatted from averaged bytes
@@ -318,6 +386,21 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
             total_files = sum(len(r) for r in seed_results)
             print(f"Successfully parsed: {total_files} files across {len(seed_results)} seeds")
             print(f"Average across seeds -> Solved: {avg_solved:.2f}/{avg_num_cases:.2f}, PAR-2: {avg_par2_seconds:.2f} s (timeout: {timeout_seconds}s)")
+
+            # Compute max simulated time across all seeds/examples. For unfinished (UNKNOWN/ERROR/UNKNOWN N) results,
+            # use last stats CSV dump time as fallback. We look inside each seed directory for <test_case>.stats.csv.
+            max_sim_ms = 0.0
+            for si, res_list in enumerate(seed_results):
+                seed_dir = seed_dirs[si]
+                for r in res_list:
+                    sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+                    label = r.get('result') or ''
+                    if not (label.startswith('SAT') or label.startswith('UNSAT')):  # includes UNKNOWN variants and ERROR
+                        fallback_ms = _get_last_stats_time_ms(seed_dir, r.get('test_case', ''))
+                        sim_ms = max(sim_ms, fallback_ms)
+                    if sim_ms > max_sim_ms:
+                        max_sim_ms = sim_ms
+            print(f"Max simulated time across all seeds: {max_sim_ms:.2f} ms")
 
             # Generate output of aggregated results
             if output_file:
@@ -350,6 +433,20 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
             print(f"No valid log files found in {folder_path}")
             return
 
+        # Apply timeout classification directly to per-test rows
+        timeout_ms = timeout_seconds * 1000.0
+        par2_penalty_ms = 2 * timeout_ms
+        for r in results:
+            try:
+                sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                sim_ms = 0.0
+            if r.get('result') in ('SAT','UNSAT') and sim_ms > timeout_ms:
+                r['result'] = 'UNKNOWN'
+            # For any UNKNOWN (including timeouts or parse-unknown), set sim_time_ms to PAR-2 penalty
+            if r.get('result') not in ('SAT','UNSAT'):
+                r['sim_time_ms'] = par2_penalty_ms
+
     # unified_parser already enriches each result with CSV prefetch req/drops
     
     # Print parsing summary
@@ -359,10 +456,10 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
     results.sort(key=lambda x: x['test_case'])
     
     # Statistics
-    sat_count = sum(1 for r in results if r['result'] == 'SAT')
-    unsat_count = sum(1 for r in results if r['result'] == 'UNSAT')
-    unknown_count = sum(1 for r in results if r['result'] == 'UNKNOWN')
-    solved_count = sat_count + unsat_count
+    sat_count = sum(1 for r in results if r.get('result') == 'SAT')
+    unsat_count = sum(1 for r in results if r.get('result') == 'UNSAT')
+    unknown_count = sum(1 for r in results if r.get('result') == 'UNKNOWN')
+    solved_count = sat_count + unsat_count  # raw solved by label
     
     total_memory = sum(r['total_memory_bytes'] for r in results)
     avg_memory = total_memory / len(results) if results else 0
@@ -376,12 +473,15 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
     par2_penalty = 2 * timeout_ms
     
     par2_total = 0.0
+    solved_within_timeout = 0
     for r in results:
-        if r['result'] in ['SAT', 'UNSAT']:
-            # Solved: use actual time
-            par2_total += r.get('sim_time_ms', 0.0)
+        sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+        if r['result'] in ['SAT', 'UNSAT'] and sim_ms <= timeout_ms:
+            # Solved within timeout: use actual time
+            par2_total += sim_ms
+            solved_within_timeout += 1
         else:
-            # Unknown/timeout: use 2*timeout penalty
+            # Unknown or exceeded timeout: use 2*timeout penalty
             par2_total += par2_penalty
     
     par2_score = par2_total / len(results) if results else 0.0
@@ -394,7 +494,7 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
             results,
             output_file,
             par2_score_seconds=par2_score,
-            solved_count=solved_count,
+            solved_count=solved_within_timeout,
             total_problems=len(results),
         )
         print(f"CSV report written to: {output_file}")
@@ -405,7 +505,7 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
     
     print(f"\n=== STATISTICS SUMMARY ===")
     print(f"Total problems: {len(results)} (SAT: {sat_count}, UNSAT: {unsat_count}, UNKNOWN: {unknown_count})\n")
-    print(f"Solved: {solved_count}/{len(results)} ({100.0 * solved_count / len(results) if results else 0:.1f}%)")
+    print(f"Solved: {solved_within_timeout}/{len(results)} ({100.0 * solved_within_timeout / len(results) if results else 0:.1f}%)")
     print(f"PAR-2 score: {par2_score:.2f} s (timeout: {timeout_seconds}s)\n")
     print(f"Average memory per problem: {format_bytes(avg_memory)}")
     
@@ -414,6 +514,18 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600):
         total_time = sum(r.get('sim_time_ms', 0) for r in results)
         avg_time = total_time / len(results)
         print(f"Average runtime per problem: {avg_time:.2f} ms")
+        # Max simulated time across problems. For unfinished tests, use last
+        # statistics dump time from the corresponding <test_case>.stats.csv
+        max_sim_ms = 0.0
+        for r in results:
+            sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+            if r.get('result') not in ('SAT', 'UNSAT'):
+                fallback_ms = _get_last_stats_time_ms(folder_path, r.get('test_case', ''))
+                # Prefer whichever is larger as best proxy for simulated time reached
+                sim_ms = max(sim_ms, fallback_ms)
+            if sim_ms > max_sim_ms:
+                max_sim_ms = sim_ms
+        print(f"Max simulated time: {max_sim_ms:.2f} ms")
     
     # Solver statistics
     print(f"Average decisions per problem: {avg_decisions:.1f}")
