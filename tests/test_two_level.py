@@ -75,6 +75,8 @@ def parse_args():
     parser.add_argument('--classic-heap', dest='classic_heap',
                         action='store_true', default=False,
                         help='Use classic heap implementation instead of pipelined heap')
+    parser.add_argument('--timeout-cycles', dest='timeout_cycles', type=int, default=0,
+                        help='Maximum solver cycles before timing out (0 = unlimited)')
 
     args = parser.parse_args()
     
@@ -164,6 +166,8 @@ else:
     print(f"Using simple memory latency: {args.mem_latency}")
 if args.enable_prefetch:
     print(f"Directed prefetching enabled")
+if args.timeout_cycles > 0:
+    print(f"Solver timeout set to: {args.timeout_cycles} cycles")
 
 # Create the SAT solver component
 solver = sst.Component("solver", "satsolver.SATSolver")
@@ -200,6 +204,7 @@ params = {
     "clause_decay": str(args.clause_decay),
     "prefetch_enabled": str(args.enable_prefetch),
     "enable_speculative": str(args.enable_speculative),
+    "timeout_cycles": str(args.timeout_cycles),
 }
 if args.decision_path:
     params["decision_file"] = args.decision_path

@@ -75,7 +75,8 @@ public:
         {"watch_nodes_base_addr", "Base address for watch nodes memory", "0x60000000"},
         {"var_act_base_addr", "Base address for variable activity memory", "0x70000000"},
         {"prefetch_enabled", "Enable prefetching", "false"},
-        {"enable_speculative", "Enable speculative propagation", "false"}
+        {"enable_speculative", "Enable speculative propagation", "false"},
+        {"timeout_cycles", "Maximum solver cycles before timing out (0 = no timeout)", "0"}
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -209,6 +210,7 @@ private:
     SST::Interfaces::StandardMem* global_memory; // For heap and variables operations
     std::string dimacs_content;
     SST::Cycle_t currentCycle;
+    uint64_t timeout_cycles;           // timeout parameter, 0 means no timeout
     int heap_resp;
 
     // Parsing state

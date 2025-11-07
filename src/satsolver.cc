@@ -148,6 +148,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     }
 
     enable_speculative = params.find<bool>("enable_speculative", false);
+    timeout_cycles = params.find<uint64_t>("timeout_cycles", 0);
 
     // Open decision output file if specified
     std::string decision_output_file = params.find<std::string>("decision_output_file", "");
@@ -652,6 +653,17 @@ void SATSolver::handleHeapResponse(SST::Event* ev) {
 }
 
 bool SATSolver::clockTick(SST::Cycle_t cycle) {
+    // Check for timeout before doing any work. If exceeded, terminate simulation.
+    if (timeout_cycles > 0 && cycle >= timeout_cycles && state != DONE) {
+        output.output("====================[ Timeout Reached ]====================\n");
+        output.output("Cycle %lu >= timeout limit %lu. Terminating early.\n", (uint64_t)cycle, timeout_cycles);
+        output.output("===========================================================\n");
+        state = DONE;
+        total_cycles = cycle;
+        primaryComponentOKToEndSim();
+        return true; // signal done
+    }
+
     // Calculate elapsed cycles since last state change if we're not in IDLE or STEP
     if (state != IDLE && state != STEP && prev_state != state) {
         // Update cycle counts based on previous state

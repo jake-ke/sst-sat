@@ -5,7 +5,7 @@ SCRIPT_NAME=$(basename "$0")
 
 # Check if help is requested or show usage
 show_usage() {
-    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--prefetch] [--folder FOLDER] [--num-seeds NUM] [-j jobs]"
+    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--prefetch] [--folder FOLDER] [--num-seeds NUM] [--timeout-cycles CYCLES] [-j jobs]"
     echo "Options:"
     echo "  -b, --bench-dir DIR  Directory containing benchmark CNF files (required)"
     echo "  --ram2-cfg FILE       Ramulator2 configuration file"
@@ -19,8 +19,9 @@ show_usage() {
     echo "  --prefetch            Enable prefetching"
     echo "  --folder FOLDER       Name for the logs folder (default: logs)"
     echo "  --num-seeds NUM       Number of random seeds to run (default: 1)"
+    echo "  --timeout-cycles N    Maximum solver cycles before timing out (0 or omit for unlimited)"
     echo "  -j, --jobs JOBS       Number of parallel jobs"
-    echo "Example: $SCRIPT_NAME --bench-dir /path/to/benchmarks --l1-size 32KiB --l1-latency 2 --mem-latency 200ns --prefetch --folder quick_test --num-seeds 5 -j 8"
+    echo "Example: $SCRIPT_NAME --bench-dir /path/to/benchmarks --l1-size 32KiB --l1-latency 2 --mem-latency 200ns --prefetch --timeout-cycles 100000000 --folder quick_test --num-seeds 5 -j 8"
 }
 
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
@@ -41,6 +42,7 @@ MEM_LATENCY=""
 FOLDER_NAME="logs"
 PREFETCH=""
 NUM_SEEDS=1
+TIMEOUT_CYCLES=""
 
 # Default number of parallel jobs (use available CPU cores)
 MAX_JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
@@ -181,6 +183,16 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        --timeout-cycles)
+            if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
+                TIMEOUT_CYCLES=$2
+                shift 2
+            else
+                echo "Error: --timeout-cycles requires a numeric cycles argument"
+                show_usage
+                exit 1
+            fi
+            ;;
         -j|--jobs)
             if [[ "$2" =~ ^[0-9]+$ ]]; then
                 MAX_JOBS=$2
@@ -255,6 +267,11 @@ log_message "L1 cache size: ${L1_SIZE:-default}"
 log_message "L1 cache latency: ${L1_LATENCY:-default}"
 log_message "Memory latency: ${MEM_LATENCY:-default}"
 log_message "Number of random seeds: $NUM_SEEDS"
+if [[ -n "$TIMEOUT_CYCLES" ]]; then
+    log_message "Timeout cycles: $TIMEOUT_CYCLES"
+else
+    log_message "Timeout cycles: unlimited"
+fi
 if [[ -n "$CLASSIC_HEAP" ]]; then
     log_message "Using Classic heap"
 else
@@ -341,8 +358,14 @@ run_single_test() {
         # Report test started with seed
         append_to_file_safely "$progress_file" "START|$filename (seed $seed)|$start_time"
 
-        # Build command with 2-hour timeout and basic arguments
-        local command="timeout 7200 sst ./tests/test_two_level.py -- --cnf \"$file\" --stats-file \"$stats_file\" --rand $seed"
+        # Build command. Use wall-clock timeout only if cycle timeout isn't set.
+        local sst_invocation="sst ./tests/test_two_level.py -- --cnf \"$file\" --stats-file \"$stats_file\" --rand $seed"
+        if [[ -z "$TIMEOUT_CYCLES" ]]; then
+            # Apply 2-hour wall-clock timeout only when no simulation cycle timeout is provided
+            local command="timeout 7200 $sst_invocation"
+        else
+            local command="$sst_invocation"
+        fi
         
         # Add optional cache/memory parameters only if provided
         [[ -n "$RAM2_CFG" ]] && command+=" --ram2-cfg $RAM2_CFG"
@@ -353,7 +376,8 @@ run_single_test() {
         [[ -n "$L2_LATENCY" ]] && command+=" --l2-latency $L2_LATENCY"
         [[ -n "$L2_BW" ]] && command+=" --l2-bw $L2_BW"
         [[ -n "$MEM_LATENCY" ]] && command+=" --mem-latency $MEM_LATENCY"
-        [[ -n "$PREFETCH" ]] && command+=" --prefetch"
+    [[ -n "$PREFETCH" ]] && command+=" --prefetch"
+    [[ -n "$TIMEOUT_CYCLES" ]] && command+=" --timeout-cycles $TIMEOUT_CYCLES"
 
         # Run the test with proper command
         eval $command > "$log_file" 2>&1
