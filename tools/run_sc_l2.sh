@@ -453,217 +453,131 @@ safe_read_line() {
     
     # Use a lock file to prevent race conditions
     local lockfile="${file}.lock"
-    
-    # Try to acquire lock (non-blocking)
     if mkdir "$lockfile" 2>/dev/null; then
-        # We got the lock, read the first line if file exists and has content
         if [[ -s "$file" ]]; then
             line=$(head -n 1 "$file")
-            # Remove first line without using temporary files
             if [[ -n "$line" ]]; then
-                run_tests() {
-                    local benchmark_dir=$1
+                tail -n +2 "$file" > "${file}.new"
+                mv "${file}.new" "$file"
+            fi
+        fi
+        rmdir "$lockfile"
+        echo "$line"
+    fi
+}
 
-                    log_message "Searching for benchmark files in: $benchmark_dir"
+# Run tests (flattened tasks implementation)
+run_tests() {
+    local benchmark_dir=$1
 
-                    # Combine all files
-                    local all_files=($benchmark_dir/*)
-                    total=${#all_files}
+    log_message "Searching for benchmark files in: $benchmark_dir"
 
-                    log_message "Found $total benchmark files to test"
+    # Combine all files
+    local all_files=($benchmark_dir/*)
+    total=${#all_files}
+    log_message "Found $total benchmark files to test"
 
-                    # Build flattened list of (file, seed) tasks
-                    local tasks=()
-                    local num_tasks=0
-                    for file in ${all_files[@]}; do
-                        for ((seed=0; seed<NUM_SEEDS; seed++)); do
-                            tasks+=("$file|$seed")
-                            num_tasks=$((num_tasks + 1))
-                        done
-                    done
+    # Build flattened list of (file, seed) tasks
+    local tasks=()
+    local num_tasks=0
+    for file in ${all_files[@]}; do
+        for ((seed=0; seed<NUM_SEEDS; seed++)); do
+            tasks+=("$file|$seed")
+            num_tasks=$((num_tasks + 1))
+        done
+    done
 
-                    # Count total runs across seeds for accurate progress
-                    local total_runs=$num_tasks
-                    log_message "Total runs to execute: $total_runs"
+    local total_runs=$num_tasks
+    log_message "Total runs to execute: $total_runs"
+    [[ $total_runs -eq 0 ]] && { log_message "No benchmark runs to execute. Exiting."; return; }
 
-                    if [[ $total_runs -eq 0 ]]; then
-                        log_message "No benchmark runs to execute. Exiting."
-                        return
+    echo "Starting tests (0/$total_runs)"
+
+    local temp_result_file=$(mktemp)
+    local progress_file=$(mktemp)
+    local completed=0
+
+    {
+        while true; do
+            if [[ -f "$progress_file" ]]; then
+                line=$(safe_read_line "$progress_file")
+                if [[ -n "$line" ]]; then
+                    IFS='|' read -r action filename remaining <<< "$line"
+                    if [[ "$action" == "START" ]]; then
+                        start_time=$remaining
+                        echo "LAUNCHED: $filename at $start_time"
+                    elif [[ "$action" == "DONE" ]]; then
+                        IFS='|' read -r result start_time end_time <<< "$remaining"
+                        completed=$((completed + 1))
+                        local colored_result=$(colorize_result "$result")
+                        local plain_message="$filename: $result ($start_time-$end_time) ($completed/$total_runs)"
+                        local colored_message="$filename: $colored_result ($start_time-$end_time) ($completed/$total_runs)"
+                        log_message_with_color "$plain_message" "$colored_message"
                     fi
+                fi
+            fi
+            sleep 0.1
+            [[ $completed -eq $total_runs ]] && break
+        done
+    } &
+    local monitor_pid=$!
+    ALL_PIDS+=($monitor_pid)
 
-                    echo "Starting tests (0/$total_runs)"
+    local running_jobs=0
+    local job_pids=()
+    local task_index=1
+    while (( task_index <= ${#tasks[@]} && running_jobs < MAX_JOBS )); do
+        local task="${tasks[$task_index]}"
+        local file="${task%%|*}"
+        local seed="${task##*|}"
+        run_one_seed "$file" "$seed" "$temp_result_file" "$progress_file" &
+        local pid=$!
+        job_pids+=($pid)
+        ALL_PIDS+=($pid)
+        running_jobs=$((running_jobs + 1))
+        task_index=$((task_index + 1))
+    done
 
-                    # Create temporary files for results and progress tracking
-                    local temp_result_file=$(mktemp)
-                    local progress_file=$(mktemp)
+    while (( running_jobs > 0 )); do
+        local new_job_pids=()
+        for pid in "${job_pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                new_job_pids+=($pid)
+            else
+                ALL_PIDS=(${(@)ALL_PIDS:#$pid})
+                running_jobs=$((running_jobs - 1))
+            fi
+        done
+        job_pids=("${new_job_pids[@]}")
+        if (( task_index <= ${#tasks[@]} && running_jobs < MAX_JOBS )); then
+            local task="${tasks[$task_index]}"
+            local file="${task%%|*}"
+            local seed="${task##*|}"
+            run_one_seed "$file" "$seed" "$temp_result_file" "$progress_file" &
+            local pid=$!
+            job_pids+=($pid)
+            ALL_PIDS+=($pid)
+            running_jobs=$((running_jobs + 1))
+            task_index=$((task_index + 1))
+        fi
+        sleep 0.1
+    done
 
-                    # Variables for progress tracking
-                    local completed=0
-
-                    # Start a background process to monitor progress
-                    {
-                        while true; do
-                            if [[ -f "$progress_file" ]]; then
-                                line=$(safe_read_line "$progress_file")
-
-                                if [[ -n "$line" ]]; then
-                                    # Parse the progress info
-                                    IFS='|' read -r action filename remaining <<< "$line"
-
-                                    if [[ "$action" == "START" ]]; then
-                                        # Extract start time
-                                        start_time=$remaining
-                                        echo "LAUNCHED: $filename at $start_time"
-                                    elif [[ "$action" == "DONE" ]]; then
-                                        # Extract result and times
-                                        IFS='|' read -r result start_time end_time <<< "$remaining"
-
-                                        # Update counters
-                                        completed=$((completed + 1))
-
-                                        # Log the result to the main log with color for console
-                                        local colored_result=$(colorize_result "$result")
-                                        local plain_message="$filename: $result ($start_time-$end_time) ($completed/$total_runs)"
-                                        local colored_message="$filename: $colored_result ($start_time-$end_time) ($completed/$total_runs)"
-                                        log_message_with_color "$plain_message" "$colored_message"
-                                    fi
-                                fi
-                            fi
-
-                            sleep 0.1
-
-                            # Check if all runs are complete
-                            [[ $completed -eq $total_runs ]] && break
-                        done
-                    } &
-                    local monitor_pid=$!
-                    ALL_PIDS+=($monitor_pid)
-
-                    # Process tasks in parallel up to MAX_JOBS
-                    local running_jobs=0
-                    local job_pids=()
-                    local task_index=1
-
-                    # Launch initial batch of jobs up to MAX_JOBS
-                    while (( task_index <= ${#tasks[@]} && running_jobs < MAX_JOBS )); do
-                        local task="${tasks[$task_index]}"
-                        local file="${task%%|*}"
-                        local seed="${task##*|}"
-
-                        # Run the single (file, seed) in the background
-                        run_one_seed "$file" "$seed" "$temp_result_file" "$progress_file" &
-                        local pid=$!
-
-                        # Track this job
-                        job_pids+=($pid)
-                        ALL_PIDS+=($pid)
-                        running_jobs=$((running_jobs + 1))
-                        task_index=$((task_index + 1))
-                    done
-
-                    # Continue launching jobs as others complete
-                    while (( running_jobs > 0 )); do
-                        # Wait for any job to complete (non-blocking check)
-                        local new_job_pids=()
-
-                        # Check which jobs are still running
-                        for pid in "${job_pids[@]}"; do
-                            if kill -0 "$pid" 2>/dev/null; then
-                                # Job is still running
-                                new_job_pids+=($pid)
-                            else
-                                # Job has completed
-                                ALL_PIDS=(${(@)ALL_PIDS:#$pid})
-                                running_jobs=$((running_jobs - 1))
-                            fi
-                        done
-
-                        # Update job_pids array to only include running jobs
-                        job_pids=("${new_job_pids[@]}")
-
-                        # Launch new job if we have capacity and more tasks to process
-                        if (( task_index <= ${#tasks[@]} && running_jobs < MAX_JOBS )); then
-                            local task="${tasks[$task_index]}"
-                            local file="${task%%|*}"
-                            local seed="${task##*|}"
-
-                            # Run the single (file, seed) in the background
-                            run_one_seed "$file" "$seed" "$temp_result_file" "$progress_file" &
-                            local pid=$!
-
-                            # Track this job
-                            job_pids+=($pid)
-                            ALL_PIDS+=($pid)
-                            running_jobs=$((running_jobs + 1))
-                            task_index=$((task_index + 1))
-                        fi
-
-                        # Small sleep to avoid busy waiting
-                        sleep 0.1
-                    done
-
-                    # Wait for all background jobs to complete
-                    wait ${job_pids[@]} 2>/dev/null || true
-
-                    # Wait for the monitor to finish
-                    wait $monitor_pid 2>/dev/null || true
-                    kill $monitor_pid 2>/dev/null || true
-                    ALL_PIDS=(${(@)ALL_PIDS:#$monitor_pid})
-
-                    # Process results from temporary file for statistics
-                    while IFS="|" read -r filename result start_time end_time; do
-                        case "$result" in
-                            "PASSED")
-                                passed=$((passed + 1))
-                                ;;
-                            "TIMEOUT")
-                                timedout=$((timedout + 1))
-                                ;;
-                            "FAILED")
-                                failed=$((failed + 1))
-                                ;;
-                            "SKIPPED")
-                                skipped=$((skipped + 1))
-                                ;;
-                        esac
-                    done < "$temp_result_file"
-
-                    # Clean up temporary files
-                    rm -f "$temp_result_file"
-                    rm -f "$progress_file"
-
-                    # Display completion message
-                    log_message "Completed all tests: $passed passed, $timedout timed out, $failed failed, $skipped skipped"
-                }
-    
-    # Wait for the monitor to finish
+    wait ${job_pids[@]} 2>/dev/null || true
     wait $monitor_pid 2>/dev/null || true
     kill $monitor_pid 2>/dev/null || true
-    ALL_PIDS=("${(@)ALL_PIDS:#$monitor_pid}")
-    
-    # Process results from temporary file for statistics
+    ALL_PIDS=(${(@)ALL_PIDS:#$monitor_pid})
+
     while IFS="|" read -r filename result start_time end_time; do
         case "$result" in
-            "PASSED")
-                passed=$((passed + 1))
-                ;;
-            "TIMEOUT")
-                timedout=$((timedout + 1))
-                ;;
-            "FAILED")
-                failed=$((failed + 1))
-                ;;
-            "SKIPPED")
-                skipped=$((skipped + 1))
-                ;;
+            "PASSED") passed=$((passed + 1)) ;;
+            "TIMEOUT") timedout=$((timedout + 1)) ;;
+            "FAILED") failed=$((failed + 1)) ;;
+            "SKIPPED") skipped=$((skipped + 1)) ;;
         esac
     done < "$temp_result_file"
-    
-    # Clean up temporary files
-    rm -f "$temp_result_file"
-    rm -f "$progress_file"
-    
-    # Display completion message
+
+    rm -f "$temp_result_file" "$progress_file"
     log_message "Completed all tests: $passed passed, $timedout timed out, $failed failed, $skipped skipped"
 }
 
