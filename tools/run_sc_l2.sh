@@ -5,7 +5,7 @@ SCRIPT_NAME=$(basename "$0")
 
 # Check if help is requested or show usage
 show_usage() {
-    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--prefetch] [--folder FOLDER] [--num-seeds NUM] [--timeout-cycles CYCLES] [-j jobs]"
+    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--prefetch] [--spec] [--folder FOLDER] [--num-seeds NUM] [--timeout-cycles CYCLES] [-j jobs]"
     echo "Options:"
     echo "  -b, --bench-dir DIR  Directory containing benchmark CNF files (required)"
     echo "  --ram2-cfg FILE       Ramulator2 configuration file"
@@ -16,7 +16,8 @@ show_usage() {
     echo "  --l2-latency LATENCY  L2 cache latency cycles"
     echo "  --l2-bw BW            L2 cache bandwidth (max requests per cycle)"
     echo "  --mem-latency LATENCY External memory latency"
-    echo "  --prefetch            Enable prefetching"
+    echo "  --prefetch            Enable directed prefetching"
+    echo "  --spec                Enable speculative propagation"
     echo "  --folder FOLDER       Name for the logs folder (default: logs)"
     echo "  --num-seeds NUM       Number of random seeds to run (default: 1)"
     echo "  --timeout-cycles N    Maximum solver cycles before timing out (0 or omit for unlimited)"
@@ -41,6 +42,7 @@ L2_BW=""
 MEM_LATENCY=""
 FOLDER_NAME="logs"
 PREFETCH=""
+SPEC=""
 NUM_SEEDS=1
 TIMEOUT_CYCLES=""
 
@@ -163,6 +165,10 @@ while [[ $# -gt 0 ]]; do
             PREFETCH="yes"
             shift
             ;;
+        --spec)
+            SPEC="yes"
+            shift
+            ;;
         --folder)
             if [[ -n "$2" && "$2" != -* ]]; then
                 FOLDER_NAME="$2"
@@ -277,6 +283,16 @@ if [[ -n "$CLASSIC_HEAP" ]]; then
 else
     log_message "Using Pipelined heap"
 fi
+if [[ -n "$PREFETCH" ]]; then
+    log_message "Directed prefetching: enabled"
+else
+    log_message "Directed prefetching: disabled"
+fi
+if [[ -n "$SPEC" ]]; then
+    log_message "Speculative propagation: enabled"
+else
+    log_message "Speculative propagation: disabled"
+fi
 log_message "==============================================="
 
 # Array to store all child PIDs for cleanup
@@ -375,6 +391,7 @@ run_one_seed() {
     [[ -n "$L2_BW" ]] && command+=" --l2-bw $L2_BW"
     [[ -n "$MEM_LATENCY" ]] && command+=" --mem-latency $MEM_LATENCY"
     [[ -n "$PREFETCH" ]] && command+=" --prefetch"
+    [[ -n "$SPEC" ]] && command+=" --spec"
     [[ -n "$TIMEOUT_CYCLES" ]] && command+=" --timeout-cycles $TIMEOUT_CYCLES"
 
     # Run the test with proper command
