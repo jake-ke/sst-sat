@@ -66,6 +66,22 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     registerClock(params.find<std::string>("clock", "1GHz"),
                   new SST::Clock::Handler2<SATSolver, &SATSolver::clockTick>(this));
 
+    // Print build-time/static configuration from structs.h
+    output.output("==================[ SATSolver Configuration (structs.h) ]==================\n");
+    output.output("PARA_LITS           : %d\n", PARA_LITS);
+    output.output("PROPAGATORS         : %d\n", PROPAGATORS);
+    output.output("MAX_CONFL           : %d\n", MAX_CONFL);
+    output.output("LEARNERS            : %d\n", LEARNERS);
+    output.output("HEAPLANES           : %d\n", HEAPLANES);
+    output.output("MINIMIZERS          : %d\n", MINIMIZERS);
+    output.output("OVERLAP_HEAP_INSERT : %s\n", OVERLAP_HEAP_INSERT ? "true" : "false");
+    output.output("OVERLAP_HEAP_BUMP   : %s\n", OVERLAP_HEAP_BUMP ? "true" : "false");
+    output.output("WRITE_BUFFER        : %s\n", WRITE_BUFFER ? "true" : "false");
+    output.output("PRE_WATCHERS        : %d\n", PRE_WATCHERS);
+    output.output("USE_FREE_LIST       : %d\n", USE_FREE_LIST);
+    output.output("FREE_IDX_BITS       : %d\n", FREE_IDX_BITS);
+    output.output("=============================================================================\n");
+
     // Get CNF file path
     cnf_file_path = params.find<std::string>("cnf_file", "");
     if (cnf_file_path.empty()) {
