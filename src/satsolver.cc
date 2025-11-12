@@ -416,6 +416,9 @@ void SATSolver::finish() {
     output.output("Read Clauses       : %.2f%% \t(%lu cycles)\n", pct_read_clauses, cycles_read_clauses);
     output.output("Insert Watchers    : %.2f%% \t(%lu cycles)\n", pct_insert_watchers, cycles_insert_watchers);
     output.output("Polling for Busy   : %.2f%% \t(%lu cycles)\n", pct_polling, cycles_polling);
+    uint64_t propagation_detail_sum = cycles_read_headptr + cycles_read_watcher_blocks + 
+                                      cycles_read_clauses + cycles_insert_watchers + cycles_polling;
+    output.output("Detail Sum         : %lu cycles\n", propagation_detail_sum);
     output.output("===========================================================================\n");
 }
 
@@ -1344,6 +1347,8 @@ void SATSolver::unitPropagate() {
         std::vector<uint64_t> lit_read_headptr(PARA_LITS, 0);
         std::vector<uint64_t> lit_read_watcher_blocks(PARA_LITS, 0);
         std::vector<uint64_t> lit_read_clauses(PARA_LITS, 0);
+        std::vector<uint64_t> lit_insert_watchers(PARA_LITS, 0);
+        std::vector<uint64_t> lit_polling(PARA_LITS, 0);
         int last_worker = -1;
 
         // Spawn coroutines for each literal in this batch
@@ -1362,14 +1367,17 @@ void SATSolver::unitPropagate() {
 
             // when watcher coroutines are not launched, assume lit coroutine uses the start
             coro_t::pull_type* lit_coro = new coro_t::pull_type(
-                [this, lit_idx, &lit_read_headptr, &lit_read_watcher_blocks, &lit_read_clauses, &yield_ptrs]
+                [this, lit_idx, &lit_read_headptr, &lit_read_watcher_blocks, &lit_read_clauses, 
+                 &lit_insert_watchers, &lit_polling, &yield_ptrs]
                 (coro_t::push_type &yield) {
                     yield_ptr = &yield;
                     yield_ptrs[lit_idx] = yield_ptr;
                     propagateLiteral(trail[qhead++], lit_idx,
                                      lit_read_headptr[lit_idx], 
                                      lit_read_watcher_blocks[lit_idx],
-                                     lit_read_clauses[lit_idx]);
+                                     lit_read_clauses[lit_idx],
+                                     lit_insert_watchers[lit_idx],
+                                     lit_polling[lit_idx]);
                 });
             coroutines[lit_idx] = lit_coro;
             stat_propagations->addData(1);
@@ -1426,14 +1434,17 @@ void SATSolver::unitPropagate() {
                         trail.size() - qhead, j);
                     delete coroutines[j];
                     coro_t::pull_type* lit_coro = new coro_t::pull_type(
-                        [this, j, &lit_read_headptr, &lit_read_watcher_blocks, &lit_read_clauses, &yield_ptrs]
+                        [this, j, &lit_read_headptr, &lit_read_watcher_blocks, &lit_read_clauses,
+                         &lit_insert_watchers, &lit_polling, &yield_ptrs]
                         (coro_t::push_type &yield) {
                             yield_ptr = &yield;
                             yield_ptrs[j] = yield_ptr;
                             propagateLiteral(trail[qhead++], j,
                                              lit_read_headptr[j], 
                                              lit_read_watcher_blocks[j],
-                                             lit_read_clauses[j]);
+                                             lit_read_clauses[j],
+                                             lit_insert_watchers[j],
+                                             lit_polling[j]);
                         });
                     coroutines[j] = lit_coro;
                     stat_propagations->addData(1);
@@ -1473,6 +1484,8 @@ void SATSolver::unitPropagate() {
         cycles_read_headptr += lit_read_headptr[last_worker];
         cycles_read_watcher_blocks += lit_read_watcher_blocks[last_worker];
         cycles_read_clauses += lit_read_clauses[last_worker];
+        cycles_insert_watchers += lit_insert_watchers[last_worker];
+        cycles_polling += lit_polling[last_worker];
 
         // Stop if we've reached MAX_CONFL conflicts (unless MAX_CONFL is -1, meaning no limit)
         if (MAX_CONFL >= 0 && (int)conflicts.size() >= MAX_CONFL) {
@@ -1490,7 +1503,9 @@ void SATSolver::propagateLiteral(
     int lit_worker_id,
     uint64_t& read_headptr_cycles,
     uint64_t& read_watcher_blocks_cycles,
-    uint64_t& read_clauses_cycles
+    uint64_t& read_clauses_cycles,
+    uint64_t& insert_watchers_cycles,
+    uint64_t& polling_cycles
 ) {
     // Check if this literal's variable was PROPAGATED (not just assigned) during speculative propagation
     // Check both current and previous speculative propagations with matching values
@@ -1658,10 +1673,14 @@ void SATSolver::propagateLiteral(
         yield_ptr = parent_yield_ptr;
         output.verbose(CALL_INFO, 4, 0, "PROPAGATE[L%d]: Finished a watch block\n", lit_worker_id);
 
-        // After all workers finished, accumulate timing data
-        read_clauses_cycles += worker_read_clauses[last_worker];
-        cycles_insert_watchers += worker_insert_watchers[last_worker];
-        cycles_polling += worker_polling[last_worker];
+        // After all workers finished, accumulate timing data to the literal-level counters
+        // Only accumulate if we had valid workers (last_worker will be 0 for single worker, -1 if none completed)
+        if (last_worker >= 0 && last_worker < workers) {
+            // Accumulate to literal-level counters (passed by reference from unitPropagate)
+            read_clauses_cycles += worker_read_clauses[last_worker];
+            insert_watchers_cycles += worker_insert_watchers[last_worker];
+            polling_cycles += worker_polling[last_worker];
+        }
         
         // After processing all nodes in the block, check if we need to write it back
         if (block_modified) {

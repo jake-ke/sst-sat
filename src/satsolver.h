@@ -144,7 +144,9 @@ public:
     void propagateLiteral(Lit p, int lit_worker_id, 
                           uint64_t& read_headptr_cycles, 
                           uint64_t& read_watcher_blocks_cycles,
-                          uint64_t& read_clauses_cycles);
+                          uint64_t& read_clauses_cycles,
+                          uint64_t& insert_watchers_cycles,
+                          uint64_t& polling_cycles);
     void propagateWatchers(int watcher_i, Lit not_p, bool& block_modified, WatcherBlock& block, 
                            int lit_worker_id, int worker_id,
                            uint64_t& read_clauses_cycles, uint64_t& insert_watchers_cycles, 
