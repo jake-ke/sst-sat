@@ -194,7 +194,7 @@ def plot_breakdowns(runtime_breakdown, prop_breakdown, output_pdf):
                     if j < 3:
                         ax.text(left + scaled_pct/2, y_pos, 
                                f'{scaled_pct:.1f}%',
-                               ha='center', va='center', fontsize=9, fontweight='bold')
+                               ha='center', va='center', fontsize=16, fontweight='bold')
                     
                     left += scaled_pct
                 
@@ -202,7 +202,7 @@ def plot_breakdowns(runtime_breakdown, prop_breakdown, output_pdf):
                 # Add total propagate percentage at the end
                 ax.text(propagate_pct + 0.5, y_pos, 
                        f'{propagate_pct:.1f}%', ha='left', va='center', 
-                       fontsize=10, fontweight='bold')
+                       fontsize=16, fontweight='bold')
             else:
                 # Regular solid bar for non-propagate components
                 bar = ax.barh(y_pos, pct, color=main_colors[i % len(main_colors)],
@@ -211,15 +211,14 @@ def plot_breakdowns(runtime_breakdown, prop_breakdown, output_pdf):
                 
                 # Add percentage label
                 ax.text(pct + 0.5, y_pos, f'{pct:.1f}%', 
-                       ha='left', va='center', fontsize=10)
+                       ha='left', va='center', fontsize=16)
             
             y_pos += 1
         
         ax.set_yticks(range(len(labels)))
-        ax.set_yticklabels(labels, fontsize=11)
-        ax.set_xlabel('Percentage of Total Runtime (%)', fontsize=12, fontweight='bold')
-        ax.set_title('Total Runtime Breakdown (with Propagation Detail)', 
-                    fontsize=14, fontweight='bold')
+        ax.set_yticklabels(labels, fontsize=18)
+        ax.set_xlabel('Percentage of Total Runtime (%)', fontsize=20, fontweight='bold')
+        ax.tick_params(axis='x', which='major', labelsize=18)
         
         max_val = max([item[1] for item in runtime_sorted])
         ax.set_xlim(0, max_val * 1.15 if max_val else 100)
@@ -231,7 +230,7 @@ def plot_breakdowns(runtime_breakdown, prop_breakdown, output_pdf):
                                             label=prop_comp)
                             for j, (prop_comp, _) in enumerate(prop_sorted)]
             ax.legend(handles=legend_patches, loc='upper right', 
-                     title='Propagation Components', fontsize=9, title_fontsize=10)
+                     title='Propagation Components', fontsize=16, title_fontsize=18)
     else:
         ax.text(0.5, 0.5, 'No runtime breakdown data available', 
                 ha='center', va='center', transform=ax.transAxes, fontsize=12)

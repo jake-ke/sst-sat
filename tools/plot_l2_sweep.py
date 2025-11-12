@@ -273,6 +273,7 @@ def plot_sweeps(sweep_data, output_pdf):
     
     If only one type of sweep is found, still create both subplots but leave the empty one blank.
     Assumes only one sweep per subplot (no legends shown).
+    Both subplots use the same y-axis scale for consistency.
     """
     bandwidth_data, latency_data = organize_data_for_plotting(sweep_data)
     
@@ -284,6 +285,25 @@ def plot_sweeps(sweep_data, output_pdf):
         return
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+    
+    # Collect all PAR-2 values to determine common y-axis limits
+    all_par2_values = []
+    if has_bandwidth_sweep:
+        for lat, points in bandwidth_data.items():
+            all_par2_values.extend([par2 for _, par2 in points])
+    if has_latency_sweep:
+        for bw, points in latency_data.items():
+            all_par2_values.extend([par2 for _, par2 in points])
+    
+    # Determine y-axis limits with some padding
+    if all_par2_values:
+        y_min = min(all_par2_values)
+        y_max = max(all_par2_values)
+        y_range = y_max - y_min
+        y_padding = y_range * 0.1 if y_range > 0 else 1.0
+        y_limits = (y_min - y_padding, y_max + y_padding)
+    else:
+        y_limits = None
     
     # Plot 1: PAR-2 vs L2 Bandwidth (fixed latencies)
     if has_bandwidth_sweep:
@@ -298,10 +318,12 @@ def plot_sweeps(sweep_data, output_pdf):
         ax1.text(0.5, 0.5, 'Bandwidth sweep data not available', 
                 ha='center', va='center', transform=ax1.transAxes, fontsize=12)
     
-    ax1.set_xlabel('L2 Bandwidth (GB/s)', fontsize=12, fontweight='bold')
-    ax1.set_ylabel('PAR-2 (s)', fontsize=12, fontweight='bold')
-    ax1.set_title('PAR-2 vs. L2 Bandwidth', fontsize=14, fontweight='bold')
+    ax1.set_xlabel('L2 Bandwidth (GB/s)', fontsize=20, fontweight='bold')
+    ax1.set_ylabel('PAR-2 (s)', fontsize=20, fontweight='bold')
     ax1.grid(True, alpha=0.3, linestyle='--')
+    ax1.tick_params(axis='both', which='major', labelsize=18)
+    if y_limits:
+        ax1.set_ylim(y_limits)
     
     # Plot 2: PAR-2 vs L2 Latency (fixed bandwidths)
     if has_latency_sweep:
@@ -314,10 +336,12 @@ def plot_sweeps(sweep_data, output_pdf):
         ax2.text(0.5, 0.5, 'Latency sweep data not available', 
                 ha='center', va='center', transform=ax2.transAxes, fontsize=12)
     
-    ax2.set_xlabel('L2 Latency (cycles)', fontsize=12, fontweight='bold')
-    ax2.set_ylabel('PAR-2 (s)', fontsize=12, fontweight='bold')
-    ax2.set_title('PAR-2 vs. L2 Latency', fontsize=14, fontweight='bold')
+    ax2.set_xlabel('L2 Latency (cycles)', fontsize=20, fontweight='bold')
+    ax2.set_ylabel('PAR-2 (s)', fontsize=20, fontweight='bold')
     ax2.grid(True, alpha=0.3, linestyle='--')
+    ax2.tick_params(axis='both', which='major', labelsize=18)
+    if y_limits:
+        ax2.set_ylim(y_limits)
     
     plt.tight_layout()
     plt.savefig(output_pdf, format='pdf', bbox_inches='tight', dpi=300)

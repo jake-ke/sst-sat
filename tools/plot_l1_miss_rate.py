@@ -289,10 +289,10 @@ def plot_miss_rates(cache_sizes, miss_rate_data, output_pdf):
            label='Total', linestyle='-', zorder=10)
     
     # Formatting
-    ax.set_xlabel('L1 Cache Size (KB)', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Miss Rate (%)', fontsize=12, fontweight='bold')
-    ax.set_title('L1 Cache Miss Rate vs. Cache Size', fontsize=14, fontweight='bold')
+    ax.set_xlabel('L1 Cache Size (KB)', fontsize=20, fontweight='bold')
+    ax.set_ylabel('Miss Rate (%)', fontsize=20, fontweight='bold')
     ax.grid(True, alpha=0.3, linestyle='--')
+    ax.tick_params(axis='both', which='major', labelsize=18)
     
     # Use log2 scale for x-axis
     ax.set_xscale('log', base=2)
@@ -301,7 +301,7 @@ def plot_miss_rates(cache_sizes, miss_rate_data, output_pdf):
     
     # Set x-axis ticks to show cache sizes explicitly
     ax.set_xticks(cache_sizes)
-    ax.set_xticklabels([str(s) for s in cache_sizes])
+    ax.set_xticklabels([str(s) for s in cache_sizes], fontsize=18)
     
     # Legend ranked by average miss rate (total line first, then data structures)
     handles, labels = ax.get_legend_handles_labels()
@@ -314,7 +314,7 @@ def plot_miss_rates(cache_sizes, miss_rate_data, output_pdf):
     handles.insert(0, total_handle)
     labels.insert(0, total_label)
     
-    ax.legend(handles, labels, loc='upper right', fontsize=10, title='Data Structure')
+    ax.legend(handles, labels, loc='upper right', fontsize=16, title='Data Structure', title_fontsize=18)
     
     plt.tight_layout()
     plt.savefig(output_pdf, format='pdf', bbox_inches='tight', dpi=300)

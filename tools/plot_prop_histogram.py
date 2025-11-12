@@ -169,11 +169,10 @@ def plot_propagation_histograms(results, output_pdf):
         bars1 = ax1.bar(x_pos, watcher_percentages, alpha=0.8, color='steelblue', 
                        edgecolor='black', linewidth=1.0)
         ax1.set_xticks(x_pos)
-        ax1.set_xticklabels(watcher_labels, fontsize=11)
-        ax1.set_xlabel('Number of Watchers per Propagation', fontsize=12, fontweight='bold')
-        ax1.set_ylabel('Percentage (%)', fontsize=12, fontweight='bold')
-        # ax1.set_title(f'Propagation Watchers Distribution', 
-        #              fontsize=13, fontweight='bold')
+        ax1.set_xticklabels(watcher_labels, fontsize=18)
+        ax1.set_xlabel('Number of Watchers per Propagation', fontsize=20, fontweight='bold')
+        ax1.set_ylabel('Percentage (%)', fontsize=20, fontweight='bold')
+        ax1.tick_params(axis='y', which='major', labelsize=18)
         ax1.grid(True, axis='y', alpha=0.3, linestyle='--')
         
         # Add percentage labels on top of bars
@@ -181,7 +180,7 @@ def plot_propagation_histograms(results, output_pdf):
             height = bar.get_height()
             ax1.text(bar.get_x() + bar.get_width() / 2, height,
                     f'{pct:.1f}%',
-                    ha='center', va='bottom', fontsize=10, fontweight='bold')
+                    ha='center', va='bottom', fontsize=16, fontweight='bold')
         
         # Set y-axis limit with some headroom for labels
         max_pct = max(watcher_percentages) if watcher_percentages else 100
@@ -200,11 +199,10 @@ def plot_propagation_histograms(results, output_pdf):
         bars2 = ax2.bar(x_pos, variable_percentages, alpha=0.8, color='seagreen',
                    edgecolor='black', linewidth=1.0)
         ax2.set_xticks(x_pos)
-        ax2.set_xticklabels(variable_labels, fontsize=11)
-        ax2.set_xlabel('Number of Literals per Propagation', fontsize=12, fontweight='bold')
-        ax2.set_ylabel('Percentage (%)', fontsize=12, fontweight='bold')
-        # ax2.set_title(f'Propagation Literals Distribution',
-        #              fontsize=13, fontweight='bold')
+        ax2.set_xticklabels(variable_labels, fontsize=18)
+        ax2.set_xlabel('Number of Literals per Propagation', fontsize=20, fontweight='bold')
+        ax2.set_ylabel('Percentage (%)', fontsize=20, fontweight='bold')
+        ax2.tick_params(axis='y', which='major', labelsize=18)
         ax2.grid(True, axis='y', alpha=0.3, linestyle='--')
         
         # Add percentage labels on top of bars
@@ -212,7 +210,7 @@ def plot_propagation_histograms(results, output_pdf):
             height = bar.get_height()
             ax2.text(bar.get_x() + bar.get_width() / 2, height,
                     f'{pct:.1f}%',
-                    ha='center', va='bottom', fontsize=10, fontweight='bold')
+                    ha='center', va='bottom', fontsize=16, fontweight='bold')
         
         # Set y-axis limit with some headroom for labels
         max_pct = max(variable_percentages) if variable_percentages else 100
