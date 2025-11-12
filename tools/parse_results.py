@@ -50,10 +50,10 @@ def write_csv_report(results, output_file, *, par2_score_seconds=None, solved_co
         'l1_varactivity_total', 'l1_varactivity_miss_rate',
         # Cycle statistics
         'propagate_cycles', 'analyze_cycles', 'minimize_cycles', 'backtrack_cycles',
-        'decision_cycles', 'reduce_db_cycles', 'restart_cycles', 'total_counted_cycles',
+        'decision_cycles', 'reduce_db_cycles', 'heap_insert_cycles', 'heap_bump_cycles', 'restart_cycles', 'total_counted_cycles',
         # Cycle percentages (computed)
         'propagate_cycles_pct', 'analyze_cycles_pct', 'minimize_cycles_pct', 'backtrack_cycles_pct',
-        'decision_cycles_pct', 'reduce_db_cycles_pct', 'restart_cycles_pct'
+        'decision_cycles_pct', 'reduce_db_cycles_pct', 'heap_insert_cycles_pct', 'heap_bump_cycles_pct', 'restart_cycles_pct'
     ]
 
     # Extra fixed fields: directed prefetcher stats and CSV prefetch requests/drops
@@ -81,7 +81,7 @@ def write_csv_report(results, output_file, *, par2_score_seconds=None, solved_co
 
         cycle_names = [
             'propagate_cycles', 'analyze_cycles', 'minimize_cycles', 'backtrack_cycles',
-            'decision_cycles', 'reduce_db_cycles', 'restart_cycles'
+            'decision_cycles', 'reduce_db_cycles', 'heap_insert_cycles', 'heap_bump_cycles', 'restart_cycles'
         ]
 
         for result in sorted_results:
@@ -228,7 +228,7 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600, du
         'l1_clauses_total', 'l1_clauses_miss_rate',
         'l1_varactivity_total', 'l1_varactivity_miss_rate',
         'propagate_cycles', 'analyze_cycles', 'minimize_cycles', 'backtrack_cycles',
-        'decision_cycles', 'reduce_db_cycles', 'restart_cycles', 'total_counted_cycles',
+        'decision_cycles', 'reduce_db_cycles', 'heap_insert_cycles', 'heap_bump_cycles', 'restart_cycles', 'total_counted_cycles',
         'prefetches_issued', 'prefetches_used', 'prefetches_unused', 'prefetch_accuracy',
         'l1_prefetch_requests', 'l1_prefetch_drops'
     ]
@@ -304,7 +304,7 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600, du
                 'l1_clauses_total', 'l1_clauses_miss_rate',
                 'l1_varactivity_total', 'l1_varactivity_miss_rate',
                 'propagate_cycles', 'analyze_cycles', 'minimize_cycles', 'backtrack_cycles',
-                'decision_cycles', 'reduce_db_cycles', 'restart_cycles', 'total_counted_cycles',
+                'decision_cycles', 'reduce_db_cycles', 'heap_insert_cycles', 'heap_bump_cycles', 'restart_cycles', 'total_counted_cycles',
                 'prefetches_issued', 'prefetches_used', 'prefetches_unused', 'prefetch_accuracy',
                 'l1_prefetch_requests', 'l1_prefetch_drops'
             ]

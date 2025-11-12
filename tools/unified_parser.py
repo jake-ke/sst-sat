@@ -280,6 +280,8 @@ def parse_cycle_statistics(content):
             'backtrack_cycles': r'Backtrack\s*:\s*[\d.]+%\s*\((\d+) cycles\)',
             'decision_cycles': r'Decision\s*:\s*[\d.]+%\s*\((\d+) cycles\)',
             'reduce_db_cycles': r'Reduce DB\s*:\s*[\d.]+%\s*\((\d+) cycles\)',
+            'heap_insert_cycles': r'Heap\s+Insert\s*:\s*[\d.]+%\s*\((\d+) cycles\)',
+            'heap_bump_cycles': r'Heap\s+Bump\s*:\s*[\d.]+%\s*\((\d+) cycles\)',
             'restart_cycles': r'Restart\s*:\s*[\d.]+%\s*\((\d+) cycles\)',
             'total_counted_cycles': r'Total Counted:\s*(\d+) cycles'
         }
