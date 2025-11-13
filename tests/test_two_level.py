@@ -170,7 +170,7 @@ if args.timeout_cycles > 0:
     print(f"Solver timeout set to: {args.timeout_cycles} cycles")
 
 # Create the SAT solver component
-solver = sst.Component("solver", "satsolver.SATSolver")
+solver = sst.Component("solver", "satsolver-bw.SATSolver-bw")
 
 # Define memory addresses for global memory operations
 heap_base_addr          = 0x00000000
@@ -216,10 +216,10 @@ solver.addParams(params)
 # Create the external heap subcomponent
 if args.classic_heap:
     print("Using classic heap implementation")
-    heap = solver.setSubComponent("order_heap", "satsolver.Heap")
+    heap = solver.setSubComponent("order_heap", "satsolver-bw.Heap")
 else:
     print("Using pipelined heap implementation")
-    heap = solver.setSubComponent("order_heap", "satsolver.PipelinedHeap")
+    heap = solver.setSubComponent("order_heap", "satsolver-bw.PipelinedHeap")
 heap.addParams({
     "verbose" : str(args.verbose),
 })
@@ -237,8 +237,8 @@ global_cache.addParams({
     "associativity"      : "8",
     "access_latency_cycles" : args.l1_latency,
     "max_requests_per_cycle" : args.l1_bw,
-    "request_link_width" : "64B",
-    "response_link_width" : "64B",
+    # "request_link_width" : "64B",
+    # "response_link_width" : "64B",
     "L1"                 : "1",
     "replacement_policy" : "lru",
     "coherence_protocol" : "MSI",
@@ -284,8 +284,8 @@ global_l2cache.addParams({
     "associativity"      : "16",
     "access_latency_cycles" : args.l2_latency,
     "max_requests_per_cycle" : args.l2_bw,
-    "request_link_width" : "64B",
-    "response_link_width" : "64B",
+    # "request_link_width" : "64B",
+    # "response_link_width" : "64B",
     "L1"                 : "0",
     "replacement_policy" : "lru",
     "coherence_protocol" : "MSI",
