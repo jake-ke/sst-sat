@@ -21,7 +21,7 @@ using coro_t = boost::coroutines2::coroutine<void>;
 
 const int PARA_LITS = 8;  // Number of parallel literals to propagate
 const int PROPAGATORS = 7;  // Number of watchers to propagate
-const int MAX_CONFL = 8;  // Maximum number of learned clauses
+const int MAX_CONFL = 4;  // Maximum number of learned clauses
 const int LEARNERS = 8;  // Number of learners for clause learning
 const int HEAPLANES = 8;  // Number of heap lanes for parallel execution
 const int MINIMIZERS = 4;  // Number of minimizers

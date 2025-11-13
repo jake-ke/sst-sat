@@ -48,8 +48,8 @@ public:
     // SST ELI Registrations
     SST_ELI_REGISTER_COMPONENT(
         SATSolver,
-        "satsolver-opt-final",
-        "SATSolver-opt-final",
+        "satsolver-confl4",
+        "SATSolver-confl4",
         SST_ELI_ELEMENT_VERSION(1,0,0),
         "SAT Solver Component",
         COMPONENT_CATEGORY_PROCESSOR
