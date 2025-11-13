@@ -13,6 +13,7 @@ show_usage() {
     echo "  --l1-size SIZE        L1 cache size"
     echo "  --l1-latency LATENCY  L1 cache latency cycles"
     echo "  --l1-bw BW            L1 cache bandwidth (max requests per cycle; use -1 for unlimited/auto)"
+    echo "  --l2-size SIZE        L2 cache size"
     echo "  --l2-latency LATENCY  L2 cache latency cycles"
     echo "  --l2-bw BW            L2 cache bandwidth (max requests per cycle; use -1 for unlimited/auto)"
     echo "  --mem-latency LATENCY External memory latency"
@@ -37,6 +38,7 @@ CLASSIC_HEAP=""
 L1_SIZE=""
 L1_LATENCY=""
 L1_BW=""
+L2_SIZE=""
 L2_LATENCY=""
 L2_BW=""
 MEM_LATENCY=""
@@ -128,6 +130,16 @@ while [[ $# -gt 0 ]]; do
                 shift 2
             else
                 echo "Error: --l1-bw requires an integer bandwidth (use -1 for unlimited/auto)"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --l2-size)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                L2_SIZE="$2"
+                shift 2
+            else
+                echo "Error: --l2-size requires a size argument"
                 show_usage
                 exit 1
             fi
@@ -274,6 +286,7 @@ log_message "RAMULATOR2 configuration: ${RAM2_CFG:-default}"
 log_message "L1 cache size: ${L1_SIZE:-default}"
 log_message "L1 cache latency: ${L1_LATENCY:-default}"
 log_message "L1 cache bandwidth: ${L1_BW:-default}"
+log_message "L2 cache size: ${L2_SIZE:-default}"
 log_message "L2 cache latency: ${L2_LATENCY:-default}"
 log_message "L2 cache bandwidth: ${L2_BW:-default}"
 log_message "Memory latency: ${MEM_LATENCY:-default}"
@@ -392,6 +405,7 @@ run_one_seed() {
     [[ -n "$L1_SIZE" ]] && command+=" --l1-size $L1_SIZE"
     [[ -n "$L1_LATENCY" ]] && command+=" --l1-latency $L1_LATENCY"
     [[ -n "$L1_BW" ]] && command+=" --l1-bw $L1_BW"
+    [[ -n "$L2_SIZE" ]] && command+=" --l2-size $L2_SIZE"
     [[ -n "$L2_LATENCY" ]] && command+=" --l2-latency $L2_LATENCY"
     [[ -n "$L2_BW" ]] && command+=" --l2-bw $L2_BW"
     [[ -n "$MEM_LATENCY" ]] && command+=" --mem-latency $MEM_LATENCY"
