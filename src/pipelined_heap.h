@@ -113,7 +113,7 @@ public:
     SST_ELI_REGISTER_SUBCOMPONENT_API(PipelinedHeap, SST::Interfaces::StandardMem*, uint64_t)
     
     SST_ELI_REGISTER_SUBCOMPONENT(
-        PipelinedHeap, "satsolver-lits-12", "PipelinedHeap", SST_ELI_ELEMENT_VERSION(1,0,0),
+        PipelinedHeap, "satsolver-lits-4", "PipelinedHeap", SST_ELI_ELEMENT_VERSION(1,0,0),
         "Pipelined heap implementation for variable ordering", PipelinedHeap
     )
 

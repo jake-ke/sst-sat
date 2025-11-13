@@ -170,7 +170,7 @@ if args.timeout_cycles > 0:
     print(f"Solver timeout set to: {args.timeout_cycles} cycles")
 
 # Create the SAT solver component
-solver = sst.Component("solver", "satsolver-lits-12.SATSolver-lits-12")
+solver = sst.Component("solver", "satsolver-lits-4.SATSolver-lits-4")
 
 # Define memory addresses for global memory operations
 heap_base_addr          = 0x00000000
@@ -216,10 +216,10 @@ solver.addParams(params)
 # Create the external heap subcomponent
 if args.classic_heap:
     print("Using classic heap implementation")
-    heap = solver.setSubComponent("order_heap", "satsolver-lits-12.Heap")
+    heap = solver.setSubComponent("order_heap", "satsolver-lits-4.Heap")
 else:
     print("Using pipelined heap implementation")
-    heap = solver.setSubComponent("order_heap", "satsolver-lits-12.PipelinedHeap")
+    heap = solver.setSubComponent("order_heap", "satsolver-lits-4.PipelinedHeap")
 heap.addParams({
     "verbose" : str(args.verbose),
 })
