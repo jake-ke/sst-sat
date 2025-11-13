@@ -29,13 +29,16 @@ from pathlib import Path
 
 
 def detect_log_format(content):
-    """Detect whether this is a minisat or satsolver log."""
+    """Detect whether this is a minisat, kissat, or satsolver log."""
     # Check for satsolver format indicators
     if 'Using CNF file:' in content and 'Simulation is complete' in content:
         return 'satsolver'
     # Check for minisat format indicators
     elif 'Problem Statistics' in content and 'conflicts             :' in content:
         return 'minisat'
+    # Check for kissat format indicators
+    elif 'Kissat SAT Solver' in content or '\ns SATISFIABLE' in content or '\ns UNSATISFIABLE' in content:
+        return 'kissat'
     else:
         return 'unknown'
 
@@ -152,6 +155,193 @@ def parse_minisat_log(log_file_path, content):
     return result
 
 
+def _parse_number(s):
+    try:
+        return int(str(s).replace(',', ''))
+    except Exception:
+        try:
+            return float(str(s).replace(',', ''))
+        except Exception:
+            return None
+
+
+def parse_kissat_log(log_file_path, content):
+    """Parse a Kissat solver log focusing on runtime (ms), memory, and key stats.
+
+    Extracted fields:
+    - test_case: derived from filename
+    - result: SAT/UNSAT/UNKNOWN
+    - variables, clauses: from DIMACS header 'p cnf'
+    - sim_time_ms: runtime in milliseconds
+      Preference: profiling total line -> fallback to last 'solving' seconds
+    - total_memory_bytes / total_memory_formatted: peak memory if available
+      Preference: explicit memory/statistics lines -> fallback to max MB column in solving table
+    - conflicts (and attempts for restarts/decisions/propagations if present)
+    """
+    result = {
+        'test_case': re.sub(r'\.log$', '', os.path.basename(log_file_path)),
+        'result': 'UNKNOWN',
+        'variables': 0,
+        'clauses': 0,
+        'total_memory_bytes': 0,
+        'total_memory_formatted': '0 B',
+        'sim_time_ms': 0.0,
+        'decisions': 0,
+        'propagations': 0,
+        'conflicts': 0,
+        'learned': 0,
+        'removed': 0,
+        'db_reductions': 0,
+        'minimized': 0,
+        'restarts': 0,
+    }
+
+    try:
+        # Result line
+        if re.search(r'^\s*s\s+UNSATISFIABLE', content, re.MULTILINE):
+            result['result'] = 'UNSAT'
+        elif re.search(r'^\s*s\s+SATISFIABLE', content, re.MULTILINE):
+            result['result'] = 'SAT'
+
+        # Variables and clauses from parsed header or DIMACS header
+        m = re.search(r"parsed 'p\s+cnf\s+(\d+)\s+(\d+)'", content)
+        if not m:
+            m = re.search(r"\bp\s+cnf\s+(\d+)\s+(\d+)\b", content)
+        if m:
+            result['variables'] = int(m.group(1))
+            result['clauses'] = int(m.group(2))
+
+        # Runtime: prefer profiling total line
+        # Example: "c           3.55  100.00 %  total"
+        tm = re.search(r"^\s*c\s+([0-9]*\.?[0-9]+)\s+100\.00\s*%\s+total\s*$", content, re.MULTILINE)
+        if tm:
+            seconds = float(tm.group(1))
+            result['sim_time_ms'] = seconds * 1000.0
+        else:
+            # Fallback: parse last 'solving' progress line seconds and MB
+            # Lines look like: "c *  0.02  9 ..." where first number is seconds, second is MB
+            prog_matches = re.findall(r"^\s*c\s.\s+([0-9]*\.?[0-9]+)\s+(\d+)\b", content, re.MULTILINE)
+            if prog_matches:
+                last_secs, _ = prog_matches[-1]
+                try:
+                    result['sim_time_ms'] = float(last_secs) * 1000.0
+                except Exception:
+                    pass
+
+        # Memory: try explicit stats lines first ("maximum-resident-set-size" or variants)
+        # Prefer the bytes value if available, fallback to the MB/GiB number.
+        mm_bytes = re.search(r"maximum[- ]resident[- ]set[- ]size\s*:\s*(\d+)\s*bytes(?:\s+(\d+)\s*(MiB|MB|GiB|GB))?", content, re.IGNORECASE)
+        mm_unit = re.search(r"maximum\s+resident\s+set\s+size.*?:\s*([0-9]*\.?[0-9]+)\s*(MiB|MB|GiB|GB)", content, re.IGNORECASE)
+        if mm_bytes:
+            try:
+                bytes_val = int(mm_bytes.group(1))
+                result['total_memory_bytes'] = bytes_val
+                result['total_memory_formatted'] = format_bytes(bytes_val)
+            except Exception:
+                pass
+        elif mm_unit:
+            val = float(mm_unit.group(1))
+            unit = mm_unit.group(2).upper()
+            if unit in ('MIB', 'MB'):
+                bytes_val = int(val * 1024 * 1024)
+            elif unit in ('GIB', 'GB'):
+                bytes_val = int(val * 1024 * 1024 * 1024)
+            else:
+                bytes_val = int(val)
+            result['total_memory_bytes'] = bytes_val
+            result['total_memory_formatted'] = format_bytes(bytes_val)
+        else:
+            # Fallback to max MB value from progress table's MB column
+            if 'seconds  switched' in content and 'MB reductions' in content:
+                mbs = []
+                for mb in re.findall(r"^\s*c\s.\s+[0-9]*\.?[0-9]+\s+(\d+)\b", content, re.MULTILINE):
+                    try:
+                        mbs.append(int(mb))
+                    except Exception:
+                        continue
+                if mbs:
+                    max_mb = max(mbs)
+                    bytes_val = max_mb * 1024 * 1024
+                    result['total_memory_bytes'] = bytes_val
+                    result['total_memory_formatted'] = format_bytes(bytes_val)
+
+        # Conflicts and other stats from statistics section if available
+        # Lines may look like: "c conflicts: 17229  4853.37 per second"
+        cm = re.search(r"^\s*c\s*conflicts\s*:\s*([0-9][0-9,]*)\s+([0-9]*\.?[0-9]+)\s+per\s+second", content, re.MULTILINE | re.IGNORECASE)
+        if cm:
+            v = _parse_number(cm.group(1))
+            rate = _parse_number(cm.group(2))
+            if isinstance(v, (int, float)):
+                result['conflicts'] = int(v)
+            if isinstance(rate, (int, float)):
+                result['conflicts_per_sec'] = float(rate)
+        else:
+            # Fallback without per-second
+            cm2 = re.search(r"^\s*c\s*conflicts\s*:\s*([0-9][0-9,]*)", content, re.MULTILINE | re.IGNORECASE)
+            if cm2:
+                v = _parse_number(cm2.group(1))
+                if isinstance(v, (int, float)):
+                    result['conflicts'] = int(v)
+
+        # decisions and propagations possibly have per-second too
+        dm = re.search(r"^\s*c\s*decisions\s*:\s*([0-9][0-9,]*)\s+([0-9]*\.?[0-9]+)\s+per\s+second", content, re.MULTILINE | re.IGNORECASE)
+        if dm:
+            v = _parse_number(dm.group(1))
+            rate = _parse_number(dm.group(2))
+            if isinstance(v, (int, float)):
+                result['decisions'] = int(v)
+            if isinstance(rate, (int, float)):
+                result['decisions_per_sec'] = float(rate)
+        else:
+            dm2 = re.search(r"^\s*c\s*decisions\s*:\s*([0-9][0-9,]*)", content, re.MULTILINE | re.IGNORECASE)
+            if dm2:
+                v = _parse_number(dm2.group(1))
+                if isinstance(v, (int, float)):
+                    result['decisions'] = int(v)
+
+        pm = re.search(r"^\s*c\s*propagations\s*:\s*([0-9][0-9,]*)\s+([0-9]*\.?[0-9]+)\s+per\s+second", content, re.MULTILINE | re.IGNORECASE)
+        if pm:
+            v = _parse_number(pm.group(1))
+            rate = _parse_number(pm.group(2))
+            if isinstance(v, (int, float)):
+                result['propagations'] = int(v)
+            if isinstance(rate, (int, float)):
+                result['propagations_per_sec'] = float(rate)
+        else:
+            pm2 = re.search(r"^\s*c\s*propagations\s*:\s*([0-9][0-9,]*)", content, re.MULTILINE | re.IGNORECASE)
+            if pm2:
+                v = _parse_number(pm2.group(1))
+                if isinstance(v, (int, float)):
+                    result['propagations'] = int(v)
+
+        rm = re.search(r"^\s*c\s*restarts\s*:\s*([0-9][0-9,]*)", content, re.MULTILINE | re.IGNORECASE)
+        if rm:
+            v = _parse_number(rm.group(1))
+            if isinstance(v, (int, float)):
+                result['restarts'] = int(v)
+
+        # db_reductions line like: "c reductions: 8             2154    interval"
+        red = re.search(r"^\s*c\s*reductions\s*:\s*([0-9][0-9,]*)\b", content, re.MULTILINE | re.IGNORECASE)
+        if red:
+            v = _parse_number(red.group(1))
+            if isinstance(v, (int, float)):
+                result['db_reductions'] = int(v)
+
+        # If we still have 0 runtime but have a propagation rate, derive time from it
+        if (not result.get('sim_time_ms')) or result.get('sim_time_ms', 0.0) <= 0.0:
+            rate = result.get('propagations_per_sec')
+            props = result.get('propagations')
+            if isinstance(rate, (int, float)) and rate and isinstance(props, int) and props > 0:
+                result['sim_time_ms'] = (props / float(rate)) * 1000.0
+
+        # Ensure formatted memory string is set
+        if not result['total_memory_formatted']:
+            result['total_memory_formatted'] = format_bytes(int(result.get('total_memory_bytes', 0) or 0))
+
+    except Exception as e:
+        print(f"Warning: Partial parse of kissat log {log_file_path}: {e}")
+
+    return result
 def parse_solver_statistics(content):
     """Parse solver statistics section."""
     stats = {}
@@ -450,6 +640,9 @@ def parse_log_file(log_file_path):
         elif log_format == 'satsolver':
             # Use satsolver parser
             return parse_satsolver_log(log_file_path, content)
+        elif log_format == 'kissat':
+            # Use kissat parser
+            return parse_kissat_log(log_file_path, content)
         else:
             # Unknown format - try to extract minimal information
             print(f"Warning: Unknown log format for {log_file_path}, extracting basic info")
