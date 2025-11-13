@@ -18,7 +18,7 @@ public:
     SST_ELI_REGISTER_SUBCOMPONENT_API(Heap, SST::Interfaces::StandardMem*, uint64_t, uint64_t)
     
     SST_ELI_REGISTER_SUBCOMPONENT(
-        Heap, "satsolver", "Heap", SST_ELI_ELEMENT_VERSION(1,0,0),
+        Heap, "satsolver-opt-final", "Heap", SST_ELI_ELEMENT_VERSION(1,0,0),
         "External-memory-based heap", Heap
     )
 

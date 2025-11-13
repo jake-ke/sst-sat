@@ -19,17 +19,17 @@ using coro_t = boost::coroutines2::coroutine<void>;
 // const int PRE_WATCHERS = 7;  // Number of pre-watchers to store in metadata
 // const int USE_FREE_LIST = 1;  // Use free list for watcher insertion
 
-const int PARA_LITS = 1;  // Number of parallel literals to propagate
-const int PROPAGATORS = 1;  // Number of watchers to propagate
-const int MAX_CONFL = 1;  // Maximum number of learned clauses
-const int LEARNERS = 1;  // Number of learners for clause learning
-const int HEAPLANES = 1;  // Number of heap lanes for parallel execution
-const int MINIMIZERS = 1;  // Number of minimizers
+const int PARA_LITS = 8;  // Number of parallel literals to propagate
+const int PROPAGATORS = 7;  // Number of watchers to propagate
+const int MAX_CONFL = 8;  // Maximum number of learned clauses
+const int LEARNERS = 8;  // Number of learners for clause learning
+const int HEAPLANES = 8;  // Number of heap lanes for parallel execution
+const int MINIMIZERS = 4;  // Number of minimizers
 const bool OVERLAP_HEAP_INSERT = true;  // overlaps heap insertions (backtracking) with propagation
 const bool OVERLAP_HEAP_BUMP = true;  // overlaps heap bumping with clause minimization and find bt level
 const bool WRITE_BUFFER = true;  // enables write request buffering for improved performance
-const int PRE_WATCHERS = 0;  // Number of pre-watchers to store in metadata
-const int USE_FREE_LIST = 0;  // Use free list for watcher insertion
+const int PRE_WATCHERS = 7;  // Number of pre-watchers to store in metadata
+const int USE_FREE_LIST = 1;  // Use free list for watcher insertion
 
 // helpers
 const int FREE_IDX_BITS = pow(2, ceil(log(PROPAGATORS)/log(2)));  // next power of 2
