@@ -63,6 +63,9 @@ def parse_args():
     parser.add_argument('--l2-bw', dest='l2_bw',
                         type=str, default="2",
                         help='L2 cache bandwidth (max requests per cycle)')
+    parser.add_argument('--l2-width', dest='l2_width',
+                        type=str, default="64B",
+                        help='L2 cache link width (request/response)')
     parser.add_argument('--mem-latency', dest='mem_latency',
                         type=str, default="100ns",
                         help='External Memory latency if using simpleMem')
@@ -237,8 +240,8 @@ global_cache.addParams({
     "associativity"      : "8",
     "access_latency_cycles" : args.l1_latency,
     "max_requests_per_cycle" : args.l1_bw,
-    # "request_link_width" : "64B",
-    # "response_link_width" : "64B",
+    "request_link_width" : "1024B",
+    "response_link_width" : "1024B",
     "L1"                 : "1",
     "replacement_policy" : "lru",
     "coherence_protocol" : "MSI",
@@ -284,8 +287,8 @@ global_l2cache.addParams({
     "associativity"      : "16",
     "access_latency_cycles" : args.l2_latency,
     "max_requests_per_cycle" : args.l2_bw,
-    # "request_link_width" : "64B",
-    # "response_link_width" : "64B",
+    "request_link_width" : args.l2_width,
+    "response_link_width" : args.l2_width,
     "L1"                 : "0",
     "replacement_policy" : "lru",
     "coherence_protocol" : "MSI",
