@@ -32,7 +32,7 @@ endif
 # Source files
 SOURCES = memory_allocator.cc cache_profiler.cc async_base.cc async_heap.cc async_watches.cc async_clauses.cc async_activity.cc async_var_activity.cc satsolver.cc directedprefetch.cc pipelined_heap.cc pipelined_heap_test.cc
 OBJECTS = $(SOURCES:%.cc=$(BUILD_DIR)/%.o)
-TARGET = $(BUILD_DIR)/libsatsolver-lits-1.so
+TARGET = $(BUILD_DIR)/libsatsolver-lits-16.so
 
 # Build library
 all: $(TARGET)
@@ -48,9 +48,9 @@ $(BUILD_DIR)/%.o: %.cc | $(BUILD_DIR)
 
 # Install
 install: $(TARGET)
-	sst-register satsolver-lits-1 satsolver-lits-1_LIBDIR=$(abspath $(BUILD_DIR))
-	sst-register SST_ELEMENT_SOURCE satsolver-lits-1=$(CURDIR)
-	sst-register SST_ELEMENT_TESTS satsolver-lits-1=$(abspath ../tests)
+	sst-register satsolver-lits-16 satsolver-lits-16_LIBDIR=$(abspath $(BUILD_DIR))
+	sst-register SST_ELEMENT_SOURCE satsolver-lits-16=$(CURDIR)
+	sst-register SST_ELEMENT_TESTS satsolver-lits-16=$(abspath ../tests)
 
 # Clean
 clean:

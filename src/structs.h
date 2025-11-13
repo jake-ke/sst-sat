@@ -19,7 +19,7 @@ using coro_t = boost::coroutines2::coroutine<void>;
 // const int PRE_WATCHERS = 7;  // Number of pre-watchers to store in metadata
 // const int USE_FREE_LIST = 1;  // Use free list for watcher insertion
 
-const int PARA_LITS = 1;  // Number of parallel literals to propagate
+const int PARA_LITS = 16;  // Number of parallel literals to propagate
 const int PROPAGATORS = 7;  // Number of watchers to propagate
 const int MAX_CONFL = 8;  // Maximum number of learned clauses
 const int LEARNERS = 8;  // Number of learners for clause learning
