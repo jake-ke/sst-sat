@@ -12,9 +12,9 @@ show_usage() {
     echo "  --classic-heap        Use classic heap implementation instead of pipelined"
     echo "  --l1-size SIZE        L1 cache size"
     echo "  --l1-latency LATENCY  L1 cache latency cycles"
-    echo "  --l1-bw BW            L1 cache bandwidth (max requests per cycle)"
+    echo "  --l1-bw BW            L1 cache bandwidth (max requests per cycle; use -1 for unlimited/auto)"
     echo "  --l2-latency LATENCY  L2 cache latency cycles"
-    echo "  --l2-bw BW            L2 cache bandwidth (max requests per cycle)"
+    echo "  --l2-bw BW            L2 cache bandwidth (max requests per cycle; use -1 for unlimited/auto)"
     echo "  --mem-latency LATENCY External memory latency"
     echo "  --prefetch            Enable directed prefetching"
     echo "  --spec                Enable speculative propagation"
@@ -122,11 +122,12 @@ while [[ $# -gt 0 ]]; do
             fi
             ;;
         --l1-bw)
-            if [[ -n "$2" && "$2" != -* ]]; then
+            # Allow numeric values including the special value -1
+            if [[ -n "$2" && "$2" =~ ^(-1|[0-9]+)$ ]]; then
                 L1_BW="$2"
                 shift 2
             else
-                echo "Error: --l1-bw requires a bandwidth argument"
+                echo "Error: --l1-bw requires an integer bandwidth (use -1 for unlimited/auto)"
                 show_usage
                 exit 1
             fi
@@ -142,11 +143,12 @@ while [[ $# -gt 0 ]]; do
             fi
             ;;
         --l2-bw)
-            if [[ -n "$2" && "$2" != -* ]]; then
+            # Allow numeric values including the special value -1
+            if [[ -n "$2" && "$2" =~ ^(-1|[0-9]+)$ ]]; then
                 L2_BW="$2"
                 shift 2
             else
-                echo "Error: --l2-bw requires a bandwidth argument"
+                echo "Error: --l2-bw requires an integer bandwidth (use -1 for unlimited/auto)"
                 show_usage
                 exit 1
             fi
