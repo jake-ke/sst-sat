@@ -31,7 +31,7 @@ from pathlib import Path
 def detect_log_format(content):
     """Detect whether this is a minisat, kissat, or satsolver log."""
     # Check for satsolver format indicators
-    if 'Using CNF file:' in content and 'Simulation is complete' in content:
+    if 'Using CNF file:' in content:
         return 'satsolver'
     # Check for minisat format indicators
     elif 'Problem Statistics' in content and 'conflicts             :' in content:
@@ -736,11 +736,32 @@ def parse_satsolver_log(log_file_path, content):
         result['total_memory_bytes'] = total_bytes
         result['total_memory_formatted'] = format_bytes(total_bytes)
 
-        # Result sanity
-        if 'UNSATISFIABLE' in content:
-            result['result'] = 'UNSAT'
-        elif 'SATISFIABLE' in content and 'UNSATISFIABLE' not in content:
-            result['result'] = 'SAT'
+        # Determine result type based on log content
+        has_simulation_complete = 'Simulation is complete' in content
+        has_timeout = '====================[ Timeout Reached' in content
+        has_error = re.search(r'(fatal|error)', content, re.IGNORECASE) is not None
+        has_sat = 'SATISFIABLE: All variables assigned' in content
+        has_unsat = 'UNSATISFIABLE: conflict at level 0' in content
+        
+        # Normal types: must have "Simulation is complete"
+        if has_simulation_complete:
+            if has_sat:
+                result['result'] = 'SAT'
+            elif has_unsat:
+                result['result'] = 'UNSAT'
+            elif has_timeout:
+                result['result'] = 'TIMEOUT'
+            else:
+                print(f"Warning: Simulation complete but no SAT/UNSAT/TIMEOUT result in {log_file_path}")
+                result['result'] = 'UNKNOWN'
+        else:
+            # Not normal: missing "Simulation is complete"
+            if has_error:
+                result['result'] = 'ERROR'
+                print(f"Warning: ERROR detected in {log_file_path}")
+            else:
+                result['result'] = 'UNKNOWN'
+                print(f"Warning: UNKNOWN result in {log_file_path}")
 
         # Simulated time
         time_match = re.search(r'Simulation is complete, simulated time: ([\d.]+)\s*(\w+)', content)
@@ -774,13 +795,18 @@ def parse_satsolver_log(log_file_path, content):
         result.update(parse_propagation_detail_statistics(content))
         result.update(parse_directed_prefetcher_statistics(content))
         
-        # Check result status - any case without SAT/UNSAT stays as UNKNOWN
-        if not result['result'] or result['result'] not in ['SAT', 'UNSAT']:
-            result['result'] = 'UNKNOWN'
+        # For abnormal results (ERROR/UNKNOWN), clear all numeric fields except test_case and result
+        if result['result'] in ('ERROR', 'UNKNOWN'):
+            # Keep only test_case and result, clear everything else
+            test_case = result['test_case']
+            result_type = result['result']
+            result.clear()
+            result['test_case'] = test_case
+            result['result'] = result_type
                 
     except Exception as e:
         print(f"Warning: Partial parse of satsolver log {log_file_path}: {e}")
-        # Still return the partial result with UNKNOWN status
+        result['result'] = 'ERROR'
     
     return result
 
