@@ -53,97 +53,133 @@ def collect_histogram_data(log_dir):
         all_results = parse_log_directory(log_dir, exclude_summary=True)
         print(f"Collected {len(all_results)} tests")
     
-    # Filter to finished tests only
-    finished = [r for r in all_results if r.get('result') in ('SAT', 'UNSAT')]
-    print(f"Finished tests (SAT/UNSAT): {len(finished)}")
+    # Include finished and UNKNOWN tests (SAT/UNSAT/UNKNOWN)
+    finished = [r for r in all_results if r.get('result') in ('SAT', 'UNSAT', 'UNKNOWN')]
+    print(f"Included tests (SAT/UNSAT/UNKNOWN): {len(finished)}")
     
     return finished
 
 
 def aggregate_histogram(results, histogram_key, num_bins=11):
-    """
-    Aggregate histogram data across multiple test results.
-    
-    Args:
-        results: List of parsed log dictionaries
-        histogram_key: Key for the histogram ('watchers_bins' or 'variables_bins')
-        num_bins: Number of bins to use (default: 11)
-    
+    """Aggregate histogram data and compute per-bin index-weighted percentages.
+
+    New semantics (per user request):
+      - Exclude bin 0 entirely from display, but include it in the per-test denominator.
+      - Define fixed display bins: 1..(threshold-1) and one merged bin '≥ threshold'.
+      - For each test:
+          * Compute per-bin percentage over total counts for that test (including bin 0).
+          * Multiply each bin's percentage by its index; for the merged last bin sum
+            contributions from detailed sub-bins with their own indices:
+              - numeric bins ≥ threshold use their exact index
+              - ranged bins (e.g., 10-19) use the midpoint (start+end)/2
+              - out_of_bounds uses 25 (per user guidance)
+        Then average these index-weighted percentages across tests.
+
     Returns:
-        Tuple of (bin_labels, percentages) where percentages add up to ~100%
-        The last bin (bin 10) includes all samples from bins >= 10
+        (labels, avg_original_percentages, avg_index_weighted_percentages, agg_raw_counts)
     """
-    # Aggregate sample counts across all results
-    total_samples = 0
-    bin_samples = {}  # Maps bin_key to total sample count
-    
+    threshold = num_bins - 1  # e.g., for 11 bins, threshold=10, display bins are 1..9 and '≥ 10'
+    inrange_indices = list(range(1, threshold))
+    labels = [str(i) for i in inrange_indices] + [f'≥ {threshold}']
+
+    # Accumulators for averaging (percentages)
+    sum_orig = [0.0 for _ in labels]
+    sum_index_weighted = [0.0 for _ in labels]
+    num_tests = 0
+
+    # Aggregated raw counts across all tests (for printing counts)
+    agg_counts = {i: 0 for i in inrange_indices}
+    agg_counts_oob = 0
+
     for r in results:
-        bins = r.get(histogram_key, {})
-        if not bins:
-            continue
-        
+        bins = r.get(histogram_key, {}) or {}
+        # Per-test counts
+        counts = {i: 0 for i in inrange_indices}
+        # Track detailed out-of-bound contributions for proper weighting
+        # Each entry: (weight_index, count)
+        oob_details = []
+        oob_total_count = 0  # total samples in ≥ threshold including out_of_bounds
+        bin0 = 0         # count for bin 0 (or 0-range)
+
         for bin_key, values in bins.items():
-            samples = values.get('samples', 0)
-            total_samples += samples
-            
-            if bin_key not in bin_samples:
-                bin_samples[bin_key] = 0
-            bin_samples[bin_key] += samples
-    
-    if total_samples == 0:
-        return [], []
-    
-    # Process bins and aggregate bins >= (num_bins - 1) into the last bin
-    aggregated_bins = {}
-    last_bin_threshold = num_bins - 1  # For 11 bins, this is 10
-    
-    for bin_key, samples in bin_samples.items():
-        if bin_key == 'out_of_bounds':
-            # Add to last bin
-            if last_bin_threshold not in aggregated_bins:
-                aggregated_bins[last_bin_threshold] = 0
-            aggregated_bins[last_bin_threshold] += samples
-        elif isinstance(bin_key, str) and '-' in bin_key:
-            # Range bin like "3-7"
-            start, end = map(int, bin_key.split('-'))
-            if start >= last_bin_threshold:
-                # Entire range goes into last bin
-                if last_bin_threshold not in aggregated_bins:
-                    aggregated_bins[last_bin_threshold] = 0
-                aggregated_bins[last_bin_threshold] += samples
+            count = values.get('samples', 0) or 0
+            if count == 0:
+                continue
+
+            if bin_key == 'out_of_bounds':
+                # Assign a representative index weight for OOB bucket
+                # Per user guidance, use 25 for out_of_bounds
+                oob_details.append((25.0, count))
+                oob_total_count += count
+            elif isinstance(bin_key, str) and '-' in bin_key:
+                start_str, end_str = bin_key.split('-')
+                try:
+                    start = int(start_str)
+                    end = int(end_str)
+                except ValueError:
+                    continue
+                if start < 1:
+                    if start == 0:
+                        bin0 += count
+                    continue  # drop negatives
+                if start >= threshold:
+                    # Use midpoint of the range as representative index
+                    mid = (start + end) / 2.0
+                    oob_details.append((mid, count))
+                    oob_total_count += count
+                else:
+                    counts[start] = counts.get(start, 0) + count
             else:
-                # Add to appropriate bin
-                aggregated_bins[start] = aggregated_bins.get(start, 0) + samples
-        else:
-            # Single bin
-            bin_num = int(bin_key)
-            if bin_num >= last_bin_threshold:
-                # Add to last bin
-                if last_bin_threshold not in aggregated_bins:
-                    aggregated_bins[last_bin_threshold] = 0
-                aggregated_bins[last_bin_threshold] += samples
-            else:
-                aggregated_bins[bin_num] = aggregated_bins.get(bin_num, 0) + samples
-    
-    # Sort bins by numeric value
-    sorted_bins = sorted(aggregated_bins.items())
-    
-    # Build labels and percentages
-    bin_labels = []
-    percentages = []
-    
-    for bin_num, samples in sorted_bins:
-        if bin_num == last_bin_threshold:
-            # Last bin includes all >= threshold
-            bin_labels.append(f'≥ {last_bin_threshold}')
-        else:
-            bin_labels.append(str(bin_num))
-        
-        # Calculate percentage based on total samples
-        percentage = (samples / total_samples) * 100.0
-        percentages.append(percentage)
-    
-    return bin_labels, percentages
+                try:
+                    idx = int(bin_key)
+                except ValueError:
+                    continue
+                if idx < 1:
+                    if idx == 0:
+                        bin0 += count
+                    continue
+                if idx >= threshold:
+                    oob_details.append((float(idx), count))
+                    oob_total_count += count
+                else:
+                    counts[idx] = counts.get(idx, 0) + count
+
+        # Aggregate raw counts
+        for i in inrange_indices:
+            agg_counts[i] += counts.get(i, 0)
+        agg_counts_oob += oob_total_count
+
+        # Totals (denominator): include bin0 + in-range + all OOB counts
+        total = bin0 + sum(counts.values()) + oob_total_count
+        if total == 0:
+            continue
+
+        # Per-test percentages (unweighted)
+        per_orig = [ (counts[i] / total * 100.0) for i in inrange_indices ]
+        per_orig_oob = (oob_total_count) / total * 100.0
+        per_orig.append(per_orig_oob)
+
+        # Index-weighted percentages (multiply each percentage by bin index)
+        per_weighted = [ (i * (counts[i] / total * 100.0)) for i in inrange_indices ]
+        # For ≥ threshold display bin, sum detailed contributions using their own indices/weights
+        per_weighted_oob = sum((w * (cnt / total * 100.0)) for (w, cnt) in oob_details)
+        per_weighted.append(per_weighted_oob)
+
+        # Accumulate
+        sum_orig = [a + b for a, b in zip(sum_orig, per_orig)]
+        sum_index_weighted = [a + b for a, b in zip(sum_index_weighted, per_weighted)]
+        num_tests += 1
+
+    if num_tests == 0:
+        return [], [], [], []
+
+    avg_orig = [v / num_tests for v in sum_orig]
+    avg_weighted = [v / num_tests for v in sum_index_weighted]
+
+    # Build aggregated counts aligned to labels
+    agg_counts_list = [agg_counts[i] for i in inrange_indices] + [agg_counts_oob]
+
+    return labels, avg_orig, avg_weighted, agg_counts_list
 
 
 def plot_propagation_histograms(results, output_pdf):
@@ -159,62 +195,64 @@ def plot_propagation_histograms(results, output_pdf):
         return
     
     # Create figure with 2 subplots (top and bottom)
+    # Increase global font size for all text elements
+    plt.rcParams.update({'font.size': 20})
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
     
-    # Plot 1: Watchers Histogram (top)
-    watcher_labels, watcher_percentages = aggregate_histogram(results, 'watchers_bins', num_bins=11)
+    # Plot 1: Watchers Histogram (top) - index-weighted percentages
+    watcher_labels, watcher_original, watcher_weighted, watcher_counts = aggregate_histogram(results, 'watchers_bins', num_bins=11)
     
     if watcher_labels:
         x_pos = np.arange(len(watcher_labels))
-        bars1 = ax1.bar(x_pos, watcher_percentages, alpha=0.8, color='steelblue', 
-                       edgecolor='black', linewidth=1.0)
+        bars1 = ax1.bar(x_pos, watcher_weighted, alpha=0.8, color='steelblue', 
+                         edgecolor='black', linewidth=1.0)
         ax1.set_xticks(x_pos)
-        ax1.set_xticklabels(watcher_labels, fontsize=18)
-        ax1.set_xlabel('Number of Watchers per Propagation', fontsize=20, fontweight='bold')
-        ax1.set_ylabel('Percentage (%)', fontsize=20, fontweight='bold')
-        ax1.tick_params(axis='y', which='major', labelsize=18)
+        ax1.set_xticklabels(watcher_labels, fontsize=24)
+        ax1.set_xlabel('# Watchers Processed per Literal', fontsize=26, fontweight='bold')
+        ax1.set_ylabel('Weighted %', fontsize=26, fontweight='bold')
+        ax1.tick_params(axis='y', which='major', labelsize=24)
         ax1.grid(True, axis='y', alpha=0.3, linestyle='--')
         
         # Add percentage labels on top of bars
-        for bar, pct in zip(bars1, watcher_percentages):
+        for bar, pct in zip(bars1, watcher_weighted):
             height = bar.get_height()
             ax1.text(bar.get_x() + bar.get_width() / 2, height,
-                    f'{pct:.1f}%',
-                    ha='center', va='bottom', fontsize=16, fontweight='bold')
+                     f'{pct:.1f}%',
+                     ha='center', va='bottom', fontsize=20, fontweight='bold')
         
         # Set y-axis limit with some headroom for labels
-        max_pct = max(watcher_percentages) if watcher_percentages else 100
-        ax1.set_ylim(0, max_pct * 1.15)
+        max_pct = max(watcher_weighted) if watcher_weighted else 100
+        ax1.set_ylim(0, max_pct * 1.20)
     else:
         ax1.text(0.5, 0.5, 'No watcher histogram data available',
                 ha='center', va='center', transform=ax1.transAxes, fontsize=12)
         ax1.set_xlim(0, 1)
         ax1.set_ylim(0, 1)
     
-    # Plot 2: Variables (Literals) Histogram (bottom)
-    variable_labels, variable_percentages = aggregate_histogram(results, 'variables_bins', num_bins=11)
+    # Plot 2: Variables (Literals) Histogram (bottom) - index-weighted percentages
+    variable_labels, variable_original, variable_weighted, variable_counts = aggregate_histogram(results, 'variables_bins', num_bins=11)
     
     if variable_labels:
         x_pos = np.arange(len(variable_labels))
-        bars2 = ax2.bar(x_pos, variable_percentages, alpha=0.8, color='seagreen',
-                   edgecolor='black', linewidth=1.0)
+        bars2 = ax2.bar(x_pos, variable_weighted, alpha=0.8, color='seagreen',
+                         edgecolor='black', linewidth=1.0)
         ax2.set_xticks(x_pos)
-        ax2.set_xticklabels(variable_labels, fontsize=18)
-        ax2.set_xlabel('Number of Literals per Propagation', fontsize=20, fontweight='bold')
-        ax2.set_ylabel('Percentage (%)', fontsize=20, fontweight='bold')
-        ax2.tick_params(axis='y', which='major', labelsize=18)
+        ax2.set_xticklabels(variable_labels, fontsize=24)
+        ax2.set_xlabel('# Literals Residing in Trail', fontsize=26, fontweight='bold')
+        ax2.set_ylabel('Weighted %', fontsize=26, fontweight='bold')
+        ax2.tick_params(axis='y', which='major', labelsize=24)
         ax2.grid(True, axis='y', alpha=0.3, linestyle='--')
         
         # Add percentage labels on top of bars
-        for bar, pct in zip(bars2, variable_percentages):
+        for bar, pct in zip(bars2, variable_weighted):
             height = bar.get_height()
             ax2.text(bar.get_x() + bar.get_width() / 2, height,
-                    f'{pct:.1f}%',
-                    ha='center', va='bottom', fontsize=16, fontweight='bold')
+                     f'{pct:.1f}% ',
+                     ha='center', va='bottom', fontsize=20, fontweight='bold')
         
         # Set y-axis limit with some headroom for labels
-        max_pct = max(variable_percentages) if variable_percentages else 100
-        ax2.set_ylim(0, max_pct * 1.15)
+        max_pct = max(variable_weighted) if variable_weighted else 100
+        ax2.set_ylim(0, max_pct * 1.20)
     else:
         ax2.text(0.5, 0.5, 'No variable histogram data available',
                 ha='center', va='center', transform=ax2.transAxes, fontsize=12)
@@ -225,20 +263,24 @@ def plot_propagation_histograms(results, output_pdf):
     plt.savefig(output_pdf, format='pdf', bbox_inches='tight', dpi=300)
     print(f"\nPlot saved to: {output_pdf}")
     
-    # Print summary statistics
+    # Print summary statistics side by side with counts
     if watcher_labels:
-        print(f"\nWatcher Distribution:")
-        total_watcher_pct = sum(watcher_percentages)
-        for label, pct in zip(watcher_labels, watcher_percentages):
-            print(f"  {label:>6s}: {pct:6.2f}%")
-        print(f"  {'Total':>6s}: {total_watcher_pct:6.2f}%")
+        print("\nWatcher Distribution (counts aggregated across tests; % averaged across tests; denominator includes bin 0)")
+        total_raw = sum(watcher_counts)
+        print("  Bin    RawCount    Raw%   |   Weighted% (index × %) ")
+        print("  ----   --------  -------  |   ----------------------")
+        for label, rc, ro, w in zip(watcher_labels, watcher_counts, watcher_original, watcher_weighted):
+            print(f"  {label:>6s}: {rc:8d}  {ro:7.2f}%  |   {w:7.2f}%")
+        print(f"  {'Total':>6s}: {total_raw:8d}  {sum(watcher_original):7.2f}%  |   {sum(watcher_weighted):7.2f}%")
     
     if variable_labels:
-        print(f"\nLiteral Distribution:")
-        total_variable_pct = sum(variable_percentages)
-        for label, pct in zip(variable_labels, variable_percentages):
-            print(f"  {label:>6s}: {pct:6.2f}%")
-        print(f"  {'Total':>6s}: {total_variable_pct:6.2f}%")
+        print("\nLiteral Distribution (counts aggregated across tests; % averaged across tests; denominator includes bin 0)")
+        total_raw = sum(variable_counts)
+        print("  Bin    RawCount    Raw%   |   Weighted% (index × %) ")
+        print("  ----   --------  -------  |   ----------------------")
+        for label, rc, ro, w in zip(variable_labels, variable_counts, variable_original, variable_weighted):
+            print(f"  {label:>6s}: {rc:8d}  {ro:7.2f}%  |   {w:7.2f}%")
+        print(f"  {'Total':>6s}: {total_raw:8d}  {sum(variable_original):7.2f}%  |   {sum(variable_weighted):7.2f}%")
     
     plt.close()
 
