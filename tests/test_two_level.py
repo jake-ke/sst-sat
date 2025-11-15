@@ -57,6 +57,9 @@ def parse_args():
     parser.add_argument('--l1-bw', dest='l1_bw',
                         type=str, default="-1",
                         help='L1 cache bandwidth (max requests per cycle)')
+    parser.add_argument('--l2-size', dest='l2_size',
+                        type=str, default="24MiB",
+                        help='L2 cache size')
     parser.add_argument('--l2-latency', dest='l2_latency',
                         type=str, default="100",
                         help='L2 cache latency cycles (1GHz)')
@@ -158,6 +161,7 @@ if args.decision_output_path:
 print(f"L1 cache size: {args.l1_size}")
 print(f"L1 cache latency: {args.l1_latency} cycles")
 print(f"L1 cache bandwidth: {args.l1_bw} requests/cycle")
+print(f"L2 cache size: {args.l2_size}")
 print(f"L2 cache latency: {args.l2_latency} cycles")
 print(f"L2 cache bandwidth: {args.l2_bw} requests/cycle")
 if (args.ram2_config):
@@ -166,6 +170,8 @@ else:
     print(f"Using simple memory latency: {args.mem_latency}")
 if args.enable_prefetch:
     print(f"Directed prefetching enabled")
+if args.enable_speculative:
+    print(f"Speculative propagation enabled")
 if args.timeout_cycles > 0:
     print(f"Solver timeout set to: {args.timeout_cycles} cycles")
 
@@ -279,7 +285,7 @@ if args.enable_prefetch:
 global_l2cache = sst.Component("global_l2cache", "memHierarchy.Cache")
 global_l2cache.addParams({
     "cache_frequency"    : "1GHz",
-    "cache_size"         : "24MiB",
+    "cache_size"         : args.l2_size,
     "cache_line_size"    : "64",
     "associativity"      : "16",
     "access_latency_cycles" : args.l2_latency,

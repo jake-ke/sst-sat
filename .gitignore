@@ -15,5 +15,7 @@ __pycache__/
 # Logs and statistics
 *.log
 *.csv
+*.out
 logs*
+results/
 
