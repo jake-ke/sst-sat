@@ -34,67 +34,61 @@ def compute_runtime_breakdown(results):
     Returns dict with component names and their average percentages.
     Percentages are capped to ensure they sum to 100%.
     """
-    # Filter to finished tests only
-    finished = [r for r in results if r.get('result') in ('SAT', 'UNSAT')]
+    # Include all tests (SAT, UNSAT, and UNKNOWN)
+    finished = [r for r in results if r.get('result') in ('SAT', 'UNSAT', 'UNKNOWN')]
     
     if not finished:
         return {}
     
-    # Aggregate cycles across all finished tests
-    total_propagate = 0
-    total_analyze = 0
-    total_minimize = 0
-    total_backtrack = 0
-    total_decision = 0
-    total_reduce_db = 0
-    total_restart = 0
-    total_counted = 0
+    # Initialize lists to collect percentages for each test
+    component_names = ['Propagate', 'Analyze', 'Minimize', 'Backtrack', 
+                      'Priority Queue', 'Restart', 'Deletion']
+    component_percentages = {name: [] for name in component_names}
     
-    # Also track heap operations from propagation detail if available
-    total_heap_insert = 0
-    total_heap_bump = 0
-    
+    # Compute percentage for each test individually
     for r in finished:
-        total_propagate += r.get('propagate_cycles', 0) or 0
-        total_analyze += r.get('analyze_cycles', 0) or 0
-        total_minimize += r.get('minimize_cycles', 0) or 0
-        total_backtrack += r.get('backtrack_cycles', 0) or 0
-        total_decision += r.get('decision_cycles', 0) or 0
-        total_reduce_db += r.get('reduce_db_cycles', 0) or 0
-        total_restart += r.get('restart_cycles', 0) or 0
-        total_counted += r.get('total_counted_cycles', 0) or 0
+        total_counted = r.get('total_counted_cycles', 0) or 0
         
-        # Check for heap operations in propagation detail
-        total_heap_insert += r.get('prop_heap_insert_cycles', 0) or 0
-        total_heap_bump += r.get('prop_heap_bump_cycles', 0) or 0
+        if total_counted == 0:
+            continue
+        
+        # Get cycles for each component
+        propagate = r.get('propagate_cycles', 0) or 0
+        analyze = r.get('analyze_cycles', 0) or 0
+        minimize = r.get('minimize_cycles', 0) or 0
+        backtrack = r.get('backtrack_cycles', 0) or 0
+        decision = r.get('decision_cycles', 0) or 0
+        reduce_db = r.get('reduce_db_cycles', 0) or 0
+        restart = r.get('restart_cycles', 0) or 0
+        
+        # Get heap operations from cycle statistics (not propagation detail)
+        heap_insert = r.get('heap_insert_cycles', 0) or 0
+        heap_bump = r.get('heap_bump_cycles', 0) or 0
+        
+        # Compute priority queue as decision + heap operations
+        priority_queue = decision + heap_insert + heap_bump
+        
+        # Compute percentage for this test
+        component_percentages['Propagate'].append(propagate / total_counted * 100.0)
+        component_percentages['Analyze'].append(analyze / total_counted * 100.0)
+        component_percentages['Minimize'].append(minimize / total_counted * 100.0)
+        component_percentages['Backtrack'].append(backtrack / total_counted * 100.0)
+        component_percentages['Priority Queue'].append(priority_queue / total_counted * 100.0)
+        component_percentages['Restart'].append(restart / total_counted * 100.0)
+        component_percentages['Deletion'].append(reduce_db / total_counted * 100.0)
     
-    if total_counted == 0:
-        return {}
+    # Compute average percentage across all tests
+    breakdown_pct = {}
+    for name in component_names:
+        if component_percentages[name]:
+            breakdown_pct[name] = sum(component_percentages[name]) / len(component_percentages[name])
+        else:
+            breakdown_pct[name] = 0.0
     
-    # Compute priority queue as decision + heap operations
-    total_priority_queue = total_decision + total_heap_insert + total_heap_bump
+    if not any(breakdown_pct.values()):
+        return {}, {}
     
-    # Build breakdown dict with raw cycles
-    breakdown_cycles = {
-        'Propagate': total_propagate,
-        'Analyze': total_analyze,
-        'Minimize': total_minimize,
-        'Backtrack': total_backtrack,
-        'Priority Queue': total_priority_queue,
-        'Restart': total_restart,
-        'Reduce DB': total_reduce_db,
-    }
-    
-    # Compute raw percentages
-    breakdown_pct = {k: (v / total_counted * 100.0) for k, v in breakdown_cycles.items()}
-    
-    # Cap to 100% total by normalizing
-    total_pct = sum(breakdown_pct.values())
-    if total_pct > 100.0:
-        print("Warning: Runtime breakdown percentages exceed 100%, normalizing...")
-        breakdown_pct = {k: (v / total_pct * 100.0) for k, v in breakdown_pct.items()}
-    
-    return breakdown_pct
+    return breakdown_pct, component_percentages
 
 
 def compute_propagation_breakdown(results):
@@ -110,51 +104,56 @@ def compute_propagation_breakdown(results):
     Returns dict with component names and their average percentages.
     Percentages are capped to ensure they sum to 100%.
     """
-    # Filter to finished tests only
-    finished = [r for r in results if r.get('result') in ('SAT', 'UNSAT')]
+    # Include all tests (SAT, UNSAT, and UNKNOWN)
+    finished = [r for r in results if r.get('result') in ('SAT', 'UNSAT', 'UNKNOWN')]
     
     if not finished:
         return {}
     
-    # Aggregate cycles across all finished tests
-    total_insert_watchers = 0
-    total_polling = 0
-    total_read_clauses = 0
-    total_read_head_pointers = 0
-    total_read_watcher_blocks = 0
-    total_propagate = 0
+    # Initialize lists to collect percentages for each test
+    component_names = ['Insert Watchers', 'Read Clauses', 
+                      'Read Watchlist Table', 'Read Watchers']
+    component_percentages = {name: [] for name in component_names}
     
+    # Compute percentage for each test individually
     for r in finished:
-        total_insert_watchers += r.get('prop_insert_watchers_cycles', 0) or 0
-        total_polling += r.get('prop_polling_for_busy_cycles', 0) or 0
-        total_read_clauses += r.get('prop_read_clauses_cycles', 0) or 0
-        total_read_head_pointers += r.get('prop_read_head_pointers_cycles', 0) or 0
-        total_read_watcher_blocks += r.get('prop_read_watcher_blocks_cycles', 0) or 0
-        total_propagate += r.get('propagate_cycles', 0) or 0
+        total_propagate = r.get('propagate_cycles', 0) or 0
+        
+        if total_propagate == 0:
+            continue
+        
+        # Get cycles for each propagation component
+        insert_watchers = r.get('prop_insert_watchers_cycles', 0) or 0
+        read_clauses = r.get('prop_read_clauses_cycles', 0) or 0
+        read_head_pointers = r.get('prop_read_head_pointers_cycles', 0) or 0
+        read_watcher_blocks = r.get('prop_read_watcher_blocks_cycles', 0) or 0
+        
+        # Compute percentage for this test
+        component_percentages['Insert Watchers'].append(insert_watchers / total_propagate * 100.0)
+        component_percentages['Read Clauses'].append(read_clauses / total_propagate * 100.0)
+        component_percentages['Read Watchlist Table'].append(read_head_pointers / total_propagate * 100.0)
+        component_percentages['Read Watchers'].append(read_watcher_blocks / total_propagate * 100.0)
     
-    if total_propagate == 0:
+    # Compute average percentage across all tests
+    breakdown_pct = {}
+    for name in component_names:
+        if component_percentages[name]:
+            breakdown_pct[name] = sum(component_percentages[name]) / len(component_percentages[name])
+        else:
+            breakdown_pct[name] = 0.0
+    
+    if not any(breakdown_pct.values()):
         return {}
-    
-    # Build breakdown dict with raw cycles
-    breakdown_cycles = {
-        'Insert Watchers': total_insert_watchers,
-        # 'Polling for Busy': total_polling,
-        'Read Clauses': total_read_clauses,
-        'Read Watchlist Table': total_read_head_pointers,
-        'Read Watchers': total_read_watcher_blocks,
-    }
-    
-    # Compute raw percentages
-    breakdown_pct = {k: (v / total_propagate * 100.0) for k, v in breakdown_cycles.items()}
     
     return breakdown_pct
 
 
-def plot_breakdowns(runtime_breakdown, prop_breakdown, output_pdf):
+def plot_breakdowns(runtime_breakdown, runtime_raw, prop_breakdown, output_pdf):
     """Create a PDF showing runtime breakdown with propagation subdivided.
     
     The propagation bar in the runtime breakdown is stacked to show its
     internal breakdown, while other components are shown as solid bars.
+    Priority Queue shows a box and whisker plot.
     All sorted by percentage in descending order.
     """
     # Sort by percentage (descending)
@@ -194,15 +193,27 @@ def plot_breakdowns(runtime_breakdown, prop_breakdown, output_pdf):
                     if j < 3:
                         ax.text(left + scaled_pct/2, y_pos, 
                                f'{scaled_pct:.1f}%',
-                               ha='center', va='center', fontsize=16, fontweight='bold')
+                               ha='center', va='center', fontsize=22)
                     
                     left += scaled_pct
                 
                 labels.append(f'Propagate')
                 # Add total propagate percentage at the end
                 ax.text(propagate_pct + 0.5, y_pos, 
-                       f'{propagate_pct:.1f}%', ha='left', va='center', 
-                       fontsize=16, fontweight='bold')
+                       f'{propagate_pct:.1f}%', ha='left', va='center', fontsize=22)
+            elif component == 'Priority Queue' and runtime_raw.get('Priority Queue'):
+                # Box and whisker plot for Priority Queue
+                pq_data = runtime_raw['Priority Queue']
+                bp = ax.boxplot([pq_data], positions=[y_pos], vert=False, widths=0.6,
+                               patch_artist=True, showmeans=True,
+                               boxprops=dict(facecolor=main_colors[i % len(main_colors)], alpha=0.7),
+                               medianprops=dict(color='red', linewidth=2.5),
+                               meanprops=dict(marker='D', markerfacecolor='black', markersize=10))
+                labels.append(component)
+                
+                # Add mean percentage label
+                ax.text(pct + 0.5, y_pos, f'{pct:.1f}%', 
+                       ha='left', va='center', fontsize=22)
             else:
                 # Regular solid bar for non-propagate components
                 bar = ax.barh(y_pos, pct, color=main_colors[i % len(main_colors)],
@@ -211,14 +222,14 @@ def plot_breakdowns(runtime_breakdown, prop_breakdown, output_pdf):
                 
                 # Add percentage label
                 ax.text(pct + 0.5, y_pos, f'{pct:.1f}%', 
-                       ha='left', va='center', fontsize=16)
+                       ha='left', va='center', fontsize=22)
             
             y_pos += 1
         
         ax.set_yticks(range(len(labels)))
-        ax.set_yticklabels(labels, fontsize=18)
-        ax.set_xlabel('Percentage of Total Runtime (%)', fontsize=20, fontweight='bold')
-        ax.tick_params(axis='x', which='major', labelsize=18)
+        ax.set_yticklabels(labels, fontsize=24)
+        ax.set_xlabel('Percentage of Total Runtime (%)', fontsize=26)
+        ax.tick_params(axis='x', which='major', labelsize=22)
         
         max_val = max([item[1] for item in runtime_sorted])
         ax.set_xlim(0, max_val * 1.15 if max_val else 100)
@@ -230,10 +241,10 @@ def plot_breakdowns(runtime_breakdown, prop_breakdown, output_pdf):
                                             label=prop_comp)
                             for j, (prop_comp, _) in enumerate(prop_sorted)]
             ax.legend(handles=legend_patches, loc='upper right', 
-                     title='Propagation Components', fontsize=16, title_fontsize=18)
+                     title='Propagation Components', fontsize=20, title_fontsize=22)
     else:
         ax.text(0.5, 0.5, 'No runtime breakdown data available', 
-                ha='center', va='center', transform=ax.transAxes, fontsize=12)
+                ha='center', va='center', transform=ax.transAxes, fontsize=18)
         ax.set_xlim(0, 100)
     
     plt.tight_layout()
@@ -262,19 +273,19 @@ def plot_breakdown_folder(folder_path, output_pdf=None):
         print(f"No valid log files found in {folder_path}")
         return
     
-    # Filter to finished tests
-    finished = [r for r in results if r.get('result') in ('SAT', 'UNSAT')]
+    # Filter to finished tests (including UNKNOWNs)
+    finished = [r for r in results if r.get('result') in ('SAT', 'UNSAT', 'UNKNOWN')]
     
     if not finished:
-        print(f"No finished tests (SAT/UNSAT) found in {folder_path}")
+        print(f"No finished tests (SAT/UNSAT/UNKNOWN) found in {folder_path}")
         print(f"Total tests parsed: {len(results)}")
         return
     
     print(f"Successfully parsed: {len(results)} files")
-    print(f"Finished tests (SAT/UNSAT): {len(finished)}")
+    print(f"Finished tests (SAT/UNSAT/UNKNOWN): {len(finished)}")
     
     # Compute breakdowns
-    runtime_breakdown = compute_runtime_breakdown(results)
+    runtime_breakdown, runtime_raw = compute_runtime_breakdown(results)
     prop_breakdown = compute_propagation_breakdown(results)
     
     if not runtime_breakdown and not prop_breakdown:
@@ -299,7 +310,7 @@ def plot_breakdown_folder(folder_path, output_pdf=None):
     
     # Generate plot
     if output_pdf:
-        plot_breakdowns(runtime_breakdown, prop_breakdown, output_pdf)
+        plot_breakdowns(runtime_breakdown, runtime_raw, prop_breakdown, output_pdf)
     else:
         print("\nNo output file specified. Use: python plot_breakdown.py <logs_folder> <output.pdf>")
 
