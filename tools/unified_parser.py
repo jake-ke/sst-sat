@@ -59,7 +59,7 @@ def parse_minisat_log(log_file_path, content):
     """Parse minisat format log file.
     
     Extracts a subset of information available in minisat logs:
-    - Test case name and SAT/UNSAT result (or TIMEDOUT/UNKNOWN)
+    - Test case name and SAT/UNSAT/TIMEOUT result (INDETERMINATE -> TIMEOUT)
     - Number of variables and clauses
     - Memory used
     - Runtime (converted to ms for consistency)
@@ -146,7 +146,9 @@ def parse_minisat_log(log_file_path, content):
             result['result'] = 'UNSAT'
         elif 'SATISFIABLE' in content and 'UNSATISFIABLE' not in content:
             result['result'] = 'SAT'
-        # Any other case (INDETERMINATE, timeout, incomplete, etc.) stays as UNKNOWN
+        elif 'INDETERMINATE' in content:
+            result['result'] = 'TIMEOUT'
+        # Any other case (incomplete, error, etc.) stays as UNKNOWN
         
     except Exception as e:
         print(f"Warning: Partial parse of minisat log {log_file_path}: {e}")
