@@ -5,7 +5,7 @@ SCRIPT_NAME=$(basename "$0")
 
 # Check if help is requested or show usage
 show_usage() {
-    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--prefetch] [--spec] [--folder FOLDER] [--num-seeds NUM] [--timeout-cycles CYCLES] [-j jobs]"
+    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--prefetch] [--spec] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [-j jobs]"
     echo "Options:"
     echo "  -b, --bench-dir DIR  Directory containing benchmark CNF files (required)"
     echo "  --ram2-cfg FILE       Ramulator2 configuration file"
@@ -21,9 +21,11 @@ show_usage() {
     echo "  --spec                Enable speculative propagation"
     echo "  --folder FOLDER       Name for the logs folder (default: logs)"
     echo "  --num-seeds NUM       Number of random seeds to run (default: 1)"
+    echo "  --seed NUM            Run a single seed with the specified seed number (overrides --num-seeds)"
     echo "  --timeout-cycles N    Maximum solver cycles before timing out (0 or omit for unlimited)"
     echo "  -j, --jobs JOBS       Number of parallel jobs"
     echo "Example: $SCRIPT_NAME --bench-dir /path/to/benchmarks --l1-size 32KiB --l1-latency 2 --mem-latency 200ns --prefetch --timeout-cycles 100000000 --folder quick_test --num-seeds 5 -j 8"
+    echo "Example: $SCRIPT_NAME --bench-dir /path/to/benchmarks --seed 42 --folder test_seed42 -j 4"
 }
 
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then
@@ -46,6 +48,7 @@ FOLDER_NAME="logs"
 PREFETCH=""
 SPEC=""
 NUM_SEEDS=1
+SPECIFIC_SEED=""
 TIMEOUT_CYCLES=""
 
 # Default number of parallel jobs (use available CPU cores)
@@ -203,6 +206,16 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        --seed)
+            if [[ "$2" =~ ^[0-9]+$ ]]; then
+                SPECIFIC_SEED=$2
+                shift 2
+            else
+                echo "Error: --seed requires a number argument"
+                show_usage
+                exit 1
+            fi
+            ;;
         --timeout-cycles)
             if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
                 TIMEOUT_CYCLES=$2
@@ -290,7 +303,11 @@ log_message "L2 cache size: ${L2_SIZE:-default}"
 log_message "L2 cache latency: ${L2_LATENCY:-default}"
 log_message "L2 cache bandwidth: ${L2_BW:-default}"
 log_message "Memory latency: ${MEM_LATENCY:-default}"
-log_message "Number of random seeds: $NUM_SEEDS"
+if [[ -n "$SPECIFIC_SEED" ]]; then
+    log_message "Running single seed: $SPECIFIC_SEED"
+else
+    log_message "Number of random seeds: $NUM_SEEDS (run from seed 0)"
+fi
 if [[ -n "$TIMEOUT_CYCLES" ]]; then
     log_message "Timeout cycles: $TIMEOUT_CYCLES"
 else
@@ -517,10 +534,17 @@ run_tests() {
     local tasks=()
     local num_tasks=0
     for file in ${all_files[@]}; do
-        for ((seed=0; seed<NUM_SEEDS; seed++)); do
-            tasks+=("$file|$seed")
+        if [[ -n "$SPECIFIC_SEED" ]]; then
+            # Run only the specified seed
+            tasks+=("$file|$SPECIFIC_SEED")
             num_tasks=$((num_tasks + 1))
-        done
+        else
+            # Run multiple seeds from 0 to NUM_SEEDS-1
+            for ((seed=0; seed<NUM_SEEDS; seed++)); do
+                tasks+=("$file|$seed")
+                num_tasks=$((num_tasks + 1))
+            done
+        fi
     done
 
     local total_runs=$num_tasks
