@@ -4,21 +4,18 @@ L2 Latency and Bandwidth Sweep Plotter
 
 This script plots PAR-2 scores over L2 latency and bandwidth in two subplots.
 
-The input takes:
-1. A directory containing folders with a common prefix
-2. A prefix (e.g., "base_l1_4_1") to filter folders
-
-Folder naming convention: <prefix>_l2_<bandwidth>_<latency>
-- bandwidth: L2 bandwidth multiplier (actual = bandwidth * 8 GB/s)
-- latency: L2 latency in cycles
+The script uses hardcoded lists of folder names for bandwidth and latency sweeps:
+- Latency sweep: base_l1_4_1_l2_8_* folders with varying latencies (32, 64, 96, 128, 160 cycles)
+- Bandwidth sweep: base_l1_-1_1_l2_*_32_*B folders with varying bandwidths
+  For bandwidth folders, actual BW (GB/s) = width (in bytes) * 2
 
 Each folder may contain multiple seed folders or a single seed.
 PAR-2 scoring is used: solved tests use actual time, unsolved/timeout tests
 are penalized with 2*timeout (default timeout: 36s).
 
-Usage: python plot_l2_sweep.py <directory> <prefix> [output.pdf] [--timeout SECONDS]
-Example: python plot_l2_sweep.py ../results base_l1_4_1 l2_sweep.pdf
-Example: python plot_l2_sweep.py ../results base_l1_4_1 l2_sweep.pdf --timeout 36
+Usage: python plot_l2_sweep.py <base_directory> [output.pdf] [--timeout SECONDS]
+Example: python plot_l2_sweep.py ../sat-isca26-data l2_sweep.pdf
+Example: python plot_l2_sweep.py ../sat-isca26-data l2_sweep.pdf --timeout 36
 """
 
 import sys
@@ -29,26 +26,33 @@ from unified_parser import parse_log_directory
 import re
 
 
-def parse_l2_config(folder_name, prefix):
+def parse_l2_config(folder_name):
     """Extract L2 bandwidth and latency from folder name.
     
     Args:
-        folder_name: e.g., "base_l1_4_1_l2_8_32"
-        prefix: e.g., "base_l1_4_1"
+        folder_name: e.g., "base_l1_4_1_l2_8_32" or "base_l1_-1_1_l2_1_32_64B"
     
     Returns:
-        (bandwidth, latency) tuple or (None, None) if parse fails
+        (bandwidth_gbps, latency) tuple or (None, None) if parse fails
+        For folders with width suffix (e.g., _64B), bandwidth = width * 2 (GB/s)
+        For folders without width suffix, bandwidth = multiplier * 8 (GB/s)
     """
-    if not folder_name.startswith(prefix):
-        return None, None
+    # Try pattern with width suffix: base_l1_-1_1_l2_<mult>_<lat>_<width>B
+    match_with_width = re.search(r'_l2_(\d+)_(\d+)_(\d+)B', folder_name)
+    if match_with_width:
+        # multiplier = int(match_with_width.group(1))  # Not used in this case
+        latency = int(match_with_width.group(2))
+        width_bytes = int(match_with_width.group(3))
+        bandwidth_gbps = width_bytes * 2  # width * 2 GB/s
+        return bandwidth_gbps, latency
     
-    suffix = folder_name[len(prefix):]
-    match = re.match(r'_l2_(\d+)_(\d+)', suffix)
-    
-    if match:
-        bandwidth = int(match.group(1))
-        latency = int(match.group(2))
-        return bandwidth, latency
+    # Try pattern without width suffix: base_l1_4_1_l2_<mult>_<lat>
+    match_no_width = re.search(r'_l2_(\d+)_(\d+)(?:_|$)', folder_name)
+    if match_no_width:
+        multiplier = int(match_no_width.group(1))
+        latency = int(match_no_width.group(2))
+        bandwidth_gbps = multiplier * 8  # multiplier * 8 GB/s
+        return bandwidth_gbps, latency
     
     return None, None
 
@@ -91,8 +95,8 @@ def compute_par2_score(results, timeout_seconds=3600):
     return (par2_total_ms / len(results)) / 1000.0
 
 
-def collect_sweep_data(directory, prefix, timeout_seconds=36):
-    """Collect PAR-2 data for all L2 configurations.
+def collect_sweep_data(base_directory, folder_names, timeout_seconds=36):
+    """Collect PAR-2 data for specified L2 configurations.
     
     Uses shared seed logic: determines common seeds across all folders and 
     only uses those consistently. For example, if one folder has only seed0, 
@@ -100,32 +104,38 @@ def collect_sweep_data(directory, prefix, timeout_seconds=36):
     then averages across seeds (matching parse_results.py behavior).
     
     Args:
-        directory: Directory containing folders with prefix
-        prefix: Prefix to match folder names
+        base_directory: Base directory containing the folders
+        folder_names: List of folder names to process
         timeout_seconds: Timeout in seconds for PAR-2 calculation (default: 36)
     
     Returns:
-        dict mapping (bandwidth, latency) to PAR-2 score
+        dict mapping (bandwidth_gbps, latency) to PAR-2 score
     """
-    directory = Path(directory)
+    base_directory = Path(base_directory)
     
-    if not directory.exists():
-        print(f"Error: Directory {directory} does not exist")
+    if not base_directory.exists():
+        print(f"Error: Directory {base_directory} does not exist")
         return None
     
-    # Find all folders matching the prefix
+    # Process specified folders
     matching_folders = []
-    for folder in directory.iterdir():
-        if folder.is_dir() and folder.name.startswith(prefix):
-            bandwidth, latency = parse_l2_config(folder.name, prefix)
-            if bandwidth is not None and latency is not None:
-                matching_folders.append((folder, bandwidth, latency))
+    for folder_name in folder_names:
+        folder = base_directory / folder_name
+        if not folder.exists() or not folder.is_dir():
+            print(f"Warning: Folder {folder} does not exist, skipping")
+            continue
+        
+        bandwidth_gbps, latency = parse_l2_config(folder_name)
+        if bandwidth_gbps is not None and latency is not None:
+            matching_folders.append((folder, bandwidth_gbps, latency))
+        else:
+            print(f"Warning: Could not parse config from {folder_name}, skipping")
     
     if not matching_folders:
-        print(f"Error: No folders found with prefix '{prefix}'")
+        print(f"Error: No valid folders found")
         return None
     
-    print(f"Found {len(matching_folders)} matching folders")
+    print(f"Processing {len(matching_folders)} folders")
     print(f"Using timeout: {timeout_seconds}s for PAR-2 calculation")
     
     # Determine shared seeds across all folders
@@ -228,8 +238,12 @@ def collect_sweep_data(directory, prefix, timeout_seconds=36):
     return sweep_data
 
 
-def organize_data_for_plotting(sweep_data):
+def organize_data_for_plotting(bw_sweep_data, lat_sweep_data):
     """Organize sweep data into separate datasets for bandwidth and latency sweeps.
+    
+    Args:
+        bw_sweep_data: Data points for bandwidth sweep (may be None)
+        lat_sweep_data: Data points for latency sweep (may be None)
     
     Returns:
         (bandwidth_data, latency_data) where each is a dict:
@@ -237,45 +251,55 @@ def organize_data_for_plotting(sweep_data):
         
     A sweep is considered valid only if there are at least 2 points with the fixed parameter.
     """
-    # Group by fixed latency (for bandwidth sweep)
-    bandwidth_data_raw = {}
-    for (bw, lat), runtime in sweep_data.items():
-        if lat not in bandwidth_data_raw:
-            bandwidth_data_raw[lat] = []
-        bandwidth_data_raw[lat].append((bw, runtime))
-    
-    # Filter to only include latencies with at least 2 bandwidth points (valid sweep)
     bandwidth_data = {}
-    for lat, points in bandwidth_data_raw.items():
-        if len(points) >= 2:
-            points.sort(key=lambda x: x[0])
-            bandwidth_data[lat] = points
-    
-    # Group by fixed bandwidth (for latency sweep)
-    latency_data_raw = {}
-    for (bw, lat), runtime in sweep_data.items():
-        if bw not in latency_data_raw:
-            latency_data_raw[bw] = []
-        latency_data_raw[bw].append((lat, runtime))
-    
-    # Filter to only include bandwidths with at least 2 latency points (valid sweep)
     latency_data = {}
-    for bw, points in latency_data_raw.items():
-        if len(points) >= 2:
-            points.sort(key=lambda x: x[0])
-            latency_data[bw] = points
+    
+    # Process bandwidth sweep data
+    if bw_sweep_data:
+        # Group by fixed latency (for bandwidth sweep)
+        bandwidth_data_raw = {}
+        for (bw, lat), runtime in bw_sweep_data.items():
+            if lat not in bandwidth_data_raw:
+                bandwidth_data_raw[lat] = []
+            bandwidth_data_raw[lat].append((bw, runtime))
+        
+        # Filter to only include latencies with at least 2 bandwidth points (valid sweep)
+        for lat, points in bandwidth_data_raw.items():
+            if len(points) >= 2:
+                points.sort(key=lambda x: x[0])
+                bandwidth_data[lat] = points
+    
+    # Process latency sweep data
+    if lat_sweep_data:
+        # Group by fixed bandwidth (for latency sweep)
+        latency_data_raw = {}
+        for (bw, lat), runtime in lat_sweep_data.items():
+            if bw not in latency_data_raw:
+                latency_data_raw[bw] = []
+            latency_data_raw[bw].append((lat, runtime))
+        
+        # Filter to only include bandwidths with at least 2 latency points (valid sweep)
+        for bw, points in latency_data_raw.items():
+            if len(points) >= 2:
+                points.sort(key=lambda x: x[0])
+                latency_data[bw] = points
     
     return bandwidth_data, latency_data
 
 
-def plot_sweeps(sweep_data, output_pdf):
+def plot_sweeps(bw_sweep_data, lat_sweep_data, output_pdf):
     """Create a PDF plot with two subplots: PAR-2 vs bandwidth (top) and PAR-2 vs latency (bottom).
     
     If only one type of sweep is found, still create both subplots but leave the empty one blank.
     Assumes only one sweep per subplot (no legends shown).
     Both subplots use the same y-axis scale for consistency.
+    
+    Args:
+        bw_sweep_data: Data points for bandwidth sweep
+        lat_sweep_data: Data points for latency sweep
+        output_pdf: Output PDF file path
     """
-    bandwidth_data, latency_data = organize_data_for_plotting(sweep_data)
+    bandwidth_data, latency_data = organize_data_for_plotting(bw_sweep_data, lat_sweep_data)
     
     has_bandwidth_sweep = len(bandwidth_data) > 0
     has_latency_sweep = len(latency_data) > 0
@@ -310,9 +334,8 @@ def plot_sweeps(sweep_data, output_pdf):
         # Assume only one latency (no legend needed)
         sorted_latencies = sorted(bandwidth_data.keys())
         lat = sorted_latencies[0]  # Take first (and assumed only) latency
-        bw_values, par2_values = zip(*bandwidth_data[lat])
-        # Convert bandwidth multiplier to actual GB/s
-        bw_gbps = [bw * 8 for bw in bw_values]
+        bw_gbps, par2_values = zip(*bandwidth_data[lat])
+        # Bandwidth is already in GB/s from parse_l2_config
         ax1.plot(bw_gbps, par2_values, marker='o', markersize=8, linewidth=2.5, color='#1f77b4')
     else:
         ax1.text(0.5, 0.5, 'Bandwidth sweep data not available', 
@@ -349,29 +372,54 @@ def plot_sweeps(sweep_data, output_pdf):
     plt.close()
 
 
-def plot_l2_sweep(directory, prefix, output_pdf=None, timeout_seconds=36):
+def plot_l2_sweep(base_directory, output_pdf=None, timeout_seconds=36):
     """Main function to collect data and generate L2 sweep plots.
     
     Args:
-        directory: Directory containing folders with the prefix
-        prefix: Prefix of folder names to match
+        base_directory: Base directory containing the sweep folders
         output_pdf: Output PDF file path
         timeout_seconds: Timeout in seconds for PAR-2 calculation (default: 36)
     """
-    print(f"Collecting data from: {directory}")
-    print(f"Folder prefix: {prefix}")
+    # Hardcoded folder names for latency sweep
+    latency_folders = [
+        'base_128KB/base_l1_4_1_l2_8_32',
+        'base_128KB/base_l1_4_1_l2_8_64',
+        'base_128KB/base_l1_4_1_l2_8_96',
+        'base_128KB/base_l1_4_1_l2_8_128',
+        'base_128KB/base_l1_4_1_l2_8_160',
+    ]
     
-    sweep_data = collect_sweep_data(directory, prefix, timeout_seconds)
+    # Hardcoded folder names for bandwidth sweep
+    bandwidth_folders = [
+        'bw/base_l1_-1_1_l2_1_32_8B',
+        'bw/base_l1_-1_1_l2_1_32_16B',
+        'bw/base_l1_-1_1_l2_1_32_32B',
+        'bw/base_l1_-1_1_l2_1_32_64B',
+        'bw/base_l1_-1_1_l2_2_32_128B',
+    ]
     
-    if sweep_data is None or not sweep_data:
+    print(f"Base directory: {base_directory}")
+    
+    # Collect data for bandwidth sweep
+    print("\n=== Collecting Bandwidth Sweep Data ===")
+    bw_sweep_data = collect_sweep_data(base_directory, bandwidth_folders, timeout_seconds)
+    
+    # Collect data for latency sweep
+    print("\n=== Collecting Latency Sweep Data ===")
+    lat_sweep_data = collect_sweep_data(base_directory, latency_folders, timeout_seconds)
+    
+    if (bw_sweep_data is None or not bw_sweep_data) and (lat_sweep_data is None or not lat_sweep_data):
         print("Error: No valid data collected")
         return
     
     print(f"\n=== Sweep Data Summary ===")
-    print(f"Total configurations: {len(sweep_data)}")
+    if bw_sweep_data:
+        print(f"Bandwidth sweep configurations: {len(bw_sweep_data)}")
+    if lat_sweep_data:
+        print(f"Latency sweep configurations: {len(lat_sweep_data)}")
     
     # Organize and print summary
-    bandwidth_data, latency_data = organize_data_for_plotting(sweep_data)
+    bandwidth_data, latency_data = organize_data_for_plotting(bw_sweep_data, lat_sweep_data)
     
     if bandwidth_data:
         print(f"\nBandwidth sweep (fixed latencies): {len(bandwidth_data)} latency points")
@@ -383,30 +431,35 @@ def plot_l2_sweep(directory, prefix, output_pdf=None, timeout_seconds=36):
     if latency_data:
         print(f"\nLatency sweep (fixed bandwidths): {len(latency_data)} bandwidth points")
         for bw in sorted(latency_data.keys()):
-            print(f"  Bandwidth = {bw * 8} GB/s: {len(latency_data[bw])} latency points")
+            print(f"  Bandwidth = {bw} GB/s: {len(latency_data[bw])} latency points")
     else:
         print(f"\nLatency sweep: No valid sweep found (need at least 2 latency points with same bandwidth)")
     
     if output_pdf and (bandwidth_data or latency_data):
-        plot_sweeps(sweep_data, output_pdf)
+        plot_sweeps(bw_sweep_data, lat_sweep_data, output_pdf)
     elif not (bandwidth_data or latency_data):
         print("\nError: No valid sweeps found. Need at least 2 points for a sweep.")
 
 
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: python plot_l2_sweep.py <directory> <prefix> [output.pdf] [--timeout SECONDS]")
-        print("Example: python plot_l2_sweep.py ../results base_l1_4_1 l2_sweep.pdf")
-        print("Example: python plot_l2_sweep.py ../results base_l1_4_1 l2_sweep.pdf --timeout 36")
+    if len(sys.argv) < 2:
+        print("Usage: python plot_l2_sweep.py <base_directory> [output.pdf] [--timeout SECONDS]")
+        print("\nArguments:")
+        print("  base_directory           Base directory containing sweep folders")
+        print("  output.pdf               Output PDF file (optional, default: l2_sweep.pdf)")
+        print("\nOptions:")
+        print("  --timeout SECONDS        Timeout for PAR-2 calculation (default: 36)")
+        print("\nExample:")
+        print("  python plot_l2_sweep.py ../sat-isca26-data l2_sweep.pdf")
+        print("  python plot_l2_sweep.py ../sat-isca26-data l2_sweep.pdf --timeout 36")
         sys.exit(1)
     
-    directory = sys.argv[1]
-    prefix = sys.argv[2]
+    base_directory = sys.argv[1]
     output_pdf = None
     timeout_seconds = 36  # Default timeout
     
-    # Parse arguments
-    i = 3
+    # Parse remaining arguments
+    i = 2
     while i < len(sys.argv):
         if sys.argv[i] == '--timeout' and i + 1 < len(sys.argv):
             timeout_seconds = float(sys.argv[i + 1])
@@ -419,9 +472,9 @@ def main():
     
     if output_pdf is None:
         # Auto-generate output filename
-        output_pdf = f"l2_sweep_{prefix}.pdf"
+        output_pdf = "l2_sweep.pdf"
     
-    plot_l2_sweep(directory, prefix, output_pdf, timeout_seconds)
+    plot_l2_sweep(base_directory, output_pdf, timeout_seconds)
 
 
 if __name__ == "__main__":
