@@ -48,8 +48,8 @@ public:
     // SST ELI Registrations
     SST_ELI_REGISTER_COMPONENT(
         SATSolver,
-        "satsolver-opt3-new-heap",
-        "SATSolver-opt3-new-heap",
+        "satsolver-opt4-new-learn",
+        "SATSolver-opt4-new-learn",
         SST_ELI_ELEMENT_VERSION(1,0,0),
         "SAT Solver Component",
         COMPONENT_CATEGORY_PROCESSOR

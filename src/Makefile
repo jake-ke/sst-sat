@@ -32,7 +32,7 @@ endif
 # Source files
 SOURCES = memory_allocator.cc cache_profiler.cc async_base.cc async_heap.cc async_watches.cc async_clauses.cc async_activity.cc async_var_activity.cc satsolver.cc directedprefetch.cc pipelined_heap.cc pipelined_heap_test.cc
 OBJECTS = $(SOURCES:%.cc=$(BUILD_DIR)/%.o)
-TARGET = $(BUILD_DIR)/libsatsolver-opt3-new-heap.so
+TARGET = $(BUILD_DIR)/libsatsolver-opt4-new-learn.so
 
 # Build library
 all: $(TARGET)
@@ -48,9 +48,9 @@ $(BUILD_DIR)/%.o: %.cc | $(BUILD_DIR)
 
 # Install
 install: $(TARGET)
-	sst-register satsolver-opt3-new-heap satsolver-opt3-new-heap_LIBDIR=$(abspath $(BUILD_DIR))
-	sst-register SST_ELEMENT_SOURCE satsolver-opt3-new-heap=$(CURDIR)
-	sst-register SST_ELEMENT_TESTS satsolver-opt3-new-heap=$(abspath ../tests)
+	sst-register satsolver-opt4-new-learn satsolver-opt4-new-learn_LIBDIR=$(abspath $(BUILD_DIR))
+	sst-register SST_ELEMENT_SOURCE satsolver-opt4-new-learn=$(CURDIR)
+	sst-register SST_ELEMENT_TESTS satsolver-opt4-new-learn=$(abspath ../tests)
 
 # Clean
 clean:
