@@ -2,13 +2,17 @@
 """
 SAT Solver Multi-Folder Comparison Plotter
 
-This script compares results from multiple input folders and generates comparison charts.
+This script compares results from multiple input folders or raw text files and generates comparison charts.
+Supports both log directories (parsed with unified_parser) and raw CSV/text files with columns:
+  - name/test/test_case: test case name
+  - par2_ms/par-2/sim_time_ms: timing data in milliseconds
 
-Usage: python plot_comparison.py <folder1> <folder2> [folder3] [...] [--timeout SECONDS] [--output-dir DIR]
+Usage: python plot_comparison.py <folder1|file1> <folder2|file2> [...] [--timeout SECONDS] [--output-dir DIR]
 
 Examples:
     python plot_comparison.py runs/baseline runs/optimized --output-dir results/
     python plot_comparison.py logs_4MiB logs_8MiB logs_16MiB --timeout 36
+    python plot_comparison.py results1.txt results2.txt --names "Config A" "Config B"
 """
 
 import sys
@@ -16,23 +20,141 @@ import csv
 import argparse
 from pathlib import Path
 from collections import defaultdict
+import math
 import matplotlib.pyplot as plt
 import matplotlib.backends.backend_pdf
+
+# Unified figure size for all charts
+FIG_SIZE = (10, 6)
 from unified_parser import parse_log_directory, format_bytes
 
 
 # Manual exclusion list: add test case names here to exclude them from all comparisons
 MANUAL_EXCLUSIONS = set([
-    # '1427381a809c64c721838894ece6756d-shuffling-2-s25242449-of-bench-sat04-727.used-as.sat04-753.cnf',
-    # '25a654a029421baed232de5e6e19c72e-mp1-qpr-bmp280-driver-14.cnf',
-    # 'e17d3f94f2c0e11ce6143bc4bf298bd7-mp1-qpr-bmp280-driver-5.cnf',
-    # 'e185ebbd92c23ab460a3d29046eccf1d-group_mulr.cnf',
-    # Example: 'test_case_name_2',
+    # "080896c437245ac25eb6d3ad6df12c4f-bv-term-small-rw_1492.smt2.cnf",
+    # "e17d3f94f2c0e11ce6143bc4bf298bd7-mp1-qpr-bmp280-driver-5.cnf",
+    # "e185ebbd92c23ab460a3d29046eccf1d-group_mulr.cnf",
 ])
+
+# Manual exclusive test set: if non-empty, ONLY these tests are considered for
+# comparison logic (subject still to MANUAL_EXCLUSIONS removal). Any test listed
+# here but missing/ERROR/UNKNOWN in a folder will appear in the exclusion table.
+MANUAL_EXCLUSIVE_TESTS = set([
+    # >120k variables or >640k clauses
+    # "06e928088bd822602edb83e41ce8dadb-satcoin-genesis-SAT-10.cnf",
+    # "43e492bccfd57029b758897b17d7f04f-pb_300_09_lb_07.cnf",
+    # "aacfb8797097f698d14337d3a04f3065-barman-pfile06-022.sas.ex.7.cnf",
+    # "ff6b6ad55c0dffe034bc8daa9129ff1d-satcoin-genesis-SAT-10-sc2018.cnf",
+
+    # > 1m clauses
+    # "e185ebbd92c23ab460a3d29046eccf1d-group_mulr.cnf",  # did not finish
+    # "91c69a1dedfa5f2b3779e38c48356593-Problem14_label20_true-unreach-call.c.cnf",
+    # "7b5895f110a6aa5a5ac5d5a6eb3fd322-g2-ak128modasbg1sbisc.cnf",
+    # "7aa3b29dde431cdacf17b2fb9a10afe4-Mario-t-hard-2_c18.cnf",
+    # "fce130da1efd25fa9b12e59620a4146b-g2-ak128diagobg1btaig.cnf",
+    # "1427381a809c64c721838894ece6756d-shuffling-2-s25242449-of-bench-sat04-727.used-as.sat04-753.cnf",
+])
+
+def normalize_test_case(name: str) -> str:
+    """Normalize test case name by stripping common SAT/SMT file extensions.
+    This enables matching raw names (without extension) to log-derived names.
+    """
+    if not name:
+        return name
+    # Known extensions (lowercase)
+    known_exts = {'.cnf', '.dimacs', '.smt2', '.xml', '.c', '.txt', '.log'}
+    lower = name.lower()
+    for ext in known_exts:
+        if lower.endswith(ext):
+            return name[:-(len(ext))]
+    return name
+
+
+def parse_raw_text_file(file_path, timeout_seconds):
+    """Parse a raw text file with columns: name, sim_time_ms, par2_ms (or similar).
+    
+    Returns:
+        list of result dicts with keys: test_case, result, sim_time_ms, etc.
+    """
+    results = []
+    timeout_ms = timeout_seconds * 1000.0
+    
+    with open(file_path, 'r') as f:
+        lines = [line.strip() for line in f if line.strip()]
+    
+    if not lines:
+        return []
+    
+    # Parse header
+    header = lines[0].lower()
+    cols = [c.strip() for c in header.split(',')]
+    
+    # Find relevant columns
+    name_col = None
+    par2_col = None
+    sim_time_col = None
+    
+    for i, col in enumerate(cols):
+        if col in ('name', 'test', 'testcase', 'test_case', 'benchmark'):
+            name_col = i
+        elif 'par2' in col or 'par-2' in col:
+            par2_col = i
+        elif 'sim_time' in col or 'time' in col:
+            sim_time_col = i
+    
+    if name_col is None:
+        print(f"Warning: Could not find name column in {file_path}")
+        return []
+    
+    if par2_col is None and sim_time_col is None:
+        print(f"Warning: Could not find time column in {file_path}")
+        return []
+    
+    # Use par2 column if available, otherwise sim_time
+    time_col = par2_col if par2_col is not None else sim_time_col
+    
+    # Parse data rows
+    for line in lines[1:]:
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) <= max(name_col, time_col):
+            continue
+        
+        test_case = parts[name_col]
+        try:
+            time_ms = float(parts[time_col])
+        except (ValueError, IndexError):
+            continue
+        
+        # Determine result based on time
+        if time_ms >= 2 * timeout_ms:
+            result = 'TIMEOUT'
+        elif time_ms > timeout_ms:
+            result = 'TIMEOUT'
+        else:
+            # Assume solved if within timeout
+            result = 'SAT'  # We don't know if SAT or UNSAT from raw data
+        
+        results.append({
+            'original_test_case': test_case,
+            'test_case': test_case,  # this specific raw text format does not have extensions
+            'result': result,
+            'sim_time_ms': time_ms,
+            'total_memory_bytes': 0,
+            'variables': 0,
+            'clauses': 0,
+        })
+    
+    return results
+
+
+def is_raw_text_file(path):
+    """Check if path is a raw text file (not a directory)."""
+    p = Path(path)
+    return p.is_file() and p.suffix in ('.txt', '.csv', '.tsv', '')
 
 
 def compute_metrics_for_folder(folder_path, timeout_seconds):
-    """Parse a folder and compute key metrics.
+    """Parse a folder or raw text file and compute key metrics.
     
     Returns:
         dict with keys:
@@ -44,6 +166,49 @@ def compute_metrics_for_folder(folder_path, timeout_seconds):
     """
     folder_path = Path(folder_path)
     
+    # Check if it's a raw text file
+    if is_raw_text_file(folder_path):
+        results = parse_raw_text_file(folder_path, timeout_seconds)
+        
+        if not results:
+            return {
+                'results': [],
+                'par2_score': None,
+                'solved_count': 0,
+                'total_count': 0,
+                'excluded_tests': []
+            }
+        
+        # Calculate metrics
+        timeout_ms = timeout_seconds * 1000.0
+        par2_penalty = 2 * timeout_ms
+        
+        par2_total = 0.0
+        solved_within_timeout = 0
+        valid_results = [r for r in results if r.get('result') not in ('ERROR', 'UNKNOWN')]
+        
+        for r in valid_results:
+            if r['result'] == 'TIMEOUT':
+                par2_total += par2_penalty
+            else:
+                sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+                if sim_ms <= timeout_ms:
+                    par2_total += sim_ms
+                    solved_within_timeout += 1
+                else:
+                    par2_total += par2_penalty
+        
+        par2_score = (par2_total / len(valid_results)) / 1000.0 if valid_results else None
+        
+        return {
+            'results': results,
+            'par2_score': par2_score,
+            'solved_count': solved_within_timeout,
+            'total_count': len(valid_results),
+            'excluded_tests': []
+        }
+    
+    # Otherwise, treat as directory and use unified_parser
     # Check for multi-seed layout
     seed_dirs = [p for p in sorted(folder_path.glob('seed*')) if p.is_dir()]
     
@@ -99,7 +264,7 @@ def compute_metrics_for_folder(folder_path, timeout_seconds):
             if not entries:
                 continue
             
-            agg = {'test_case': case}
+            agg = {'original_test_case': case, 'test_case': normalize_test_case(case)}
             
             # Determine aggregate result label
             seed_labels = [e.get('result') for e in entries]
@@ -204,6 +369,13 @@ def compute_metrics_for_folder(folder_path, timeout_seconds):
             
             if r.get('result') == 'TIMEOUT':
                 r['sim_time_ms'] = par2_penalty_ms
+
+        # Apply normalization to single-run results
+        for r in results:
+            tc = r.get('test_case')
+            if tc is not None:
+                r['original_test_case'] = tc
+                r['test_case'] = normalize_test_case(tc)
     
     # Collect excluded tests
     excluded_tests = [r['test_case'] for r in results if r.get('result') in ('ERROR', 'UNKNOWN')]
@@ -238,8 +410,13 @@ def compute_metrics_for_folder(folder_path, timeout_seconds):
     }
 
 
-def get_shared_test_set(folder_metrics):
+def get_shared_test_set(folder_metrics, timeout_seconds=None, exclude_timeouts=False):
     """Determine the shared set of tests that finished (not ERROR/UNKNOWN) in all folders.
+    
+    Args:
+        folder_metrics: dict of folder results
+        timeout_seconds: timeout value in seconds (required if exclude_timeouts=True)
+        exclude_timeouts: if True, also exclude TIMEOUT tests from shared set
     
     Returns:
         tuple of (shared_tests: set, exclusion_table: list of tuples)
@@ -248,47 +425,78 @@ def get_shared_test_set(folder_metrics):
     if not folder_metrics:
         return set(), []
     
-    # Build per-folder test status maps
-    folder_test_status = {}
+    timeout_ms = timeout_seconds * 1000.0 if timeout_seconds else None
+    
+    # Build per-folder test status maps and timing info
+    folder_test_info = {}
     for folder_name, metrics in folder_metrics.items():
-        status_map = {}
+        info_map = {}
         for r in metrics['results']:
             test_case = r.get('test_case', '')
             result = r.get('result', 'UNKNOWN')
             primary_label = result.split()[0] if result else 'UNKNOWN'
-            status_map[test_case] = primary_label
-        folder_test_status[folder_name] = status_map
+            try:
+                sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                sim_ms = 0.0
+            info_map[test_case] = (primary_label, sim_ms)
+        folder_test_info[folder_name] = info_map
     
     # Find all test cases present in any folder
     all_tests = set()
-    for status_map in folder_test_status.values():
-        all_tests.update(status_map.keys())
+    for info_map in folder_test_info.values():
+        all_tests.update(info_map.keys())
+
+    # Normalize manual exclusions and exclusives for matching
+    normalized_exclusions = {normalize_test_case(n) for n in MANUAL_EXCLUSIONS}
+    normalized_exclusive = {normalize_test_case(n) for n in MANUAL_EXCLUSIVE_TESTS}
+
+    if normalized_exclusive:
+        # Use the normalized exclusive set as candidate tests (include even if missing to record exclusion)
+        candidate_tests = sorted(normalized_exclusive)
+    else:
+        candidate_tests = sorted(all_tests)
     
-    # Determine shared tests (finished in ALL folders)
+    # Determine shared tests (finished in ALL folders, optionally excluding timeouts)
     shared_tests = set()
     exclusion_table = []
     
-    for test_case in sorted(all_tests):
-        # Check manual exclusion list first
-        if test_case in MANUAL_EXCLUSIONS:
+    for test_case in candidate_tests:
+        # Check manual exclusion list first (normalized)
+        if test_case in normalized_exclusions:
             exclusion_table.append((test_case, 'MANUAL', 'MANUAL_EXCLUSION'))
             continue
         
-        is_finished_in_all = True
+        is_valid_in_all = True
         excluding_folder = None
         excluding_reason = None
         
         for folder_name in sorted(folder_metrics.keys()):
-            status_map = folder_test_status[folder_name]
-            status = status_map.get(test_case, 'MISSING')
+            info_map = folder_test_info[folder_name]
+            if test_case not in info_map:
+                is_valid_in_all = False
+                excluding_folder = folder_name
+                excluding_reason = 'MISSING'
+                break
             
-            if status in ('ERROR', 'UNKNOWN', 'MISSING'):
-                is_finished_in_all = False
+            status, sim_ms = info_map[test_case]
+            
+            # Always exclude ERROR/UNKNOWN
+            if status in ('ERROR', 'UNKNOWN'):
+                is_valid_in_all = False
                 excluding_folder = folder_name
                 excluding_reason = status
                 break
+            
+            # Optionally exclude TIMEOUT
+            if exclude_timeouts and timeout_ms is not None:
+                if status == 'TIMEOUT' or (status in ('SAT', 'UNSAT') and sim_ms > timeout_ms):
+                    is_valid_in_all = False
+                    excluding_folder = folder_name
+                    excluding_reason = 'TIMEOUT'
+                    break
         
-        if is_finished_in_all:
+        if is_valid_in_all:
             shared_tests.add(test_case)
         else:
             exclusion_table.append((test_case, excluding_folder, excluding_reason))
@@ -337,6 +545,68 @@ def compute_par2_on_shared_set(folder_metrics, shared_tests, timeout_seconds):
     return par2_scores
 
 
+def compute_geomean_speedups(folder_metrics, shared_tests, timeout_seconds, baseline_name):
+    """Compute geometric mean speedup for each folder vs baseline using the shared test set.
+
+    Speedup per test = t_baseline / t_config with times in milliseconds.
+    - Uses PAR-2 effective times: timeouts or >timeout get 2*timeout penalty.
+    - Computes over the provided shared_tests set (which may already have timeouts excluded).
+
+    Returns: dict mapping folder_name -> geomean_speedup (float or None).
+    Baseline has speedup 1.0.
+    """
+    timeout_ms = timeout_seconds * 1000.0
+    penalty_ms = 2 * timeout_ms
+
+    # Build mapping folder -> test_case -> (result, sim_ms)
+    folder_case_map = {}
+    for folder_name, metrics in folder_metrics.items():
+        case_map = {}
+        for r in metrics['results']:
+            tc = r.get('test_case')
+            if tc not in shared_tests:
+                continue
+            try:
+                sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                sim_ms = penalty_ms
+            case_map[tc] = (r.get('result'), sim_ms)
+        folder_case_map[folder_name] = case_map
+
+    geomeans = {}
+    baseline_map = folder_case_map.get(baseline_name, {})
+
+    for folder_name in folder_metrics.keys():
+        if folder_name == baseline_name:
+            geomeans[folder_name] = 1.0
+            continue
+
+        ln_sum = 0.0
+        n = 0
+        case_map = folder_case_map.get(folder_name, {})
+        
+        # PAR-2 over all shared tests
+        for tc in shared_tests:
+            b = baseline_map.get(tc)
+            c = case_map.get(tc)
+            if not b or not c:
+                continue
+            b_res, b_ms = b
+            c_res, c_ms = c
+            tb_eff = b_ms if (b_res in ('SAT', 'UNSAT') and b_ms <= timeout_ms) else penalty_ms
+            tc_eff = c_ms if (c_res in ('SAT', 'UNSAT') and c_ms <= timeout_ms) else penalty_ms
+            if tc_eff <= 0 or tb_eff <= 0:
+                continue
+            speedup = tb_eff / tc_eff
+            if speedup <= 0:
+                continue
+            ln_sum += math.log(speedup)
+            n += 1
+        geomeans[folder_name] = math.exp(ln_sum / n) if n > 0 else None
+
+    return geomeans
+
+
 def plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests, 
                           exclusion_table, timeout_seconds, output_dir):
     """Generate all comparison charts and save to PDF."""
@@ -347,187 +617,181 @@ def plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests,
     
     with matplotlib.backends.backend_pdf.PdfPages(pdf_path) as pdf:
         # Chart 1: PAR-2 Score Comparison (shared set)
-        fig, ax = plt.subplots(figsize=(10, 6))
+        fig, ax = plt.subplots(figsize=FIG_SIZE)
         
         folder_names = list(folder_metrics.keys())
         par2_values = [shared_par2_scores[name][0] for name in folder_names]
         solved_counts = [shared_par2_scores[name][1] for name in folder_names]
         total_count = shared_par2_scores[folder_names[0]][2] if folder_names else 0
-        
-        bars = ax.bar(range(len(folder_names)), par2_values, color='steelblue', alpha=0.7)
-        ax.set_xlabel('Configuration', fontsize=12)
-        ax.set_ylabel(f'PAR-2 Score (seconds, timeout={timeout_seconds}s)', fontsize=12)
-        ax.set_title(f'PAR-2 Comparison on Shared Test Set ({total_count} tests)', fontsize=14, fontweight='bold')
-        ax.set_xticks(range(len(folder_names)))
-        ax.set_xticklabels(folder_names, rotation=45, ha='right')
+        # Grouped (clustered) bar chart with a single implicit category.
+        # We suppress x-axis tick labels; legend conveys configuration names.
+        x_positions = [i for i in range(len(folder_names))]
+        bars = ax.bar(x_positions, par2_values, color=plt.cm.tab20.colors[:len(folder_names)], alpha=0.85, edgecolor='black', linewidth=0.8)
+        ax.set_ylabel('PAR-2 (s)', fontsize=26)
+        ax.set_xticks([])  # no x-axis categories shown
+        ax.tick_params(axis='y', labelsize=22)
         ax.grid(axis='y', alpha=0.3)
+        # Boxed legend with folder names
+        ax.legend(bars, folder_names, loc='upper right', fontsize=18, frameon=True)
         
-        # Add value labels on bars
+        # Set y-axis limit to provide more space for labels
+        max_par2 = max(par2_values) if par2_values else 1
+        ax.set_ylim(0, max_par2 * 1.2)
+        
+        # Add value labels on bars (PAR-2 and solved count side by side)
         for i, (bar, par2, solved) in enumerate(zip(bars, par2_values, solved_counts)):
             height = bar.get_height()
             ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{par2:.1f}s\n({solved}/{total_count})',
-                   ha='center', va='bottom', fontsize=9)
+                    f'{par2:.2f} s\nSolved: {solved}',
+                    ha='center', va='bottom', fontsize=18)
         
         plt.tight_layout()
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
-        
-        # Chart 2: Solved Count Comparison
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        bars = ax.bar(range(len(folder_names)), solved_counts, color='forestgreen', alpha=0.7)
-        ax.set_xlabel('Configuration', fontsize=12)
-        ax.set_ylabel('Number of Tests Solved', fontsize=12)
-        ax.set_title(f'Solved Tests Comparison (Shared Set: {total_count} tests)', fontsize=14, fontweight='bold')
-        ax.set_xticks(range(len(folder_names)))
-        ax.set_xticklabels(folder_names, rotation=45, ha='right')
-        ax.set_ylim(0, total_count * 1.1)
-        ax.grid(axis='y', alpha=0.3)
-        
-        # Add value labels
-        for bar, solved in zip(bars, solved_counts):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{solved}\n({100*solved/total_count:.1f}%)',
-                   ha='center', va='bottom', fontsize=9)
-        
-        plt.tight_layout()
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
-        
-        # Chart 3: Exclusion Table (if there are exclusions)
-        if exclusion_table:
-            fig, ax = plt.subplots(figsize=(11, max(6, len(exclusion_table) * 0.15)))
-            ax.axis('tight')
-            ax.axis('off')
-            
-            # Create table data
-            table_data = [['Test Case', 'Excluding Folder', 'Reason']]
-            for test_case, folder, reason in exclusion_table:
-                table_data.append([test_case, folder, reason])
-            
-            table = ax.table(cellText=table_data, cellLoc='left', loc='center',
-                           colWidths=[0.5, 0.3, 0.2])
-            table.auto_set_font_size(False)
-            table.set_fontsize(8)
-            table.scale(1, 1.5)
-            
-            # Style header row
-            for i in range(3):
-                table[(0, i)].set_facecolor('#4472C4')
-                table[(0, i)].set_text_props(weight='bold', color='white')
-            
-            # Alternate row colors
-            for i in range(1, len(table_data)):
-                for j in range(3):
-                    if i % 2 == 0:
-                        table[(i, j)].set_facecolor('#F2F2F2')
-            
-            ax.set_title(f'Excluded Tests ({len(exclusion_table)} tests excluded from shared set)',
-                        fontsize=14, fontweight='bold', pad=20)
-            
-            plt.tight_layout()
-            pdf.savefig(fig, bbox_inches='tight')
-            plt.close(fig)
-        
-        # Chart 4: Average Memory Usage
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        avg_memory = []
-        for folder_name in folder_names:
-            results = folder_metrics[folder_name]['results']
-            shared_results = [r for r in results if r.get('test_case') in shared_tests]
-            if shared_results:
-                total_mem = sum(r.get('total_memory_bytes', 0) for r in shared_results)
-                avg = total_mem / len(shared_results)
-                avg_memory.append(avg)
-            else:
-                avg_memory.append(0)
-        
-        # Convert to MB for display
-        avg_memory_mb = [m / (1024 * 1024) for m in avg_memory]
-        
-        bars = ax.bar(range(len(folder_names)), avg_memory_mb, color='coral', alpha=0.7)
-        ax.set_xlabel('Configuration', fontsize=12)
-        ax.set_ylabel('Average Memory Usage (MB)', fontsize=12)
-        ax.set_title(f'Average Memory Usage Comparison (Shared Set: {total_count} tests)', fontsize=14, fontweight='bold')
-        ax.set_xticks(range(len(folder_names)))
-        ax.set_xticklabels(folder_names, rotation=45, ha='right')
-        ax.grid(axis='y', alpha=0.3)
-        
-        # Add value labels
-        for bar, mem_mb in zip(bars, avg_memory_mb):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{mem_mb:.1f} MB',
-                   ha='center', va='bottom', fontsize=9)
-        
-        plt.tight_layout()
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
-        
-        # Chart 5: Average Runtime (for solved tests only)
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        avg_runtime = []
-        timeout_ms = timeout_seconds * 1000.0
-        for folder_name in folder_names:
-            results = folder_metrics[folder_name]['results']
-            solved_results = [r for r in results 
-                            if r.get('test_case') in shared_tests 
-                            and r.get('result') in ('SAT', 'UNSAT')
-                            and float(r.get('sim_time_ms', 0.0) or 0.0) <= timeout_ms]
-            if solved_results:
-                total_time = sum(float(r.get('sim_time_ms', 0.0) or 0.0) for r in solved_results)
-                avg = total_time / len(solved_results)
-                avg_runtime.append(avg)
-            else:
-                avg_runtime.append(0)
-        
-        bars = ax.bar(range(len(folder_names)), avg_runtime, color='mediumpurple', alpha=0.7)
-        ax.set_xlabel('Configuration', fontsize=12)
-        ax.set_ylabel('Average Runtime (ms)', fontsize=12)
-        ax.set_title(f'Average Runtime for Solved Tests (Shared Set)', fontsize=14, fontweight='bold')
-        ax.set_xticks(range(len(folder_names)))
-        ax.set_xticklabels(folder_names, rotation=45, ha='right')
-        ax.grid(axis='y', alpha=0.3)
-        
-        # Add value labels
-        for bar, runtime in zip(bars, avg_runtime):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{runtime:.1f} ms',
-                   ha='center', va='bottom', fontsize=9)
-        
-        plt.tight_layout()
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
+
+        # Geomean speedup chart moved to separate PDF; no longer included here.
     
-    print(f"\nAll charts saved to: {pdf_path}")
+    print(f"\nPAR-2 chart saved to: {pdf_path}")
+
+
+def plot_cactus_chart(folder_metrics, shared_tests, timeout_seconds, output_dir, pdf_basename='cactus_plot'):
+    """Generate a cactus (survival) plot: cumulative solved instances vs time for each configuration.
+    Each line: sorted solve times (ms->s) of SAT/UNSAT results within timeout on the shared test set.
+    Saved as a separate PDF.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = output_dir / f'{pdf_basename}.pdf'
+
+    timeout_ms = timeout_seconds * 1000.0
+
+    # Collect solved times per configuration
+    folder_names = list(folder_metrics.keys())
+    solved_time_map = {}
+    for folder_name in folder_names:
+        results = folder_metrics[folder_name]['results']
+        times = []
+        for r in results:
+            if r.get('test_case') not in shared_tests:
+                continue
+            if r.get('result') not in ('SAT', 'UNSAT'):
+                continue
+            try:
+                sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if sim_ms <= timeout_ms:
+                times.append(sim_ms)
+        if times:
+            solved_time_map[folder_name] = sorted(times)
+        else:
+            solved_time_map[folder_name] = []
+
+    if not any(solved_time_map.values()):
+        print("No solved instances within timeout for cactus plot; skipping PDF generation.")
+        return
+
+    with matplotlib.backends.backend_pdf.PdfPages(pdf_path) as pdf:
+        fig, ax = plt.subplots(figsize=FIG_SIZE)
+
+        color_cycle = plt.cm.tab20.colors
+        for idx, folder_name in enumerate(folder_names):
+            times = solved_time_map.get(folder_name, [])
+            if not times:
+                continue
+            # Sort times already; build cumulative solved vs wallclock time curve.
+            # We plot step-like cumulative vs time by connecting points.
+            sorted_secs = [t / 1000.0 for t in times]
+            x_vals = sorted_secs
+            y_vals = list(range(1, len(sorted_secs) + 1))
+            ax.plot(x_vals, y_vals, linestyle=':', marker='o', markersize=4,
+                    color=color_cycle[idx % len(color_cycle)], label=folder_name)
+
+        ax.set_xlabel('Wallclock Time (s)', fontsize=26)
+        ax.set_ylabel('Solved Instances', fontsize=26)
+        ax.tick_params(axis='both', labelsize=22)
+        ax.grid(alpha=0.3, linestyle='--')
+        # Legend without title, boxed
+        ax.legend(loc='lower right', fontsize=18, frameon=True)
+        # No plot title per request.
+
+        plt.tight_layout()
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+    print(f"Cactus plot saved to: {pdf_path}")
+
+
+def plot_geomean_chart(folder_metrics, shared_tests, timeout_seconds, output_dir, baseline_name, geomean_results, pdf_basename='geomean_speedups'):
+    """Plot geomean speedup bar chart in a separate PDF.
+    geomean_results: dict folder_name -> geomean_speedup (float or None)
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = output_dir / f'{pdf_basename}.pdf'
+
+    folder_names = list(folder_metrics.keys())
+    g_values = []
+    for name in folder_names:
+        speed = geomean_results.get(name, None)
+        if name == baseline_name:
+            speed = 1.0
+        g_values.append(speed)
+
+    plot_vals = [v if v is not None else 0.0 for v in g_values]
+    with matplotlib.backends.backend_pdf.PdfPages(pdf_path) as pdf:
+        fig, ax = plt.subplots(figsize=FIG_SIZE)
+        x_positions = list(range(len(folder_names)))
+        bars = ax.bar(x_positions, plot_vals, color=plt.cm.tab20.colors[:len(folder_names)], alpha=0.85, edgecolor='black', linewidth=0.8)
+        ax.set_ylabel('Geomean speedup', fontsize=26)
+        ax.set_xticks([])
+        ax.tick_params(axis='y', labelsize=22)
+        ax.grid(axis='y', alpha=0.3)
+        ax.legend(bars, folder_names, loc='upper left', fontsize=18, frameon=True)
+        ymax = max(plot_vals) if plot_vals else 1.0
+        ax.set_ylim(0, ymax * 1.2)
+        for bar, val in zip(bars, g_values):
+            height = bar.get_height()
+            label = 'n/a' if val is None else f'{val:.2f}×'
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                    label, ha='center', va='bottom', fontsize=18)
+        plt.tight_layout()
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+    print(f"Geomean speedup chart saved to: {pdf_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Compare SAT solver results from multiple folders',
+        description='Compare SAT solver results from multiple folders or raw text files',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   %(prog)s runs/baseline runs/optimized
   %(prog)s logs_4MiB logs_8MiB logs_16MiB --timeout 36 --output-dir results/
+  %(prog)s folder1 folder2 folder3 --names "Config A" "Config B" "Config C"
+  %(prog)s results1.txt results2.txt --names "Baseline" "Optimized"
         """
     )
     
-    parser.add_argument('folders', nargs='+', help='Input folders to compare (in display order)')
+    parser.add_argument('folders', nargs='+', help='Input folders or raw text files to compare (in display order)')
+    parser.add_argument('--names', nargs='+', 
+                       help='Custom names for each folder (must match number of folders)')
     parser.add_argument('--timeout', type=float, default=36, 
                        help='Timeout in seconds for PAR-2 calculation (default: 36)')
     parser.add_argument('--output-dir', default='results', 
                        help='Output directory for plots (default: results/)')
+    parser.add_argument('--exclude-timeouts-geomean', action='store_true',
+                       help='Exclude TIMEOUT tests from geomean speedup calculation (skip instead of PAR-2 penalty)')
     
     args = parser.parse_args()
     
     if len(args.folders) < 2:
         print("Error: Need at least 2 folders to compare")
+        sys.exit(1)
+    
+    if args.names and len(args.names) != len(args.folders):
+        print(f"Error: Number of names ({len(args.names)}) must match number of folders ({len(args.folders)})")
         sys.exit(1)
     
     print(f"Comparing {len(args.folders)} folders with timeout={args.timeout}s")
@@ -537,18 +801,13 @@ Examples:
     # Use OrderedDict to preserve order and handle duplicate names
     from collections import OrderedDict
     folder_metrics = OrderedDict()
-    folder_name_counts = {}
     
-    for folder_path in args.folders:
-        base_name = Path(folder_path).name
-        
-        # Handle duplicate folder names by adding a counter
-        if base_name in folder_name_counts:
-            folder_name_counts[base_name] += 1
-            folder_name = f"{base_name}_{folder_name_counts[base_name]}"
+    for i, folder_path in enumerate(args.folders):
+        # Use custom name if provided, otherwise use folder name
+        if args.names:
+            folder_name = args.names[i]
         else:
-            folder_name_counts[base_name] = 0
-            folder_name = base_name
+            folder_name = Path(folder_path).name
         
         print(f"Processing {folder_name} ({folder_path})...")
         metrics = compute_metrics_for_folder(folder_path, args.timeout)
@@ -565,39 +824,49 @@ Examples:
         print("\nError: Need at least 2 folders with valid results")
         sys.exit(1)
     
-    # Determine shared test set
-    print(f"\nDetermining shared test set...")
-    shared_tests, exclusion_table = get_shared_test_set(folder_metrics)
+    # Determine shared test set (with optional timeout exclusion)
+    print(f"\nDetermining shared test set (exclude_timeouts={args.exclude_timeouts_geomean})...")
+    shared_tests, exclusion_table = get_shared_test_set(folder_metrics, args.timeout, args.exclude_timeouts_geomean)
+        
+    if exclusion_table:
+        print(f"\n=== Excluded Tests ({len(exclusion_table)} tests) ===")
+        print(f"{'Excluding Folder':<30} {'Reason':<15} {'Test Case':<100}")
+        print("-" * 105)
+        for test_case, folder, reason in sorted(exclusion_table):
+            print(f"{folder:<30} {reason:<15} {test_case:<100}")
+
     print(f"Shared test set: {len(shared_tests)} tests")
     print(f"Excluded tests: {len(exclusion_table)}")
     
     if not shared_tests:
         print("Error: No shared tests found across all folders")
         sys.exit(1)
-    
+
     # Compute PAR-2 on shared set
-    print(f"\nComputing PAR-2 scores on shared set...")
     shared_par2_scores = compute_par2_on_shared_set(folder_metrics, shared_tests, args.timeout)
     
-    print(f"\n{'Folder':<30} {'PAR-2 (s)':<12} {'Solved':<10} {'Total':<10}")
-    print("-" * 62)
+    # Geomean speedups (baseline = first folder)
+    baseline_name = next(iter(folder_metrics.keys()))
+    geomean_results = compute_geomean_speedups(folder_metrics, shared_tests, args.timeout, baseline_name)
+    
+    # Combined table: PAR-2 + Geomean Speedup
+    print(f"\n{'Folder':<30} {'PAR-2 (s)':<12} {'Solved/Total':<16} {'Geomean×':<12}")
+    print("-" * 74)
     for folder_name in folder_metrics.keys():
         par2, solved, total = shared_par2_scores[folder_name]
-        print(f"{folder_name:<30} {par2:>11.2f} {solved:>9}/{total:<9}")
+        speed = geomean_results.get(folder_name, None)
+        if folder_name == baseline_name:
+            speed = 1.0
+        speed_str = f"{speed:.4f}" if speed is not None else 'n/a'
+        print(f"{folder_name:<30} {par2:<12.6f} {solved:>8}/{total:<8} {speed_str:<12}")
     
-    if exclusion_table:
-        print(f"\n=== Excluded Tests ({len(exclusion_table)} tests) ===")
-        print(f"{'Test Case':<60} {'Excluding Folder':<30} {'Reason':<15}")
-        print("-" * 105)
-        for test_case, folder, reason in sorted(exclusion_table):
-            print(f"{test_case:<60} {folder:<30} {reason:<15}")
-    
-    # Generate plots
-    print(f"\nGenerating comparison charts...")
+    # Generate PAR-2 comparison chart PDF
     plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests, 
                           exclusion_table, args.timeout, args.output_dir)
-    
-    print("\nComparison complete!")
+    # Generate cactus plot in separate PDF
+    plot_cactus_chart(folder_metrics, shared_tests, args.timeout, args.output_dir)
+    # Generate geomean speedup chart in separate PDF
+    plot_geomean_chart(folder_metrics, shared_tests, args.timeout, args.output_dir, baseline_name, geomean_results)
 
 
 if __name__ == "__main__":
