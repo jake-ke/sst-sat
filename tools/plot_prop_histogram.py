@@ -17,6 +17,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from unified_parser import parse_log_directory
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import matplotlib.patches as mpatches
 
 
 def collect_histogram_data(log_dir):
@@ -185,6 +187,7 @@ def aggregate_histogram(results, histogram_key, num_bins=11):
 def plot_propagation_histograms(results, output_pdf):
     """
     Create PDF plot with watcher and literal histograms in 2 subplots (top/bottom).
+    Each subplot shows both weighted and unweighted percentages side by side.
     
     Args:
         results: List of parsed log data dictionaries (finished tests only)
@@ -197,62 +200,172 @@ def plot_propagation_histograms(results, output_pdf):
     # Create figure with 2 subplots (top and bottom)
     # Increase global font size for all text elements
     plt.rcParams.update({'font.size': 20})
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    fig = plt.figure(figsize=(14, 10))
     
-    # Plot 1: Watchers Histogram (top) - index-weighted percentages
+    # Create subplots with broken y-axis capability
+    ax1 = plt.subplot(2, 1, 1)
+    ax2 = plt.subplot(2, 1, 2)
+    
+    # Plot 1: Watchers Histogram (top) - both weighted and unweighted percentages
     watcher_labels, watcher_original, watcher_weighted, watcher_counts = aggregate_histogram(results, 'watchers_bins', num_bins=11)
     
     if watcher_labels:
         x_pos = np.arange(len(watcher_labels))
-        bars1 = ax1.bar(x_pos, watcher_weighted, alpha=0.8, color='steelblue', 
-                         edgecolor='black', linewidth=1.0)
+        width = 0.35  # width of bars
+        
+        # Determine if we need a broken axis based on bin 1 (index 0)
+        all_values = watcher_original + watcher_weighted
+        max_val = max(all_values)
+        
+        # Use bin 1's maximum value as reference (first bin, index 0)
+        bin1_max = max(watcher_original[0], watcher_weighted[0]) if len(watcher_original) > 0 else 0
+        
+        # Round up to nearest 10
+        break_point = np.ceil(bin1_max / 10) * 10
+        
+        # Use broken axis if any bar exceeds the break point
+        use_broken_axis = max_val > break_point
+        
+        if use_broken_axis:
+            # Set ylim with break (add 30% headroom for labels)
+            ax1.set_ylim(0, break_point * 1.3)
+            
+            # Add broken axis indicators
+            d = .015  # size of diagonal lines
+            kwargs = dict(transform=ax1.transAxes, color='k', clip_on=False, linewidth=2)
+            ax1.plot((-d, +d), (1-d, 1+d), **kwargs)
+            ax1.plot((1-d, 1+d), (1-d, 1+d), **kwargs)
+        
+        # Create grouped bars
+        bars1a = ax1.bar(x_pos - width/2, watcher_original, width, 
+                         alpha=0.8, color='steelblue', edgecolor='black', 
+                         linewidth=1.0, label='Unweighted %')
+        bars1b = ax1.bar(x_pos + width/2, watcher_weighted, width,
+                         alpha=0.8, color='coral', edgecolor='black',
+                         linewidth=1.0, label='Weighted')
+        
         ax1.set_xticks(x_pos)
         ax1.set_xticklabels(watcher_labels, fontsize=24)
         ax1.set_xlabel('# Watchers Processed per Literal', fontsize=26, fontweight='bold')
-        ax1.set_ylabel('Weighted %', fontsize=26, fontweight='bold')
+        ax1.set_ylabel('Percentage (%)', fontsize=26, fontweight='bold')
         ax1.tick_params(axis='y', which='major', labelsize=24)
         ax1.grid(True, axis='y', alpha=0.3, linestyle='--')
+        ax1.legend(fontsize=20, loc='upper center', ncol=2, framealpha=0.9)
         
-        # Add percentage labels on top of bars
-        for bar, pct in zip(bars1, watcher_weighted):
+        # Add percentage labels on top of bars (only if within ylim)
+        ylim = ax1.get_ylim()
+        for idx, (bar, pct) in enumerate(zip(bars1a, watcher_original)):
+            # Skip bin 1 unweighted label if it equals weighted (bin 1 is index 0)
+            if idx == 0 and abs(watcher_original[0] - watcher_weighted[0]) < 0.01:
+                continue
             height = bar.get_height()
-            ax1.text(bar.get_x() + bar.get_width() / 2, height,
-                     f'{pct:.1f}%',
-                     ha='center', va='bottom', fontsize=20, fontweight='bold')
+            if height < ylim[1] * 0.95:  # Only show if not cut off
+                ax1.text(bar.get_x() + bar.get_width() / 2, height,
+                         f'{round(pct)}',
+                         ha='center', va='bottom', fontsize=16, fontweight='bold')
+            else:
+                # Show value inside bar if cut off
+                ax1.text(bar.get_x() + bar.get_width() / 2, ylim[1] * 0.85,
+                         f'{round(pct)}',
+                         ha='center', va='top', fontsize=16, fontweight='bold', color='black')
+        for idx, (bar, pct) in enumerate(zip(bars1b, watcher_weighted)):
+            height = bar.get_height()
+            if height < ylim[1] * 0.95:
+                ax1.text(bar.get_x() + bar.get_width() / 2, height,
+                         f'{round(pct)}',
+                         ha='center', va='bottom', fontsize=16, fontweight='bold')
+            else:
+                ax1.text(bar.get_x() + bar.get_width() / 2, ylim[1] * 0.85,
+                         f'{round(pct)}',
+                         ha='center', va='top', fontsize=16, fontweight='bold', color='black')
         
-        # Set y-axis limit with some headroom for labels
-        max_pct = max(watcher_weighted) if watcher_weighted else 100
-        ax1.set_ylim(0, max_pct * 1.20)
+        if not use_broken_axis:
+            # Set y-axis limit with some headroom for labels
+            max_pct = max(max(watcher_original), max(watcher_weighted)) if watcher_weighted else 100
+            ax1.set_ylim(0, max_pct * 1.20)
     else:
         ax1.text(0.5, 0.5, 'No watcher histogram data available',
                 ha='center', va='center', transform=ax1.transAxes, fontsize=12)
         ax1.set_xlim(0, 1)
         ax1.set_ylim(0, 1)
     
-    # Plot 2: Variables (Literals) Histogram (bottom) - index-weighted percentages
+    # Plot 2: Variables (Literals) Histogram (bottom) - both weighted and unweighted percentages
     variable_labels, variable_original, variable_weighted, variable_counts = aggregate_histogram(results, 'variables_bins', num_bins=11)
     
     if variable_labels:
         x_pos = np.arange(len(variable_labels))
-        bars2 = ax2.bar(x_pos, variable_weighted, alpha=0.8, color='seagreen',
-                         edgecolor='black', linewidth=1.0)
+        width = 0.35  # width of bars
+        
+        # Determine if we need a broken axis based on bin 1 (index 0)
+        all_values = variable_original + variable_weighted
+        max_val = max(all_values)
+        
+        # Use bin 1's maximum value as reference (first bin, index 0)
+        bin1_max = max(variable_original[0], variable_weighted[0]) if len(variable_original) > 0 else 0
+        
+        # Round up to nearest 10
+        break_point = np.ceil(bin1_max / 10) * 10
+        
+        # Use broken axis if any bar exceeds the break point
+        use_broken_axis = max_val > break_point
+        
+        if use_broken_axis:
+            # Set ylim with break (add 30% headroom for labels)
+            ax2.set_ylim(0, break_point * 1.3)
+            
+            # Add broken axis indicators
+            d = .015  # size of diagonal lines
+            kwargs = dict(transform=ax2.transAxes, color='k', clip_on=False, linewidth=2)
+            ax2.plot((-d, +d), (1-d, 1+d), **kwargs)
+            ax2.plot((1-d, 1+d), (1-d, 1+d), **kwargs)
+        
+        # Create grouped bars
+        bars2a = ax2.bar(x_pos - width/2, variable_original, width,
+                         alpha=0.8, color='seagreen', edgecolor='black',
+                         linewidth=1.0, label='Unweighted %')
+        bars2b = ax2.bar(x_pos + width/2, variable_weighted, width,
+                         alpha=0.8, color='gold', edgecolor='black',
+                         linewidth=1.0, label='Weighted')
+        
         ax2.set_xticks(x_pos)
         ax2.set_xticklabels(variable_labels, fontsize=24)
         ax2.set_xlabel('# Literals Residing in Trail', fontsize=26, fontweight='bold')
-        ax2.set_ylabel('Weighted %', fontsize=26, fontweight='bold')
+        ax2.set_ylabel('Percentage (%)', fontsize=26, fontweight='bold')
         ax2.tick_params(axis='y', which='major', labelsize=24)
         ax2.grid(True, axis='y', alpha=0.3, linestyle='--')
+        ax2.legend(fontsize=20, loc='upper center', ncol=2, framealpha=0.9)
         
-        # Add percentage labels on top of bars
-        for bar, pct in zip(bars2, variable_weighted):
+        # Add percentage labels on top of bars (only if within ylim)
+        ylim = ax2.get_ylim()
+        for idx, (bar, pct) in enumerate(zip(bars2a, variable_original)):
+            # Skip bin 1 unweighted label if it equals weighted (bin 1 is index 0)
+            if idx == 0 and abs(variable_original[0] - variable_weighted[0]) < 0.01:
+                continue
             height = bar.get_height()
-            ax2.text(bar.get_x() + bar.get_width() / 2, height,
-                     f'{pct:.1f}% ',
-                     ha='center', va='bottom', fontsize=20, fontweight='bold')
+            if height < ylim[1] * 0.95:  # Only show if not cut off
+                ax2.text(bar.get_x() + bar.get_width() / 2, height,
+                         f'{round(pct)}',
+                         ha='center', va='bottom', fontsize=16, fontweight='bold')
+            else:
+                # Show value inside bar if cut off
+                ax2.text(bar.get_x() + bar.get_width() / 2, ylim[1] * 0.85,
+                         f'{round(pct)}',
+                         ha='center', va='top', fontsize=16, fontweight='bold', color='black')
+        for idx, (bar, pct) in enumerate(zip(bars2b, variable_weighted)):
+            height = bar.get_height()
+            if height < ylim[1] * 0.95:
+                ax2.text(bar.get_x() + bar.get_width() / 2, height,
+                         f'{round(pct)}',
+                         ha='center', va='bottom', fontsize=16, fontweight='bold')
+            else:
+                ax2.text(bar.get_x() + bar.get_width() / 2, ylim[1] * 0.85,
+                         f'{round(pct)}',
+                         ha='center', va='top', fontsize=16, fontweight='bold', color='black')
         
-        # Set y-axis limit with some headroom for labels
-        max_pct = max(variable_weighted) if variable_weighted else 100
-        ax2.set_ylim(0, max_pct * 1.20)
+        if not use_broken_axis:
+            # Set y-axis limit with some headroom for labels
+            max_pct = max(max(variable_original), max(variable_weighted)) if variable_weighted else 100
+            ax2.set_ylim(0, max_pct * 1.20)
     else:
         ax2.text(0.5, 0.5, 'No variable histogram data available',
                 ha='center', va='center', transform=ax2.transAxes, fontsize=12)

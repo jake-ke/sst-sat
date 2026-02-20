@@ -308,7 +308,8 @@ def plot_sweeps(bw_sweep_data, lat_sweep_data, output_pdf):
         print("Warning: No valid sweeps found (need at least 2 points for a sweep)")
         return
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+    # Create side-by-side subplots (1 row, 2 columns) with larger figure size
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
     
     # Collect all PAR-2 values to determine common y-axis limits
     all_par2_values = []
@@ -336,15 +337,15 @@ def plot_sweeps(bw_sweep_data, lat_sweep_data, output_pdf):
         lat = sorted_latencies[0]  # Take first (and assumed only) latency
         bw_gbps, par2_values = zip(*bandwidth_data[lat])
         # Bandwidth is already in GB/s from parse_l2_config
-        ax1.plot(bw_gbps, par2_values, marker='o', markersize=8, linewidth=2.5, color='#1f77b4')
+        ax1.plot(bw_gbps, par2_values, marker='o', markersize=12, linewidth=3.5, color='#1f77b4')
     else:
         ax1.text(0.5, 0.5, 'Bandwidth sweep data not available', 
-                ha='center', va='center', transform=ax1.transAxes, fontsize=12)
+                ha='center', va='center', transform=ax1.transAxes, fontsize=20)
     
-    ax1.set_xlabel('L2 Bandwidth (GB/s)', fontsize=20, fontweight='bold')
-    ax1.set_ylabel('PAR-2 (s)', fontsize=20, fontweight='bold')
+    ax1.set_xlabel('L2 Bandwidth (GB/s)', fontsize=32, fontweight='bold')
+    ax1.set_ylabel('PAR-2 (s)', fontsize=32, fontweight='bold')
     ax1.grid(True, alpha=0.3, linestyle='--')
-    ax1.tick_params(axis='both', which='major', labelsize=18)
+    ax1.tick_params(axis='both', which='major', labelsize=28)
     if y_limits:
         ax1.set_ylim(y_limits)
     
@@ -354,15 +355,15 @@ def plot_sweeps(bw_sweep_data, lat_sweep_data, output_pdf):
         sorted_bandwidths = sorted(latency_data.keys())
         bw = sorted_bandwidths[0]  # Take first (and assumed only) bandwidth
         lat_values, par2_values = zip(*latency_data[bw])
-        ax2.plot(lat_values, par2_values, marker='o', markersize=8, linewidth=2.5, color='#ff7f0e')
+        ax2.plot(lat_values, par2_values, marker='o', markersize=12, linewidth=3.5, color='#ff7f0e')
     else:
         ax2.text(0.5, 0.5, 'Latency sweep data not available', 
-                ha='center', va='center', transform=ax2.transAxes, fontsize=12)
+                ha='center', va='center', transform=ax2.transAxes, fontsize=20)
     
-    ax2.set_xlabel('L2 Latency (cycles)', fontsize=20, fontweight='bold')
-    ax2.set_ylabel('PAR-2 (s)', fontsize=20, fontweight='bold')
+    ax2.set_xlabel('L2 Latency (cycles)', fontsize=32, fontweight='bold')
+    ax2.set_ylabel('PAR-2 (s)', fontsize=32, fontweight='bold')
     ax2.grid(True, alpha=0.3, linestyle='--')
-    ax2.tick_params(axis='both', which='major', labelsize=18)
+    ax2.tick_params(axis='both', which='major', labelsize=28)
     if y_limits:
         ax2.set_ylim(y_limits)
     
