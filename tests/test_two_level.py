@@ -341,8 +341,8 @@ else:
     global_memory.addParams({
         "access_time" : args.mem_latency,
         "mem_size" : "4GiB",
-        "max_requests_per_cycle" : "2",
-        "request_width" : "64",
+        "max_requests_per_cycle" : args.l2_bw,
+        "request_width" : args.l2_width[:-1],  # Remove 'B' from width
     })
 
 # Connect solver to heap
