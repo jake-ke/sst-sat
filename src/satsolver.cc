@@ -1177,14 +1177,14 @@ void SATSolver::execBacktrack() {
         && var_assigned[var(spec_literal)] 
         && var_value[var(spec_literal)] != !sign(spec_literal)) {
         if (spec_coroutine != nullptr) terminateSpecPropagate();
-        // insertVarOrder(var(spec_literal));
+        insertVarOrder(var(spec_literal));  // decide with spec_literal
         spec_literal = lit_Undef;
     }
 
     // do not redo speculative propagation if completed
     if (spec_literal != lit_Undef
         && spec_coroutine == nullptr) {
-        // insertVarOrder(var(spec_literal));
+        insertVarOrder(var(spec_literal));  // decide with spec_literal
         spec_literal = lit_Undef;
     }
 
@@ -1229,7 +1229,7 @@ void SATSolver::execRestart() {
     // terminate speculative propagation because we are ready to choose a new decision
     if (spec_literal != lit_Undef) {
         if (spec_coroutine != nullptr) terminateSpecPropagate();
-        // insertVarOrder(var(spec_literal));
+        insertVarOrder(var(spec_literal));  // decide with spec_literal
         spec_literal = lit_Undef;
     }
 
@@ -1305,11 +1305,11 @@ bool SATSolver::decide() {
         }
     }
 
-    // Check if we have a speculative literal to use for the main propagation
-    // if (spec_literal != lit_Undef && !var_assigned[var(spec_literal)]) {
-    //     lit = spec_literal;
-    //     output.verbose(CALL_INFO, 2, 0, "DECISION: Using speculative lit %d\n", toInt(lit));
-    // }
+    // decide with spec_literal
+    if (spec_literal != lit_Undef && !var_assigned[var(spec_literal)]) {
+        lit = spec_literal;
+        output.verbose(CALL_INFO, 2, 0, "DECISION: Using speculative lit %d\n", toInt(lit));
+    }
 
     // If couldn't use the decision sequence and no speculative literal, remove from heap
     if (lit == lit_Undef) {
@@ -1327,8 +1327,8 @@ bool SATSolver::decide() {
 
     // Extract speculative literal for next decision
     if (enable_speculative) {
-        // spec_literal = chooseBranchVariable();
-        spec_literal = peekBranchVariable();
+        spec_literal = chooseBranchVariable();
+        // spec_literal = peekBranchVariable();
         output.verbose(CALL_INFO, 2, 0, "Selected next speculative lit %d \n", toInt(spec_literal));
     }
 
@@ -2034,14 +2034,14 @@ void SATSolver::backtrack(int backtrack_level) {
         
         polarity[v] = sign(p);
         unassignVariable(v);
+        
+        // peek version
+        // insertVarOrder(v);
 
-        // Skip reinserting the speculative literal back into the heap
-        // if (v != var(spec_literal)) {
+        // decide with spec_literal
+        if (v != var(spec_literal)) {
             insertVarOrder(v);
-        // } else {
-        //     output.verbose(CALL_INFO, 4, 0, 
-        //         "BACKTRACK: Skipping reinsertion of speculative variable x%d\n", v);
-        // }
+        }
         
         output.verbose(CALL_INFO, 5, 0,
             "BACKTRACK: Unassigning x%d, saved polarity %s\n", 
