@@ -381,6 +381,8 @@ sst.enableStatisticsForComponentName("solver", [
     "restarts",
     "spec_started",
     "spec_finished",
+    "total_occ",
+    "watcher_traversed",
 ], {
     "type": "sst.AccumulatorStatistic",
     "rate": "1s"

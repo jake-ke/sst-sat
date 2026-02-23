@@ -195,6 +195,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_para_vars = registerStatistic<uint64_t>("para_vars");
     stat_spec_started = registerStatistic<uint64_t>("spec_started");
     stat_spec_finished = registerStatistic<uint64_t>("spec_finished");
+    stat_total_occ = registerStatistic<uint64_t>("total_occ");
+    stat_watcher_traversed = registerStatistic<uint64_t>("watcher_traversed");
 
     // Component should not end simulation until solution is found
     registerAsPrimaryComponent();
@@ -227,6 +229,14 @@ void SATSolver::init(unsigned int phase) {
         variables.init(num_vars);
         watches.initWatches(2 * (num_vars + 1), parsed_clauses);
         clauses.initialize(parsed_clauses);
+
+        // Precompute occurrence list sizes for each literal
+        lit_occ_count.resize(2 * (num_vars + 1), 0);
+        for (auto& c : parsed_clauses) {
+            for (auto& lit : c.literals) {
+                lit_occ_count[toWatchIndex(~lit)]++;
+            }
+        }
 
         order_heap->setDecisionFlags(decision);
         order_heap->setHeapSize(num_vars);
@@ -318,6 +328,20 @@ void SATSolver::finish() {
         }
     }
     
+    // Reduced clause access statistics
+    {
+        uint64_t total_occ_sum = getStatCount(stat_total_occ);
+        uint64_t watcher_sum = getStatCount(stat_watcher_traversed);
+        uint64_t reduced = total_occ_sum - watcher_sum;
+        double reduction_pct = (total_occ_sum > 0)
+            ? (double)reduced / total_occ_sum * 100.0 : 0.0;
+        output.output("=================[ Reduced Clause Access Statistics ]===================\n");
+        output.output("Full Occurrence List (naive) : %lu\n", total_occ_sum);
+        output.output("2WL Watchers Traversed      : %lu\n", watcher_sum);
+        output.output("Reduced Clause Accesses     : %lu (%.1f%%)\n", reduced, reduction_pct);
+        output.output("===========================================================================\n");
+    }
+
     // output.output("=========================[ Clauses Fragmentation ]=========================\n");
     // clauses.printFragStats();
     // output.output("===========================================================================\n");
@@ -1168,6 +1192,9 @@ void SATSolver::execBacktrack() {
             "Added learnt clause 0x%x: %s\n", 
             addr, printClause(new_clause.literals).c_str());
         attachClause(addr, new_clause);
+        for (auto& lit : new_clause.literals) {
+            lit_occ_count[toWatchIndex(~lit)]++;
+        }
         trailEnqueue(learnt_clause[0], addr);
         stat_learned->addData(1);
     }
@@ -1720,7 +1747,9 @@ void SATSolver::propagateLiteral(
 
     stat_para_watchers->addData(para_watchers);
     stat_watcher_occ->addData(watcher_occ);
-    
+    stat_total_occ->addDataNTimes(lit_occ_count[watch_idx], 1);
+    stat_watcher_traversed->addDataNTimes(watcher_occ, 1);
+
     // Track metrics based on whether this literal was speculative
     if (is_speculative) {
         // This variable was assigned during speculative propagation
@@ -2099,6 +2128,13 @@ void SATSolver::reduceDB() {
             output.verbose(CALL_INFO, 4, 0, 
                 "REDUCEDB: Marking clause 0x%x for removal\n", addr);
 
+            // update occurrence counts before detaching
+            {
+                const Clause& c = clauses.readClause(addr);
+                for (int li = 0; li < c.litSize(); li++) {
+                    lit_occ_count[toWatchIndex(~c[li])]--;
+                }
+            }
             // remove watchers
             detachClause(addr);
             clauses.freeClause(addr, cls_size);
