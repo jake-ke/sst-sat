@@ -9,8 +9,8 @@ python3 tools/plot_breakdown.py ../sat-isca26-data/base_128KB/profile_base_l1_4_
 python3 tools/plot_l1_miss_rate.py ../sat-isca26-data base_l1_4_1_l2_8_32/ results/l1_miss_rate.pdf
 cp results/l1_miss_rate.pdf ../sat-isca2026/charts/
 
-# python3 tools/plot_l2_sweep.py ../sat-isca26-data/base_128KB base_l1_4_1 results/l2_sweep.pdf --timeout 36
-python3 tools/plot_l2_sweep.py --bw-dir ../sat-isca26-data/bw --bw-prefix base_l1_-1_1 --lat-dir ../sat-isca26-data/base_128KB --lat-prefix base_l1_4_1 results/l2_sweep.pdf
+python3 tools/plot_l2_sweep.py ../sat-isca26-data/ base_l1_4_1 results/l2_sweep.pdf --timeout 36
+# python3 tools/plot_l2_sweep.py --bw-dir ../sat-isca26-data/bw --bw-prefix base_l1_-1_1 --lat-dir ../sat-isca26-data/base_128KB --lat-prefix base_l1_4_1 results/l2_sweep.pdf
 
 
 

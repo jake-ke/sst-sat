@@ -392,6 +392,10 @@ def plot_l2_sweep(base_directory, output_pdf=None, timeout_seconds=36):
     
     # Hardcoded folder names for bandwidth sweep
     bandwidth_folders = [
+        # 'bw_simpmem/base_l1_-1_1_l2_1_32_32B',
+        # 'bw_simpmem/base_l1_-1_1_l2_1_32_64B',
+        # 'bw_simpmem/base_l1_-1_1_l2_2_32_64B',
+        # 'bw_simpmem/base_l1_-1_1_l2_4_32_64B',
         'bw/base_l1_-1_1_l2_1_32_8B',
         'bw/base_l1_-1_1_l2_1_32_16B',
         'bw/base_l1_-1_1_l2_1_32_32B',
