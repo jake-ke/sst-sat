@@ -568,6 +568,30 @@ def parse_directed_prefetcher_statistics(content):
     return stats
 
 
+def parse_reduced_clause_access_statistics(content):
+    """Parse Reduced Clause Access Statistics section if present."""
+    stats = {}
+    section = re.search(
+        r'=+\[\s*Reduced Clause Access Statistics\s*\]=+\n(.*?)\n=+',
+        content, re.DOTALL
+    )
+    if not section:
+        return stats
+    text = section.group(1)
+
+    m = re.search(r'Full Occurrence List \(naive\)\s*:\s*(\d+)', text)
+    if m:
+        stats['twl_naive_accesses'] = int(m.group(1))
+    m = re.search(r'2WL Watchers Traversed\s*:\s*(\d+)', text)
+    if m:
+        stats['twl_watchers_traversed'] = int(m.group(1))
+    m = re.search(r'Reduced Clause Accesses\s*:\s*(\d+)\s*\(([\d.]+)%\)', text)
+    if m:
+        stats['twl_reduced_accesses'] = int(m.group(1))
+        stats['twl_reduction_pct'] = float(m.group(2))
+    return stats
+
+
 def parse_stats_csv_for_prefetch(stats_csv_path: Path):
     """Extract last Prefetch_requests and Prefetch_drops from a stats CSV.
 
@@ -796,6 +820,7 @@ def parse_satsolver_log(log_file_path, content):
 
         result.update(parse_propagation_detail_statistics(content))
         result.update(parse_directed_prefetcher_statistics(content))
+        result.update(parse_reduced_clause_access_statistics(content))
         
         # For abnormal results (ERROR/UNKNOWN), clear all numeric fields except test_case and result
         if result['result'] in ('ERROR', 'UNKNOWN'):
