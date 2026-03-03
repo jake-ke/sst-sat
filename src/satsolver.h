@@ -329,6 +329,10 @@ private:
     Statistic<uint64_t>* stat_para_vars;
     Statistic<uint64_t>* stat_spec_started;
     Statistic<uint64_t>* stat_spec_finished;
+    Statistic<uint64_t>* stat_total_occ;          // Accumulator: sum of occurrence list sizes per propagation
+    Statistic<uint64_t>* stat_watcher_traversed;  // Accumulator: sum of watchers traversed per propagation
+
+    std::vector<uint32_t> lit_occ_count;          // Precomputed occurrence count per literal index
 
     // User-defined decision sequence
     std::vector<std::pair<Var, bool>> decision_sequence; // (variable, sign) pairs

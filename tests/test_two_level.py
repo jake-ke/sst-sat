@@ -80,6 +80,8 @@ def parse_args():
                         help='Use classic heap implementation instead of pipelined heap')
     parser.add_argument('--timeout-cycles', dest='timeout_cycles', type=int, default=0,
                         help='Maximum solver cycles before timing out (0 = unlimited)')
+    parser.add_argument('--freq', dest='freq', type=str, default="1GHz",
+                        help='Clock frequency for all components (e.g. 1GHz, 500MHz)')
 
     args = parser.parse_args()
     
@@ -172,6 +174,7 @@ if args.enable_prefetch:
     print(f"Directed prefetching enabled")
 if args.enable_speculative:
     print(f"Speculative propagation enabled")
+print(f"Clock frequency: {args.freq}")
 if args.timeout_cycles > 0:
     print(f"Solver timeout set to: {args.timeout_cycles} cycles")
 
@@ -191,7 +194,7 @@ var_act_base_addr       = 0x70000000
 
 # Get file size and pass it to solver
 params = {
-    "clock" : "1GHz",
+    "clock" : args.freq,
     "verbose" : str(args.verbose),
     # "verbose" : "2",
     "sort_clauses": args.sort_clauses,
@@ -237,7 +240,7 @@ global_iface = solver.setSubComponent("global_memory", "memHierarchy.standardInt
 # Create L1 cache for global operations
 global_cache = sst.Component("global_l1cache", "memHierarchy.Cache")
 global_cache.addParams({
-    "cache_frequency"    : "1GHz",
+    "cache_frequency"    : args.freq,
     "cache_size"         : args.l1_size,
     "cache_line_size"    : "64",
     "associativity"      : "8",
@@ -284,7 +287,7 @@ if args.enable_prefetch:
 # Create L2 cache
 global_l2cache = sst.Component("global_l2cache", "memHierarchy.Cache")
 global_l2cache.addParams({
-    "cache_frequency"    : "1GHz",
+    "cache_frequency"    : args.freq,
     "cache_size"         : args.l2_size,
     "cache_line_size"    : "64",
     "associativity"      : "16",
@@ -319,7 +322,7 @@ global_l2cache_profiler.addParams({
 # Create memory controller for global operations
 global_memctrl = sst.Component("global_memory", "memHierarchy.MemController")
 global_memctrl.addParams({
-    "clock" : "1GHz",
+    "clock" : args.freq,
     "debug" : "0",
     "debug_level" : "10",
     "verbose" : "0",
@@ -381,6 +384,8 @@ sst.enableStatisticsForComponentName("solver", [
     "restarts",
     "spec_started",
     "spec_finished",
+    "total_occ",
+    "watcher_traversed",
 ], {
     "type": "sst.AccumulatorStatistic",
     "rate": "1s"
