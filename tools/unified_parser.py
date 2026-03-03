@@ -384,24 +384,33 @@ def parse_solver_statistics(content):
     return stats
 
 
-def parse_l1_cache_statistics(content):
-    """Parse L1 Cache Profiler Statistics section."""
+def parse_cache_statistics(content, level):
+    """Parse Cache Profiler Statistics section for a given cache level.
+
+    Args:
+        content: Log file content
+        level: Cache level string, e.g. "L1" or "L2"
+
+    Returns:
+        dict with keys like '{level_lower}_{component}_hits', '{level_lower}_total_requests', etc.
+    """
+    prefix = level.lower()
     cache_stats = {}
-    
-    # Find L1 cache section
-    section_pattern = r'===+\s*L1 Cache Profiler Statistics\s*===+\n(.*?)\n===+'
+
+    section_pattern = rf'===+\s*{level} Cache Profiler Statistics\s*===+\n(.*?)\n===+'
     section_match = re.search(section_pattern, content, re.DOTALL)
-    
+
     if section_match:
         section_text = section_match.group(1)
-        
+
         # Parse total statistics first
         total_pattern = r'TOTAL\s*:\s*(\d+) hits,\s*(\d+) misses,\s*(\d+) total,\s*([\d.]+)% miss rate'
         total_match = re.search(total_pattern, section_text)
         if total_match:
-            cache_stats['l1_total_requests'] = int(total_match.group(3))
-            cache_stats['l1_total_miss_rate'] = float(total_match.group(4))
-        
+            cache_stats[f'{prefix}_total_requests'] = int(total_match.group(3))
+            cache_stats[f'{prefix}_total_miss_rate'] = float(total_match.group(4))
+            cache_stats[f'{prefix}_total_misses'] = int(total_match.group(2))
+
         # Parse component statistics (excluding ClaActivity)
         components = ['Heap', 'Variables', 'Watches', 'Clauses', 'VarActivity']
         for component in components:
@@ -409,12 +418,17 @@ def parse_l1_cache_statistics(content):
             match = re.search(pattern, section_text)
             if match:
                 comp_name = component.lower()
-                cache_stats[f'l1_{comp_name}_total'] = int(match.group(3))
-                cache_stats[f'l1_{comp_name}_miss_rate'] = float(match.group(4))
-                cache_stats[f'l1_{comp_name}_hits'] = int(match.group(1))
-                cache_stats[f'l1_{comp_name}_misses'] = int(match.group(2))
-    
+                cache_stats[f'{prefix}_{comp_name}_total'] = int(match.group(3))
+                cache_stats[f'{prefix}_{comp_name}_miss_rate'] = float(match.group(4))
+                cache_stats[f'{prefix}_{comp_name}_hits'] = int(match.group(1))
+                cache_stats[f'{prefix}_{comp_name}_misses'] = int(match.group(2))
+
     return cache_stats
+
+
+def parse_l1_cache_statistics(content):
+    """Parse L1 Cache Profiler Statistics section (backward-compatible wrapper)."""
+    return parse_cache_statistics(content, "L1")
 
 
 def parse_clauses_fragmentation(content):
@@ -809,6 +823,7 @@ def parse_satsolver_log(log_file_path, content):
 
         result.update(parse_solver_statistics(content))
         result.update(parse_l1_cache_statistics(content))
+        result.update(parse_cache_statistics(content, "L2"))
         result.update(parse_clauses_fragmentation(content))
         result.update(parse_cycle_statistics(content))
 
