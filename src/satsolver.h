@@ -96,6 +96,12 @@ public:
         {"para_vars", "Number of variables processed per unitPropagate before conflict", "count", 1},
         {"spec_started", "Total literals started in speculative propagation", "count", 1},
         {"spec_finished", "Total literals finished in speculative propagation", "count", 1},
+        {"total_occ", "Sum of occurrence list sizes per propagation", "count", 1},
+        {"watcher_traversed", "Sum of watchers traversed per propagation", "count", 1},
+        {"learnt_length", "Total length of learnt clauses", "count", 1},
+        {"learnt_units", "Number of unit-literal learnt clauses", "count", 1},
+        {"learnt_lbd", "Total LBD of learnt clauses", "count", 1},
+        {"bt_level", "Total backtrack level", "count", 1},
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -237,6 +243,7 @@ private:
     std::vector<Cref> conflicts;                // Conflict clauses from propagation
     std::vector<Lit> learnt_clause;             // Learnt clause from conflict analysis
     int bt_level;                               // Backtrack level from conflict analysis
+    int learnt_lbd;                             // LBD of learnt clause from conflict analysis
     std::vector<char> seen;                     // Temporary array for conflict analysis
     std::vector<Cref> c_to_bump;
     std::vector<Var> v_to_bump;
@@ -331,6 +338,10 @@ private:
     Statistic<uint64_t>* stat_spec_finished;
     Statistic<uint64_t>* stat_total_occ;          // Accumulator: sum of occurrence list sizes per propagation
     Statistic<uint64_t>* stat_watcher_traversed;  // Accumulator: sum of watchers traversed per propagation
+    Statistic<uint64_t>* stat_learnt_length;      // Accumulator: total length of learnt clauses
+    Statistic<uint64_t>* stat_learnt_units;       // Count of unit-literal learnt clauses
+    Statistic<uint64_t>* stat_learnt_lbd;         // Accumulator: total LBD of learnt clauses
+    Statistic<uint64_t>* stat_bt_level;           // Accumulator: total backtrack level
 
     std::vector<uint32_t> lit_occ_count;          // Precomputed occurrence count per literal index
 

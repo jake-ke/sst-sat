@@ -42,18 +42,19 @@ def compute_runtime_breakdown(results):
     if not finished:
         return {}
     
-    # Initialize lists to collect percentages for each test
-    component_names = ['Propagate', 'Analyze', 'Minimize', 'Backtrack', 
+    # Initialize lists to collect percentages and absolute cycles for each test
+    component_names = ['Propagate', 'Analyze', 'Minimize', 'Backtrack',
                       'Priority Queue', 'Restart', 'Deletion']
     component_percentages = {name: [] for name in component_names}
-    
+    component_cycles = {name: [] for name in component_names}
+
     # Compute percentage for each test individually
     for r in finished:
         total_counted = r.get('total_counted_cycles', 0) or 0
-        
+
         if total_counted == 0:
             continue
-        
+
         # Get cycles for each component
         propagate = r.get('propagate_cycles', 0) or 0
         analyze = r.get('analyze_cycles', 0) or 0
@@ -62,14 +63,14 @@ def compute_runtime_breakdown(results):
         decision = r.get('decision_cycles', 0) or 0
         reduce_db = r.get('reduce_db_cycles', 0) or 0
         restart = r.get('restart_cycles', 0) or 0
-        
+
         # Get heap operations from cycle statistics (not propagation detail)
         heap_insert = r.get('heap_insert_cycles', 0) or 0
         heap_bump = r.get('heap_bump_cycles', 0) or 0
-        
+
         # Compute priority queue as decision + heap operations
         priority_queue = decision + heap_insert + heap_bump
-        
+
         # Compute percentage for this test
         component_percentages['Propagate'].append(propagate / total_counted * 100.0)
         component_percentages['Analyze'].append(analyze / total_counted * 100.0)
@@ -78,19 +79,31 @@ def compute_runtime_breakdown(results):
         component_percentages['Priority Queue'].append(priority_queue / total_counted * 100.0)
         component_percentages['Restart'].append(restart / total_counted * 100.0)
         component_percentages['Deletion'].append(reduce_db / total_counted * 100.0)
-    
-    # Compute average percentage across all tests
+
+        # Collect absolute cycles
+        component_cycles['Propagate'].append(propagate)
+        component_cycles['Analyze'].append(analyze)
+        component_cycles['Minimize'].append(minimize)
+        component_cycles['Backtrack'].append(backtrack)
+        component_cycles['Priority Queue'].append(priority_queue)
+        component_cycles['Restart'].append(restart)
+        component_cycles['Deletion'].append(reduce_db)
+
+    # Compute average percentage and average cycles across all tests
     breakdown_pct = {}
+    avg_cycles = {}
     for name in component_names:
         if component_percentages[name]:
             breakdown_pct[name] = sum(component_percentages[name]) / len(component_percentages[name])
+            avg_cycles[name] = sum(component_cycles[name]) / len(component_cycles[name])
         else:
             breakdown_pct[name] = 0.0
-    
+            avg_cycles[name] = 0.0
+
     if not any(breakdown_pct.values()):
-        return {}, {}
-    
-    return breakdown_pct, component_percentages
+        return {}, {}, {}
+
+    return breakdown_pct, component_percentages, avg_cycles
 
 
 def compute_propagation_breakdown(results):
@@ -117,37 +130,48 @@ def compute_propagation_breakdown(results):
                       'Read Watchlist Table', 'Read Watchers']
     component_percentages = {name: [] for name in component_names}
     
+    component_cycles = {name: [] for name in component_names}
+
     # Compute percentage for each test individually
     for r in finished:
         total_propagate = r.get('propagate_cycles', 0) or 0
-        
+
         if total_propagate == 0:
             continue
-        
+
         # Get cycles for each propagation component
         insert_watchers = r.get('prop_insert_watchers_cycles', 0) or 0
         read_clauses = r.get('prop_read_clauses_cycles', 0) or 0
         read_head_pointers = r.get('prop_read_head_pointers_cycles', 0) or 0
         read_watcher_blocks = r.get('prop_read_watcher_blocks_cycles', 0) or 0
-        
+
         # Compute percentage for this test
         component_percentages['Insert Watchers'].append(insert_watchers / total_propagate * 100.0)
         component_percentages['Read Clauses'].append(read_clauses / total_propagate * 100.0)
         component_percentages['Read Watchlist Table'].append(read_head_pointers / total_propagate * 100.0)
         component_percentages['Read Watchers'].append(read_watcher_blocks / total_propagate * 100.0)
-    
-    # Compute average percentage across all tests
+
+        # Collect absolute cycles
+        component_cycles['Insert Watchers'].append(insert_watchers)
+        component_cycles['Read Clauses'].append(read_clauses)
+        component_cycles['Read Watchlist Table'].append(read_head_pointers)
+        component_cycles['Read Watchers'].append(read_watcher_blocks)
+
+    # Compute average percentage and average cycles across all tests
     breakdown_pct = {}
+    avg_cycles = {}
     for name in component_names:
         if component_percentages[name]:
             breakdown_pct[name] = sum(component_percentages[name]) / len(component_percentages[name])
+            avg_cycles[name] = sum(component_cycles[name]) / len(component_cycles[name])
         else:
             breakdown_pct[name] = 0.0
-    
+            avg_cycles[name] = 0.0
+
     if not any(breakdown_pct.values()):
-        return {}
-    
-    return breakdown_pct
+        return {}, {}
+
+    return breakdown_pct, avg_cycles
 
 
 def _plot_single_breakdown(ax, runtime_breakdown, runtime_raw, prop_breakdown,
@@ -408,8 +432,12 @@ def _parse_folder(folder_path, label=""):
     print(f"{prefix}Successfully parsed: {len(results)} files")
     print(f"{prefix}Finished tests (SAT/UNSAT/UNKNOWN): {len(finished)}")
 
-    runtime_breakdown, runtime_raw = compute_runtime_breakdown(results)
-    prop_breakdown = compute_propagation_breakdown(results)
+    runtime_breakdown, runtime_raw, runtime_avg_cycles = compute_runtime_breakdown(results)
+    prop_result = compute_propagation_breakdown(results)
+    if isinstance(prop_result, tuple):
+        prop_breakdown, prop_avg_cycles = prop_result
+    else:
+        prop_breakdown, prop_avg_cycles = prop_result, {}
 
     if not runtime_breakdown and not prop_breakdown:
         print(f"{prefix}Error: No breakdown statistics found in log files")
@@ -419,14 +447,18 @@ def _parse_folder(folder_path, label=""):
     if runtime_breakdown:
         print(f"\n=== {label + ' ' if label else ''}Total Runtime Breakdown ===")
         for component, pct in sorted(runtime_breakdown.items(), key=lambda x: x[1], reverse=True):
-            print(f"  {component:20s}: {pct:6.2f}%")
-        print(f"  {'Total':20s}: {sum(runtime_breakdown.values()):6.2f}%")
+            cycles = runtime_avg_cycles.get(component, 0)
+            print(f"  {component:20s}: {pct:6.2f}%   {cycles:>15,.0f} cycles")
+        total_cycles = sum(runtime_avg_cycles.values())
+        print(f"  {'Total':20s}: {sum(runtime_breakdown.values()):6.2f}%   {total_cycles:>15,.0f} cycles")
 
     if prop_breakdown:
         print(f"\n=== {label + ' ' if label else ''}Propagation Detail Breakdown ===")
         for component, pct in sorted(prop_breakdown.items(), key=lambda x: x[1], reverse=True):
-            print(f"  {component:20s}: {pct:6.2f}%")
-        print(f"  {'Total':20s}: {sum(prop_breakdown.values()):6.2f}%")
+            cycles = prop_avg_cycles.get(component, 0)
+            print(f"  {component:20s}: {pct:6.2f}%   {cycles:>15,.0f} cycles")
+        total_cycles = sum(prop_avg_cycles.values())
+        print(f"  {'Total':20s}: {sum(prop_breakdown.values()):6.2f}%   {total_cycles:>15,.0f} cycles")
 
     return {
         'runtime_breakdown': runtime_breakdown,

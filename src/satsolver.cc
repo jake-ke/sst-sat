@@ -197,6 +197,10 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_spec_finished = registerStatistic<uint64_t>("spec_finished");
     stat_total_occ = registerStatistic<uint64_t>("total_occ");
     stat_watcher_traversed = registerStatistic<uint64_t>("watcher_traversed");
+    stat_learnt_length = registerStatistic<uint64_t>("learnt_length");
+    stat_learnt_units = registerStatistic<uint64_t>("learnt_units");
+    stat_learnt_lbd = registerStatistic<uint64_t>("learnt_lbd");
+    stat_bt_level = registerStatistic<uint64_t>("bt_level");
 
     // Component should not end simulation until solution is found
     registerAsPrimaryComponent();
@@ -290,11 +294,30 @@ void SATSolver::finish() {
     output.output("Spec Finished: %lu\n", getStatCount(stat_spec_finished));
     output.output("Variables    : %u (Total), %lu (Assigned)\n", num_vars,
         getStatCount(stat_assigns) - getStatCount(stat_unassigns));
-    output.output("Clauses      : %lu (Total), %lu (Learned)\n", 
-        clauses.size(), 
+    output.output("Clauses      : %lu (Total), %lu (Learned)\n",
+        clauses.size(),
         getStatCount(stat_learned) - getStatCount(stat_removed));
     output.output("===========================================================================\n");
-    
+
+    // Conflict learning statistics
+    {
+        uint64_t learned_count = getStatCount(stat_learned) + getStatCount(stat_learnt_units);
+        uint64_t total_length = getStatCount(stat_learnt_length);
+        uint64_t unit_count = getStatCount(stat_learnt_units);
+        uint64_t total_lbd = getStatCount(stat_learnt_lbd);
+        uint64_t total_bt = getStatCount(stat_bt_level);
+        output.output("===================[ Conflict Learning Statistics ]========================\n");
+        output.output("Total Learnt Clause Length : %lu\n", total_length);
+        output.output("Avg Learnt Clause Length   : %.2f\n",
+            learned_count > 0 ? (double)total_length / learned_count : 0.0);
+        output.output("Unit Learnt Clauses        : %lu\n", unit_count);
+        output.output("Avg LBD                    : %.2f\n",
+            learned_count > 0 ? (double)total_lbd / learned_count : 0.0);
+        output.output("Avg Backtrack Level        : %.2f\n",
+            learned_count > 0 ? (double)total_bt / learned_count : 0.0);
+        output.output("===========================================================================\n");
+    }
+
     // Only print histograms if they have data
     if (auto* hist_stat_occ = dynamic_cast<HistogramStatistic<uint64_t>*>(stat_watcher_occ)) {
         if (hist_stat_occ->getCollectionCount() > 0) {
@@ -1180,7 +1203,13 @@ void SATSolver::execMinimize() {
 
 void SATSolver::execBacktrack() {
     backtrack(bt_level);
-    
+
+    // Conflict learning statistics
+    stat_learnt_length->addDataNTimes(learnt_clause.size(), 1);
+    stat_learnt_lbd->addDataNTimes(learnt_lbd, 1);
+    stat_bt_level->addDataNTimes(bt_level, 1);
+    if (learnt_clause.size() == 1) stat_learnt_units->addData(1);
+
     if (learnt_clause.size() == 1) {
         // Unit learnt clause will be instantly propagated
         trailEnqueue(learnt_clause[0]);
@@ -1919,6 +1948,8 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     std::vector<char> tmp_seen;
     tmp_seen.resize(num_vars + 1, 0);
     int tmp_btlevel = 0;
+    int tmp_lbd = 0;
+    std::vector<bool> lbd_levels(current_level() + 1, false);
     std::vector<Cref> tmp_c_to_bump;
     std::vector<Var> tmp_v_to_bump;
 
@@ -1954,6 +1985,7 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
                 tmp_v_to_bump.push_back(v);
 
                 tmp_seen[v] = 1;
+                lbd_levels[v_data.level] = true;  // Track distinct levels for LBD
                 output.verbose(CALL_INFO, 5, 0,
                     "ANALYZE[%d]:     Marking var %d as seen\n", worker_id, v);
 
@@ -1991,13 +2023,19 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // Add the 1-UIP literal as the first in the learnt clause
     tmp_learnt[0] = ~p;
 
-    // Print learnt clause for debug
-    output.verbose(CALL_INFO, 4, 0, "ANALYZE[%d]: learnt: %s, bt_level=%d\n",
-        worker_id, printClause(tmp_learnt).c_str(), tmp_btlevel);
+    // Compute LBD (number of distinct decision levels in learnt clause)
+    for (size_t i = 0; i < lbd_levels.size(); i++) {
+        if (lbd_levels[i]) tmp_lbd++;
+    }
 
-    if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level 
+    // Print learnt clause for debug
+    output.verbose(CALL_INFO, 4, 0, "ANALYZE[%d]: learnt: %s, bt_level=%d, lbd=%d\n",
+        worker_id, printClause(tmp_learnt).c_str(), tmp_btlevel, tmp_lbd);
+
+    if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level
         && tmp_learnt.size() < learnt_clause.size())) {
         bt_level = tmp_btlevel;
+        learnt_lbd = tmp_lbd;
         learnt_clause = std::move(tmp_learnt);
         seen = std::move(tmp_seen);
         c_to_bump = std::move(tmp_c_to_bump);
