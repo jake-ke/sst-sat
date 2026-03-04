@@ -195,6 +195,12 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_para_vars = registerStatistic<uint64_t>("para_vars");
     stat_spec_started = registerStatistic<uint64_t>("spec_started");
     stat_spec_finished = registerStatistic<uint64_t>("spec_finished");
+    stat_total_occ = registerStatistic<uint64_t>("total_occ");
+    stat_watcher_traversed = registerStatistic<uint64_t>("watcher_traversed");
+    stat_learnt_length = registerStatistic<uint64_t>("learnt_length");
+    stat_learnt_units = registerStatistic<uint64_t>("learnt_units");
+    stat_learnt_lbd = registerStatistic<uint64_t>("learnt_lbd");
+    stat_bt_level = registerStatistic<uint64_t>("bt_level");
 
     // Component should not end simulation until solution is found
     registerAsPrimaryComponent();
@@ -227,6 +233,14 @@ void SATSolver::init(unsigned int phase) {
         variables.init(num_vars);
         watches.initWatches(2 * (num_vars + 1), parsed_clauses);
         clauses.initialize(parsed_clauses);
+
+        // Precompute occurrence list sizes for each literal
+        lit_occ_count.resize(2 * (num_vars + 1), 0);
+        for (auto& c : parsed_clauses) {
+            for (auto& lit : c.literals) {
+                lit_occ_count[toWatchIndex(~lit)]++;
+            }
+        }
 
         order_heap->setDecisionFlags(decision);
         order_heap->setHeapSize(num_vars);
@@ -280,11 +294,30 @@ void SATSolver::finish() {
     output.output("Spec Finished: %lu\n", getStatCount(stat_spec_finished));
     output.output("Variables    : %u (Total), %lu (Assigned)\n", num_vars,
         getStatCount(stat_assigns) - getStatCount(stat_unassigns));
-    output.output("Clauses      : %lu (Total), %lu (Learned)\n", 
-        clauses.size(), 
+    output.output("Clauses      : %lu (Total), %lu (Learned)\n",
+        clauses.size(),
         getStatCount(stat_learned) - getStatCount(stat_removed));
     output.output("===========================================================================\n");
-    
+
+    // Conflict learning statistics
+    {
+        uint64_t learned_count = getStatCount(stat_learned) + getStatCount(stat_learnt_units);
+        uint64_t total_length = getStatCount(stat_learnt_length);
+        uint64_t unit_count = getStatCount(stat_learnt_units);
+        uint64_t total_lbd = getStatCount(stat_learnt_lbd);
+        uint64_t total_bt = getStatCount(stat_bt_level);
+        output.output("===================[ Conflict Learning Statistics ]========================\n");
+        output.output("Total Learnt Clause Length : %lu\n", total_length);
+        output.output("Avg Learnt Clause Length   : %.2f\n",
+            learned_count > 0 ? (double)total_length / learned_count : 0.0);
+        output.output("Unit Learnt Clauses        : %lu\n", unit_count);
+        output.output("Avg LBD                    : %.2f\n",
+            learned_count > 0 ? (double)total_lbd / learned_count : 0.0);
+        output.output("Avg Backtrack Level        : %.2f\n",
+            learned_count > 0 ? (double)total_bt / learned_count : 0.0);
+        output.output("===========================================================================\n");
+    }
+
     // Only print histograms if they have data
     if (auto* hist_stat_occ = dynamic_cast<HistogramStatistic<uint64_t>*>(stat_watcher_occ)) {
         if (hist_stat_occ->getCollectionCount() > 0) {
@@ -318,6 +351,20 @@ void SATSolver::finish() {
         }
     }
     
+    // Reduced clause access statistics
+    {
+        uint64_t total_occ_sum = getStatCount(stat_total_occ);
+        uint64_t watcher_sum = getStatCount(stat_watcher_traversed);
+        uint64_t reduced = total_occ_sum - watcher_sum;
+        double reduction_pct = (total_occ_sum > 0)
+            ? (double)reduced / total_occ_sum * 100.0 : 0.0;
+        output.output("=================[ Reduced Clause Access Statistics ]===================\n");
+        output.output("Full Occurrence List (naive) : %lu\n", total_occ_sum);
+        output.output("2WL Watchers Traversed      : %lu\n", watcher_sum);
+        output.output("Reduced Clause Accesses     : %lu (%.1f%%)\n", reduced, reduction_pct);
+        output.output("===========================================================================\n");
+    }
+
     // output.output("=========================[ Clauses Fragmentation ]=========================\n");
     // clauses.printFragStats();
     // output.output("===========================================================================\n");
@@ -1156,7 +1203,13 @@ void SATSolver::execMinimize() {
 
 void SATSolver::execBacktrack() {
     backtrack(bt_level);
-    
+
+    // Conflict learning statistics
+    stat_learnt_length->addDataNTimes(learnt_clause.size(), 1);
+    stat_learnt_lbd->addDataNTimes(learnt_lbd, 1);
+    stat_bt_level->addDataNTimes(bt_level, 1);
+    if (learnt_clause.size() == 1) stat_learnt_units->addData(1);
+
     if (learnt_clause.size() == 1) {
         // Unit learnt clause will be instantly propagated
         trailEnqueue(learnt_clause[0]);
@@ -1168,6 +1221,9 @@ void SATSolver::execBacktrack() {
             "Added learnt clause 0x%x: %s\n", 
             addr, printClause(new_clause.literals).c_str());
         attachClause(addr, new_clause);
+        for (auto& lit : new_clause.literals) {
+            lit_occ_count[toWatchIndex(~lit)]++;
+        }
         trailEnqueue(learnt_clause[0], addr);
         stat_learned->addData(1);
     }
@@ -1177,14 +1233,14 @@ void SATSolver::execBacktrack() {
         && var_assigned[var(spec_literal)] 
         && var_value[var(spec_literal)] != !sign(spec_literal)) {
         if (spec_coroutine != nullptr) terminateSpecPropagate();
-        // insertVarOrder(var(spec_literal));
+        insertVarOrder(var(spec_literal));  // decide with spec_literal
         spec_literal = lit_Undef;
     }
 
     // do not redo speculative propagation if completed
     if (spec_literal != lit_Undef
         && spec_coroutine == nullptr) {
-        // insertVarOrder(var(spec_literal));
+        insertVarOrder(var(spec_literal));  // decide with spec_literal
         spec_literal = lit_Undef;
     }
 
@@ -1229,7 +1285,7 @@ void SATSolver::execRestart() {
     // terminate speculative propagation because we are ready to choose a new decision
     if (spec_literal != lit_Undef) {
         if (spec_coroutine != nullptr) terminateSpecPropagate();
-        // insertVarOrder(var(spec_literal));
+        insertVarOrder(var(spec_literal));  // decide with spec_literal
         spec_literal = lit_Undef;
     }
 
@@ -1305,11 +1361,11 @@ bool SATSolver::decide() {
         }
     }
 
-    // Check if we have a speculative literal to use for the main propagation
-    // if (spec_literal != lit_Undef && !var_assigned[var(spec_literal)]) {
-    //     lit = spec_literal;
-    //     output.verbose(CALL_INFO, 2, 0, "DECISION: Using speculative lit %d\n", toInt(lit));
-    // }
+    // decide with spec_literal
+    if (spec_literal != lit_Undef && !var_assigned[var(spec_literal)]) {
+        lit = spec_literal;
+        output.verbose(CALL_INFO, 2, 0, "DECISION: Using speculative lit %d\n", toInt(lit));
+    }
 
     // If couldn't use the decision sequence and no speculative literal, remove from heap
     if (lit == lit_Undef) {
@@ -1327,8 +1383,8 @@ bool SATSolver::decide() {
 
     // Extract speculative literal for next decision
     if (enable_speculative) {
-        // spec_literal = chooseBranchVariable();
-        spec_literal = peekBranchVariable();
+        spec_literal = chooseBranchVariable();
+        // spec_literal = peekBranchVariable();
         output.verbose(CALL_INFO, 2, 0, "Selected next speculative lit %d \n", toInt(spec_literal));
     }
 
@@ -1720,7 +1776,9 @@ void SATSolver::propagateLiteral(
 
     stat_para_watchers->addData(para_watchers);
     stat_watcher_occ->addData(watcher_occ);
-    
+    stat_total_occ->addDataNTimes(lit_occ_count[watch_idx], 1);
+    stat_watcher_traversed->addDataNTimes(watcher_occ, 1);
+
     // Track metrics based on whether this literal was speculative
     if (is_speculative) {
         // This variable was assigned during speculative propagation
@@ -1890,6 +1948,8 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     std::vector<char> tmp_seen;
     tmp_seen.resize(num_vars + 1, 0);
     int tmp_btlevel = 0;
+    int tmp_lbd = 0;
+    std::vector<bool> lbd_levels(current_level() + 1, false);
     std::vector<Cref> tmp_c_to_bump;
     std::vector<Var> tmp_v_to_bump;
 
@@ -1925,6 +1985,7 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
                 tmp_v_to_bump.push_back(v);
 
                 tmp_seen[v] = 1;
+                lbd_levels[v_data.level] = true;  // Track distinct levels for LBD
                 output.verbose(CALL_INFO, 5, 0,
                     "ANALYZE[%d]:     Marking var %d as seen\n", worker_id, v);
 
@@ -1962,13 +2023,19 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // Add the 1-UIP literal as the first in the learnt clause
     tmp_learnt[0] = ~p;
 
-    // Print learnt clause for debug
-    output.verbose(CALL_INFO, 4, 0, "ANALYZE[%d]: learnt: %s, bt_level=%d\n",
-        worker_id, printClause(tmp_learnt).c_str(), tmp_btlevel);
+    // Compute LBD (number of distinct decision levels in learnt clause)
+    for (size_t i = 0; i < lbd_levels.size(); i++) {
+        if (lbd_levels[i]) tmp_lbd++;
+    }
 
-    if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level 
+    // Print learnt clause for debug
+    output.verbose(CALL_INFO, 4, 0, "ANALYZE[%d]: learnt: %s, bt_level=%d, lbd=%d\n",
+        worker_id, printClause(tmp_learnt).c_str(), tmp_btlevel, tmp_lbd);
+
+    if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level
         && tmp_learnt.size() < learnt_clause.size())) {
         bt_level = tmp_btlevel;
+        learnt_lbd = tmp_lbd;
         learnt_clause = std::move(tmp_learnt);
         seen = std::move(tmp_seen);
         c_to_bump = std::move(tmp_c_to_bump);
@@ -2034,14 +2101,14 @@ void SATSolver::backtrack(int backtrack_level) {
         
         polarity[v] = sign(p);
         unassignVariable(v);
+        
+        // peek version
+        // insertVarOrder(v);
 
-        // Skip reinserting the speculative literal back into the heap
-        // if (v != var(spec_literal)) {
+        // decide with spec_literal
+        if (v != var(spec_literal)) {
             insertVarOrder(v);
-        // } else {
-        //     output.verbose(CALL_INFO, 4, 0, 
-        //         "BACKTRACK: Skipping reinsertion of speculative variable x%d\n", v);
-        // }
+        }
         
         output.verbose(CALL_INFO, 5, 0,
             "BACKTRACK: Unassigning x%d, saved polarity %s\n", 
@@ -2099,6 +2166,13 @@ void SATSolver::reduceDB() {
             output.verbose(CALL_INFO, 4, 0, 
                 "REDUCEDB: Marking clause 0x%x for removal\n", addr);
 
+            // update occurrence counts before detaching
+            {
+                const Clause& c = clauses.readClause(addr);
+                for (int li = 0; li < c.litSize(); li++) {
+                    lit_occ_count[toWatchIndex(~c[li])]--;
+                }
+            }
             // remove watchers
             detachClause(addr);
             clauses.freeClause(addr, cls_size);
