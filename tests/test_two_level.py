@@ -386,6 +386,10 @@ sst.enableStatisticsForComponentName("solver", [
     "spec_finished",
     "total_occ",
     "watcher_traversed",
+    "learnt_length",
+    "learnt_units",
+    "learnt_lbd",
+    "bt_level",
 ], {
     "type": "sst.AccumulatorStatistic",
     "rate": "1s"
