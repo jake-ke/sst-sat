@@ -23,6 +23,7 @@ show_usage() {
     echo "  --num-seeds NUM       Number of random seeds to run (default: 1)"
     echo "  --seed NUM            Run a single seed with the specified seed number (overrides --num-seeds)"
     echo "  --timeout-cycles N    Maximum solver cycles before timing out (0 or omit for unlimited)"
+    echo "  --freq FREQ           Clock frequency for all components (e.g. 1GHz, 500MHz)"
     echo "  -j, --jobs JOBS       Number of parallel jobs"
     echo "Example: $SCRIPT_NAME --bench-dir /path/to/benchmarks --l1-size 32KiB --l1-latency 2 --mem-latency 200ns --prefetch --timeout-cycles 100000000 --folder quick_test --num-seeds 5 -j 8"
     echo "Example: $SCRIPT_NAME --bench-dir /path/to/benchmarks --seed 42 --folder test_seed42 -j 4"
@@ -50,6 +51,7 @@ SPEC=""
 NUM_SEEDS=1
 SPECIFIC_SEED=""
 TIMEOUT_CYCLES=""
+FREQ=""
 
 # Default number of parallel jobs (use available CPU cores)
 MAX_JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
@@ -226,6 +228,16 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        --freq)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                FREQ="$2"
+                shift 2
+            else
+                echo "Error: --freq requires a frequency argument (e.g. 1GHz, 500MHz)"
+                show_usage
+                exit 1
+            fi
+            ;;
         -j|--jobs)
             if [[ "$2" =~ ^[0-9]+$ ]]; then
                 MAX_JOBS=$2
@@ -308,6 +320,7 @@ if [[ -n "$SPECIFIC_SEED" ]]; then
 else
     log_message "Number of random seeds: $NUM_SEEDS (run from seed 0)"
 fi
+log_message "Clock frequency: ${FREQ:-default}"
 if [[ -n "$TIMEOUT_CYCLES" ]]; then
     log_message "Timeout cycles: $TIMEOUT_CYCLES"
 else
@@ -429,6 +442,7 @@ run_one_seed() {
     [[ -n "$PREFETCH" ]] && command+=" --prefetch"
     [[ -n "$SPEC" ]] && command+=" --spec"
     [[ -n "$TIMEOUT_CYCLES" ]] && command+=" --timeout-cycles $TIMEOUT_CYCLES"
+    [[ -n "$FREQ" ]] && command+=" --freq $FREQ"
 
     # Run the test with proper command
     eval $command > "$log_file" 2>&1
