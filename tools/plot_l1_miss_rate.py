@@ -52,8 +52,8 @@ def compute_l1_miss_rates(results):
     
     So they add up to the total miss rate.
     """
-    # Filter to finished tests only
-    finished = [r for r in results if r.get('result') in ('SAT', 'UNSAT')]
+    # Filter to valid tests (exclude only ERROR and UNKNOWN)
+    finished = [r for r in results if r.get('result') not in ('ERROR', 'UNKNOWN')]
     
     if not finished:
         return {}
@@ -202,8 +202,8 @@ def collect_miss_rate_data(cache_sizes_dir, base_folder_name):
             print(f"  No valid results found")
             continue
         
-        finished = [r for r in all_seed_results if r.get('result') in ('SAT', 'UNSAT')]
-        print(f"  Total tests: {len(all_seed_results)}, Finished: {len(finished)}")
+        finished = [r for r in all_seed_results if r.get('result') not in ('ERROR', 'UNKNOWN')]
+        print(f"  Total tests: {len(all_seed_results)}, Valid tests (SAT/UNSAT/TIMEOUT): {len(finished)}")
         
         if not finished:
             continue
