@@ -31,7 +31,7 @@ from pathlib import Path
 def detect_log_format(content):
     """Detect whether this is a minisat, kissat, or satsolver log."""
     # Check for satsolver format indicators
-    if 'Using CNF file:' in content and 'Simulation is complete' in content:
+    if 'Using CNF file:' in content:
         return 'satsolver'
     # Check for minisat format indicators
     elif 'Problem Statistics' in content and 'conflicts             :' in content:
@@ -59,7 +59,7 @@ def parse_minisat_log(log_file_path, content):
     """Parse minisat format log file.
     
     Extracts a subset of information available in minisat logs:
-    - Test case name and SAT/UNSAT result (or TIMEDOUT/UNKNOWN)
+    - Test case name and SAT/UNSAT/TIMEOUT result (INDETERMINATE -> TIMEOUT)
     - Number of variables and clauses
     - Memory used
     - Runtime (converted to ms for consistency)
@@ -146,7 +146,9 @@ def parse_minisat_log(log_file_path, content):
             result['result'] = 'UNSAT'
         elif 'SATISFIABLE' in content and 'UNSATISFIABLE' not in content:
             result['result'] = 'SAT'
-        # Any other case (INDETERMINATE, timeout, incomplete, etc.) stays as UNKNOWN
+        elif 'INDETERMINATE' in content:
+            result['result'] = 'TIMEOUT'
+        # Any other case (incomplete, error, etc.) stays as UNKNOWN
         
     except Exception as e:
         print(f"Warning: Partial parse of minisat log {log_file_path}: {e}")
@@ -382,24 +384,33 @@ def parse_solver_statistics(content):
     return stats
 
 
-def parse_l1_cache_statistics(content):
-    """Parse L1 Cache Profiler Statistics section."""
+def parse_cache_statistics(content, level):
+    """Parse Cache Profiler Statistics section for a given cache level.
+
+    Args:
+        content: Log file content
+        level: Cache level string, e.g. "L1" or "L2"
+
+    Returns:
+        dict with keys like '{level_lower}_{component}_hits', '{level_lower}_total_requests', etc.
+    """
+    prefix = level.lower()
     cache_stats = {}
-    
-    # Find L1 cache section
-    section_pattern = r'===+\s*L1 Cache Profiler Statistics\s*===+\n(.*?)\n===+'
+
+    section_pattern = rf'===+\s*{level} Cache Profiler Statistics\s*===+\n(.*?)\n===+'
     section_match = re.search(section_pattern, content, re.DOTALL)
-    
+
     if section_match:
         section_text = section_match.group(1)
-        
+
         # Parse total statistics first
         total_pattern = r'TOTAL\s*:\s*(\d+) hits,\s*(\d+) misses,\s*(\d+) total,\s*([\d.]+)% miss rate'
         total_match = re.search(total_pattern, section_text)
         if total_match:
-            cache_stats['l1_total_requests'] = int(total_match.group(3))
-            cache_stats['l1_total_miss_rate'] = float(total_match.group(4))
-        
+            cache_stats[f'{prefix}_total_requests'] = int(total_match.group(3))
+            cache_stats[f'{prefix}_total_miss_rate'] = float(total_match.group(4))
+            cache_stats[f'{prefix}_total_misses'] = int(total_match.group(2))
+
         # Parse component statistics (excluding ClaActivity)
         components = ['Heap', 'Variables', 'Watches', 'Clauses', 'VarActivity']
         for component in components:
@@ -407,12 +418,17 @@ def parse_l1_cache_statistics(content):
             match = re.search(pattern, section_text)
             if match:
                 comp_name = component.lower()
-                cache_stats[f'l1_{comp_name}_total'] = int(match.group(3))
-                cache_stats[f'l1_{comp_name}_miss_rate'] = float(match.group(4))
-                cache_stats[f'l1_{comp_name}_hits'] = int(match.group(1))
-                cache_stats[f'l1_{comp_name}_misses'] = int(match.group(2))
-    
+                cache_stats[f'{prefix}_{comp_name}_total'] = int(match.group(3))
+                cache_stats[f'{prefix}_{comp_name}_miss_rate'] = float(match.group(4))
+                cache_stats[f'{prefix}_{comp_name}_hits'] = int(match.group(1))
+                cache_stats[f'{prefix}_{comp_name}_misses'] = int(match.group(2))
+
     return cache_stats
+
+
+def parse_l1_cache_statistics(content):
+    """Parse L1 Cache Profiler Statistics section (backward-compatible wrapper)."""
+    return parse_cache_statistics(content, "L1")
 
 
 def parse_clauses_fragmentation(content):
@@ -563,6 +579,30 @@ def parse_directed_prefetcher_statistics(content):
     m = re.search(r"Prefetch accuracy:\s*([\d.]+)%", text)
     if m:
         stats['prefetch_accuracy'] = float(m.group(1))
+    return stats
+
+
+def parse_reduced_clause_access_statistics(content):
+    """Parse Reduced Clause Access Statistics section if present."""
+    stats = {}
+    section = re.search(
+        r'=+\[\s*Reduced Clause Access Statistics\s*\]=+\n(.*?)\n=+',
+        content, re.DOTALL
+    )
+    if not section:
+        return stats
+    text = section.group(1)
+
+    m = re.search(r'Full Occurrence List \(naive\)\s*:\s*(\d+)', text)
+    if m:
+        stats['twl_naive_accesses'] = int(m.group(1))
+    m = re.search(r'2WL Watchers Traversed\s*:\s*(\d+)', text)
+    if m:
+        stats['twl_watchers_traversed'] = int(m.group(1))
+    m = re.search(r'Reduced Clause Accesses\s*:\s*(\d+)\s*\(([\d.]+)%\)', text)
+    if m:
+        stats['twl_reduced_accesses'] = int(m.group(1))
+        stats['twl_reduction_pct'] = float(m.group(2))
     return stats
 
 
@@ -736,11 +776,32 @@ def parse_satsolver_log(log_file_path, content):
         result['total_memory_bytes'] = total_bytes
         result['total_memory_formatted'] = format_bytes(total_bytes)
 
-        # Result sanity
-        if 'UNSATISFIABLE' in content:
-            result['result'] = 'UNSAT'
-        elif 'SATISFIABLE' in content and 'UNSATISFIABLE' not in content:
-            result['result'] = 'SAT'
+        # Determine result type based on log content
+        has_simulation_complete = 'Simulation is complete' in content
+        has_timeout = '====================[ Timeout Reached' in content
+        has_error = re.search(r'(fatal|error)', content, re.IGNORECASE) is not None
+        has_sat = 'SATISFIABLE: All variables assigned' in content
+        has_unsat = 'UNSATISFIABLE: conflict at level 0' in content
+        
+        # Normal types: must have "Simulation is complete"
+        if has_simulation_complete:
+            if has_sat:
+                result['result'] = 'SAT'
+            elif has_unsat:
+                result['result'] = 'UNSAT'
+            elif has_timeout:
+                result['result'] = 'TIMEOUT'
+            else:
+                print(f"Warning: Simulation complete but no SAT/UNSAT/TIMEOUT result in {log_file_path}")
+                result['result'] = 'UNKNOWN'
+        else:
+            # Not normal: missing "Simulation is complete"
+            if has_error:
+                result['result'] = 'ERROR'
+                print(f"Warning: ERROR detected in {log_file_path}")
+            else:
+                result['result'] = 'UNKNOWN'
+                print(f"Warning: UNKNOWN result in {log_file_path}")
 
         # Simulated time
         time_match = re.search(r'Simulation is complete, simulated time: ([\d.]+)\s*(\w+)', content)
@@ -762,6 +823,7 @@ def parse_satsolver_log(log_file_path, content):
 
         result.update(parse_solver_statistics(content))
         result.update(parse_l1_cache_statistics(content))
+        result.update(parse_cache_statistics(content, "L2"))
         result.update(parse_clauses_fragmentation(content))
         result.update(parse_cycle_statistics(content))
 
@@ -773,14 +835,20 @@ def parse_satsolver_log(log_file_path, content):
 
         result.update(parse_propagation_detail_statistics(content))
         result.update(parse_directed_prefetcher_statistics(content))
+        result.update(parse_reduced_clause_access_statistics(content))
         
-        # Check result status - any case without SAT/UNSAT stays as UNKNOWN
-        if not result['result'] or result['result'] not in ['SAT', 'UNSAT']:
-            result['result'] = 'UNKNOWN'
+        # For abnormal results (ERROR/UNKNOWN), clear all numeric fields except test_case and result
+        if result['result'] in ('ERROR', 'UNKNOWN'):
+            # Keep only test_case and result, clear everything else
+            test_case = result['test_case']
+            result_type = result['result']
+            result.clear()
+            result['test_case'] = test_case
+            result['result'] = result_type
                 
     except Exception as e:
         print(f"Warning: Partial parse of satsolver log {log_file_path}: {e}")
-        # Still return the partial result with UNKNOWN status
+        result['result'] = 'ERROR'
     
     return result
 
