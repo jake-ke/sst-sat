@@ -260,6 +260,7 @@ def plot_propagation_histograms(results, output_pdf, weighted_only=False):
         ax1.tick_params(axis='y', which='major', labelsize=24)
         ax1.grid(True, axis='y', alpha=0.3, linestyle='--')
         ax1.legend(fontsize=20, loc='upper center', ncol=2, framealpha=0.9)
+        ax1.text(0.5, -0.28, '(a)', transform=ax1.transAxes, fontsize=26, fontweight='bold', va='top', ha='center')
 
         # Add percentage labels on top of bars (only if within ylim)
         ylim = ax1.get_ylim()
@@ -355,6 +356,7 @@ def plot_propagation_histograms(results, output_pdf, weighted_only=False):
         ax2.tick_params(axis='y', which='major', labelsize=24)
         ax2.grid(True, axis='y', alpha=0.3, linestyle='--')
         ax2.legend(fontsize=20, loc='upper center', ncol=2, framealpha=0.9)
+        ax2.text(0.5, -0.28, '(b)', transform=ax2.transAxes, fontsize=26, fontweight='bold', va='top', ha='center')
 
         # Add percentage labels on top of bars (only if within ylim)
         ylim = ax2.get_ylim()

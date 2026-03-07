@@ -11,7 +11,7 @@ Uses L1 cache miss data for bandwidth estimation (cache-aware roofline model).
 L1 misses represent the data movement demand from the accelerator to the memory hierarchy.
 
 Usage: python plot_throughput_roofline.py <folder1> <folder2> --peak-bandwidth <GB/s> --peak-compute <props/s>
-       [--names "Baseline" "SATBlast"] [--timeout 36] [--output-dir results/] [--large-fonts]
+       [--names "Baseline" "SATBlast"] [--timeout 36] [--output-dir results/]
 
 Examples:
     python plot_throughput_roofline.py runs/baseline runs/optimized --peak-bandwidth 16 --peak-compute 1e9
@@ -21,6 +21,7 @@ Examples:
 import sys
 import argparse
 import math
+import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 from unified_parser import parse_log_directory
@@ -138,24 +139,15 @@ def compute_metrics(results, timeout_ms):
     return metrics
 
 
-def get_font_sizes(large_fonts):
-    """Return font size dict based on --large-fonts flag."""
-    if large_fonts:
-        return {
-            'axis_label': 32,
-            'axis_label_weight': 'bold',
-            'tick': 28,
-            'legend': 24,
-            'annotation': 20,
-        }
-    else:
-        return {
-            'axis_label': 18,
-            'axis_label_weight': 'normal',
-            'tick': 18,
-            'legend': 18,
-            'annotation': 14,
-        }
+def get_font_sizes():
+    """Return font size dict for publication-quality figures."""
+    return {
+        'axis_label': 32,
+        'axis_label_weight': 'bold',
+        'tick': 28,
+        'legend': 30,
+        'annotation': 26,
+    }
 
 
 def plot_propagations_per_sec(common_tests, all_metrics, folder_names, colors, fonts, output_path):
@@ -179,11 +171,10 @@ def plot_propagations_per_sec(common_tests, all_metrics, folder_names, colors, f
     log_speedups = [math.log(s) for _, s in test_speedups if s > 0]
     geomean_speedup = math.exp(sum(log_speedups) / len(log_speedups)) if log_speedups else 1.0
 
-    # Short test labels
-    labels = [tc[:30] + '...' if len(tc) > 33 else tc for tc in sorted_tests]
+    labels = [tc[:6] for tc in sorted_tests]
 
-    fig_width = max(12, len(sorted_tests) * 0.5)
-    fig, ax = plt.subplots(figsize=(fig_width, 6))
+    fig_width = max(15, len(sorted_tests) * 0.6)
+    fig, ax = plt.subplots(figsize=(fig_width, 8))
 
     num_folders = len(folder_names)
     bar_width = 0.8 / num_folders
@@ -200,7 +191,7 @@ def plot_propagations_per_sec(common_tests, all_metrics, folder_names, colors, f
 
     ax.set_ylabel('Propagations/s', fontsize=fonts['axis_label'], fontweight=fonts['axis_label_weight'])
     ax.set_xticks([x + bar_width * (num_folders - 1) / 2 for x in x_base])
-    ax.set_xticklabels(labels, fontsize=max(8, fonts['tick'] - 8), rotation=90, ha='center')
+    ax.set_xticklabels(labels, fontsize=max(8, fonts['tick'] - 4), rotation=45, ha='right')
     ax.tick_params(axis='y', labelsize=fonts['tick'])
 
     ax.grid(axis='y', alpha=0.6, linestyle='-', linewidth=1.2)
@@ -214,7 +205,7 @@ def plot_propagations_per_sec(common_tests, all_metrics, folder_names, colors, f
     # Legend
     max_val = max(all_metrics[fn][tc]['propagations_per_sec'] for fn in folder_names for tc in sorted_tests)
     ax.set_ylim(0, max_val * 1.35)
-    ax.legend(loc='upper center', fontsize=fonts['legend'], frameon=False,
+    ax.legend(loc='upper center', fontsize=fonts['legend'], frameon=True,
               ncol=num_folders, bbox_to_anchor=(0.5, 1.02),
               handlelength=1.0, handletextpad=0.5, columnspacing=1.0)
 
@@ -227,7 +218,7 @@ def plot_propagations_per_sec(common_tests, all_metrics, folder_names, colors, f
 def plot_roofline(common_tests, all_metrics, folder_names, colors, fonts,
                   peak_bandwidth_GBs, peak_compute_props, output_path):
     """Plot roofline chart with both configs."""
-    fig, ax = plt.subplots(figsize=(10, 7))
+    fig, ax = plt.subplots(figsize=(12, 9))
 
     # Collect all OI values to set axis range
     all_oi = []
@@ -242,7 +233,7 @@ def plot_roofline(common_tests, all_metrics, folder_names, colors, fonts,
             perf_vals.append(m['propagations_per_sec'])
 
         ax.scatter(oi_vals, perf_vals, color=colors[folder_idx], label=folder_name,
-                   s=60, alpha=0.8, edgecolors='black', linewidth=0.5, zorder=3)
+                   s=120, alpha=0.8, edgecolors='black', linewidth=0.5, zorder=3)
         all_oi.extend(oi_vals)
         all_perf.extend(perf_vals)
 
@@ -258,17 +249,14 @@ def plot_roofline(common_tests, all_metrics, folder_names, colors, fonts,
         # Bandwidth ceiling: performance = peak_bw_bytes * OI
         bw_oi_range = [oi_min, min(ridge_oi, oi_max)]
         bw_perf = [peak_bw_bytes * oi for oi in bw_oi_range]
-        ax.plot(bw_oi_range, bw_perf, 'k-', linewidth=2.5, zorder=2)
+        ax.plot(bw_oi_range, bw_perf, 'k--', linewidth=2.5, zorder=2)
 
         # Compute ceiling: horizontal line at peak compute
         compute_oi_range = [max(ridge_oi, oi_min), oi_max]
         ax.plot(compute_oi_range, [peak_compute_props, peak_compute_props],
-                'k-', linewidth=2.5, zorder=2)
+                'k--', linewidth=2.5, zorder=2)
 
-        # Labels for ceilings
-        ax.text(bw_oi_range[0] * 1.2, bw_perf[0] * 1.3,
-                f'Peak BW: {peak_bandwidth_GBs:.1f} GB/s',
-                fontsize=fonts['annotation'], rotation=35, va='bottom')
+        # Labels for ceilings (placed after axis setup below)
         ax.text(compute_oi_range[-1] * 0.7, peak_compute_props * 1.15,
                 f'Peak Compute: {peak_compute_props:.2e} prop/s',
                 fontsize=fonts['annotation'], ha='right', va='bottom')
@@ -283,7 +271,23 @@ def plot_roofline(common_tests, all_metrics, folder_names, colors, fonts,
     ax.grid(True, alpha=0.3, linestyle='--', which='both')
     ax.set_axisbelow(True)
 
-    ax.legend(fontsize=fonts['legend'], frameon=False, loc='lower right')
+    # Extend y-axis upper limit to fit peak compute label
+    y_lo, y_hi = ax.get_ylim()
+    ax.set_ylim(y_lo, y_hi * 3)
+
+    # Compute BW label rotation to match the line's visual angle on log-log axes
+    if all_oi:
+        fig.canvas.draw()
+        # Transform two points on the BW line to display coordinates
+        p1 = ax.transData.transform((bw_oi_range[0], bw_perf[0]))
+        p2 = ax.transData.transform((bw_oi_range[-1], bw_perf[-1]))
+        angle_deg = np.degrees(np.arctan2(p2[1] - p1[1], p2[0] - p1[0]))
+        ax.text(bw_oi_range[0] * 1.2, bw_perf[0] * 1.3,
+                f'Peak BW: {peak_bandwidth_GBs:.1f} GB/s',
+                fontsize=fonts['annotation'], rotation=angle_deg,
+                rotation_mode='anchor', va='bottom')
+
+    ax.legend(fontsize=fonts['legend'], frameon=True, loc='lower right')
 
     plt.tight_layout()
     plt.savefig(output_path, format='pdf', bbox_inches='tight')
@@ -295,13 +299,23 @@ def plot_bandwidth_comparison(common_tests, all_metrics, folder_names, colors, f
     """Plot bandwidth utilization comparison bar chart."""
     # Sort by baseline bandwidth (ascending)
     baseline_name = folder_names[0]
+    accel_name = folder_names[1]
     sorted_tests = sorted(common_tests,
                           key=lambda tc: all_metrics[baseline_name][tc]['actual_bandwidth_GBs'])
 
-    labels = [tc[:30] + '...' if len(tc) > 33 else tc for tc in sorted_tests]
+    # Compute geomean bandwidth ratio
+    log_ratios = []
+    for tc in sorted_tests:
+        base_bw = all_metrics[baseline_name][tc]['actual_bandwidth_GBs']
+        accel_bw = all_metrics[accel_name][tc]['actual_bandwidth_GBs']
+        if base_bw > 0:
+            log_ratios.append(math.log(accel_bw / base_bw))
+    geomean_bw_ratio = math.exp(sum(log_ratios) / len(log_ratios)) if log_ratios else 1.0
 
-    fig_width = max(12, len(sorted_tests) * 0.5)
-    fig, ax = plt.subplots(figsize=(fig_width, 6))
+    labels = [tc[:6] for tc in sorted_tests]
+
+    fig_width = max(15, len(sorted_tests) * 0.6)
+    fig, ax = plt.subplots(figsize=(fig_width, 8))
 
     num_folders = len(folder_names)
     bar_width = 0.8 / num_folders
@@ -318,15 +332,20 @@ def plot_bandwidth_comparison(common_tests, all_metrics, folder_names, colors, f
 
     ax.set_ylabel('Bandwidth (GB/s)', fontsize=fonts['axis_label'], fontweight=fonts['axis_label_weight'])
     ax.set_xticks([x + bar_width * (num_folders - 1) / 2 for x in x_base])
-    ax.set_xticklabels(labels, fontsize=max(8, fonts['tick'] - 8), rotation=90, ha='center')
+    ax.set_xticklabels(labels, fontsize=max(8, fonts['tick'] - 4), rotation=45, ha='right')
     ax.tick_params(axis='y', labelsize=fonts['tick'])
 
     ax.grid(axis='y', alpha=0.6, linestyle='-', linewidth=1.2)
     ax.set_axisbelow(True)
 
+    # Annotation for geometric mean
+    ax.text(0.02, 0.95, f'Geomean BW ratio: {geomean_bw_ratio:.2f}x',
+            transform=ax.transAxes, fontsize=fonts['annotation'] + 6,
+            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
     max_val = max(all_metrics[fn][tc]['actual_bandwidth_GBs'] for fn in folder_names for tc in sorted_tests)
     ax.set_ylim(0, max_val * 1.35)
-    ax.legend(loc='upper center', fontsize=fonts['legend'], frameon=False,
+    ax.legend(loc='upper center', fontsize=fonts['legend'] + 6, frameon=True,
               ncol=num_folders, bbox_to_anchor=(0.5, 1.02),
               handlelength=1.0, handletextpad=0.5, columnspacing=1.0)
 
@@ -344,14 +363,14 @@ def plot_throughput_vs_req_per_prop(common_tests, all_metrics, folder_names, col
     Points shifting left = fewer memory requests per propagation (better data reuse).
     Points shifting up = higher throughput at same req/prop (better compute efficiency).
     """
-    fig, ax = plt.subplots(figsize=(10, 7))
+    fig, ax = plt.subplots(figsize=(12, 9))
 
     for folder_idx, folder_name in enumerate(folder_names):
         req_per_prop = [all_metrics[folder_name][tc]['req_per_prop'] for tc in common_tests]
         prop_per_sec = [all_metrics[folder_name][tc]['propagations_per_sec'] for tc in common_tests]
 
         ax.scatter(req_per_prop, prop_per_sec, color=colors[folder_idx], label=folder_name,
-                   s=60, alpha=0.8, edgecolors='black', linewidth=0.5, zorder=3)
+                   s=120, alpha=0.8, edgecolors='black', linewidth=0.5, zorder=3)
 
     ax.set_xscale('log')
     ax.set_yscale('log')
@@ -363,7 +382,7 @@ def plot_throughput_vs_req_per_prop(common_tests, all_metrics, folder_names, col
     ax.grid(True, alpha=0.3, linestyle='--', which='both')
     ax.set_axisbelow(True)
 
-    ax.legend(fontsize=fonts['legend'], frameon=False, loc='upper right')
+    ax.legend(fontsize=fonts['legend'], frameon=True, loc='upper right')
 
     plt.tight_layout()
     plt.savefig(output_path, format='pdf', bbox_inches='tight')
@@ -375,14 +394,24 @@ def plot_req_per_prop_bars(common_tests, all_metrics, folder_names, colors, font
     """Plot L1 requests per propagation as grouped bar chart per test."""
     # Sort by baseline req/prop (ascending)
     baseline_name = folder_names[0]
+    accel_name = folder_names[1]
     sorted_tests = sorted(common_tests,
                           key=lambda tc: all_metrics[baseline_name][tc]['req_per_prop'])
+
+    # Compute geomean req/prop ratio
+    log_ratios = []
+    for tc in sorted_tests:
+        base_rpp = all_metrics[baseline_name][tc]['req_per_prop']
+        accel_rpp = all_metrics[accel_name][tc]['req_per_prop']
+        if base_rpp > 0:
+            log_ratios.append(math.log(accel_rpp / base_rpp))
+    geomean_rpp_ratio = math.exp(sum(log_ratios) / len(log_ratios)) if log_ratios else 1.0
 
     # First 5 characters of test name, slanted
     labels = [tc[:6] for tc in sorted_tests]
 
-    fig_width = max(12, len(sorted_tests) * 0.5)
-    fig, ax = plt.subplots(figsize=(fig_width, 6))
+    fig_width = max(15, len(sorted_tests) * 0.6)
+    fig, ax = plt.subplots(figsize=(fig_width, 8))
 
     num_folders = len(folder_names)
     bar_width = 0.8 / num_folders
@@ -407,7 +436,13 @@ def plot_req_per_prop_bars(common_tests, all_metrics, folder_names, colors, font
     ax.grid(axis='y', alpha=0.3, linestyle='--', which='both')
     ax.set_axisbelow(True)
 
-    ax.legend(loc='upper center', fontsize=fonts['legend'], frameon=False,
+    # Annotation for geometric mean (invert ratio so >1x means reduction)
+    geomean_rpp_reduction = 1.0 / geomean_rpp_ratio if geomean_rpp_ratio > 0 else 1.0
+    ax.text(0.02, 0.95, f'Geomean req/prop reduction: {geomean_rpp_reduction:.2f}x',
+            transform=ax.transAxes, fontsize=fonts['annotation'] + 6,
+            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+    ax.legend(loc='upper center', fontsize=fonts['legend'] + 6, frameon=True,
               ncol=num_folders, bbox_to_anchor=(0.5, 1.02),
               handlelength=1.0, handletextpad=0.5, columnspacing=1.0)
 
@@ -439,12 +474,9 @@ Examples:
                         help='Timeout in seconds (default: 36)')
     parser.add_argument('--output-dir', default='results',
                         help='Output directory for plots (default: results/)')
-    parser.add_argument('--large-fonts', action='store_true',
-                        help='Use larger fonts for publication-quality figures')
-
     args = parser.parse_args()
     timeout_ms = args.timeout * 1000.0
-    fonts = get_font_sizes(args.large_fonts)
+    fonts = get_font_sizes()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 

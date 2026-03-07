@@ -582,6 +582,41 @@ def parse_directed_prefetcher_statistics(content):
     return stats
 
 
+def parse_conflict_learning_statistics(content):
+    """Parse Conflict Learning Statistics section."""
+    stats = {}
+
+    section = re.search(
+        r'=+\[\s*Conflict Learning Statistics\s*\]=+\n(.*?)\n=+',
+        content, re.DOTALL
+    )
+
+    if section:
+        text = section.group(1)
+
+        int_patterns = {
+            'total_learnt_clause_length': r'Total Learnt Clause Length\s*:\s*(\d+)',
+            'unit_learnt_clauses': r'Unit Learnt Clauses\s*:\s*(\d+)',
+        }
+        float_patterns = {
+            'avg_learnt_clause_length': r'Avg Learnt Clause Length\s*:\s*([\d.]+)',
+            'avg_lbd': r'Avg LBD\s*:\s*([\d.]+)',
+            'avg_backtrack_level': r'Avg Backtrack Level\s*:\s*([\d.]+)',
+        }
+
+        for key, pattern in int_patterns.items():
+            match = re.search(pattern, text)
+            if match:
+                stats[key] = int(match.group(1))
+
+        for key, pattern in float_patterns.items():
+            match = re.search(pattern, text)
+            if match:
+                stats[key] = float(match.group(1))
+
+    return stats
+
+
 def parse_reduced_clause_access_statistics(content):
     """Parse Reduced Clause Access Statistics section if present."""
     stats = {}
@@ -836,6 +871,7 @@ def parse_satsolver_log(log_file_path, content):
         result.update(parse_propagation_detail_statistics(content))
         result.update(parse_directed_prefetcher_statistics(content))
         result.update(parse_reduced_clause_access_statistics(content))
+        result.update(parse_conflict_learning_statistics(content))
         
         # For abnormal results (ERROR/UNKNOWN), clear all numeric fields except test_case and result
         if result['result'] in ('ERROR', 'UNKNOWN'):
