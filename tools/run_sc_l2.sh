@@ -5,7 +5,11 @@ SCRIPT_NAME=$(basename "$0")
 
 # Check if help is requested or show usage
 show_usage() {
-    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--prefetch] [--spec] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [-j jobs]"
+<<<<<<< HEAD
+    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--l2-latency LATENCY] [--l2-bw BW] [--l2-width WIDTH] [--mem-latency LATENCY] [--prefetch] [--spec] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [-j jobs]"
+=======
+    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--l2-latency LATENCY] [--l2-bw BW] [--l2-width WIDTH] [--mem-latency LATENCY] [--prefetch] [--spec] [--folder FOLDER] [--num-seeds NUM] [--timeout-cycles CYCLES] [-j jobs]"
+>>>>>>> 9aa1f0a17a6ff001e5408b1207180e70c2482d83
     echo "Options:"
     echo "  -b, --bench-dir DIR  Directory containing benchmark CNF files (required)"
     echo "  --ram2-cfg FILE       Ramulator2 configuration file"
@@ -16,6 +20,7 @@ show_usage() {
     echo "  --l2-size SIZE        L2 cache size"
     echo "  --l2-latency LATENCY  L2 cache latency cycles"
     echo "  --l2-bw BW            L2 cache bandwidth (max requests per cycle; use -1 for unlimited/auto)"
+    echo "  --l2-width WIDTH      L2 cache link width (request/response), e.g., 64B"
     echo "  --mem-latency LATENCY External memory latency"
     echo "  --prefetch            Enable directed prefetching"
     echo "  --spec                Enable speculative propagation"
@@ -44,6 +49,7 @@ L1_BW=""
 L2_SIZE=""
 L2_LATENCY=""
 L2_BW=""
+L2_WIDTH=""
 MEM_LATENCY=""
 FOLDER_NAME="logs"
 PREFETCH=""
@@ -166,6 +172,16 @@ while [[ $# -gt 0 ]]; do
                 shift 2
             else
                 echo "Error: --l2-bw requires an integer bandwidth (use -1 for unlimited/auto)"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --l2-width)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                L2_WIDTH="$2"
+                shift 2
+            else
+                echo "Error: --l2-width requires a width argument (e.g., 64B)"
                 show_usage
                 exit 1
             fi
@@ -314,6 +330,7 @@ log_message "L1 cache bandwidth: ${L1_BW:-default}"
 log_message "L2 cache size: ${L2_SIZE:-default}"
 log_message "L2 cache latency: ${L2_LATENCY:-default}"
 log_message "L2 cache bandwidth: ${L2_BW:-default}"
+log_message "L2 cache width: ${L2_WIDTH:-default}"
 log_message "Memory latency: ${MEM_LATENCY:-default}"
 if [[ -n "$SPECIFIC_SEED" ]]; then
     log_message "Running single seed: $SPECIFIC_SEED"
@@ -438,6 +455,7 @@ run_one_seed() {
     [[ -n "$L2_SIZE" ]] && command+=" --l2-size $L2_SIZE"
     [[ -n "$L2_LATENCY" ]] && command+=" --l2-latency $L2_LATENCY"
     [[ -n "$L2_BW" ]] && command+=" --l2-bw $L2_BW"
+    [[ -n "$L2_WIDTH" ]] && command+=" --l2-width $L2_WIDTH"
     [[ -n "$MEM_LATENCY" ]] && command+=" --mem-latency $MEM_LATENCY"
     [[ -n "$PREFETCH" ]] && command+=" --prefetch"
     [[ -n "$SPEC" ]] && command+=" --spec"
