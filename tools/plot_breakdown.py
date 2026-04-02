@@ -10,7 +10,7 @@ This script parses log files from SAT solver runs and generates PDF plots showin
 The input takes a directory containing log files (not multi-seed).
 Only finished tests (SAT/UNSAT) are included in the averaging.
 
-Usage: python plot_breakdown.py <logs_folder> [output_pdf] [--accel <accel_folder>]
+Usage: python plot_breakdown.py <logs_folder> [output_pdf] [--folder <folder> <name>] [--accel <accel_folder>]
 """
 
 import sys
@@ -291,19 +291,22 @@ def plot_breakdowns(runtime_breakdown, runtime_raw, prop_breakdown, output_pdf):
     plt.close()
 
 
-def plot_combined_breakdown(baseline_data, accel_data, output_pdf):
-    """Create a grouped bar chart comparing baseline and SATBlast.
+def plot_combined_breakdown(baseline_data, accel_data, output_pdf,
+                            middle_data=None, middle_name=None):
+    """Create a grouped bar chart comparing baseline, optional middle, and SATBlast.
 
     Uses the same style/colors as the original plot. For each component the
-    baseline bar is on top and the SATBlast bar is directly below it.
-    Baseline Propagate is stacked with sub-components; baseline Priority Queue
-    uses a box-and-whisker. SATBlast uses solid bars for both.
+    baseline bar is on top, optional middle bar in the center, and SATBlast bar
+    at the bottom. Baseline Propagate is stacked with sub-components; baseline
+    Priority Queue uses a box-and-whisker. Other configs use solid bars.
     Y-axis order matches the original plot (baseline percentage descending).
     """
     base_bd = baseline_data['runtime_breakdown']
     base_raw = baseline_data['runtime_raw']
     prop_bd = baseline_data['prop_breakdown']
-    accel_bd = accel_data['runtime_breakdown']
+    accel_bd = accel_data['runtime_breakdown'] if accel_data else {}
+
+    middle_bd = middle_data['runtime_breakdown'] if middle_data else {}
 
     # Same order as original plot: baseline percentage descending
     runtime_sorted = sorted(base_bd.items(), key=lambda x: x[1], reverse=True)
@@ -312,22 +315,33 @@ def plot_combined_breakdown(baseline_data, accel_data, output_pdf):
     base_bar_color = plt.cm.Set3.colors[0]
     prop_colors = plt.cm.Pastel1.colors
     accel_color = '#5B9BD5'
+    middle_color = '#F4A460'
+
+    has_middle = bool(middle_bd)
+    has_accel = bool(accel_bd)
+    num_bars = 1 + int(has_middle) + int(has_accel)
 
     fig, ax = plt.subplots(1, 1, figsize=(12, 10))
 
-    bar_height = 0.35
+    bar_height = 0.8 / num_bars
     labels = []
 
     y_pos = 0
     for i, (component, base_pct) in enumerate(runtime_sorted):
-        y_baseline = y_pos + bar_height / 2    # top bar
-        y_accel = y_pos - bar_height / 2        # bottom bar
-        accel_pct = accel_bd.get(component, 0)
+        # Position bars symmetrically around y_pos
+        offsets = []
+        if num_bars == 1:
+            offsets = [0]
+        elif num_bars == 2:
+            offsets = [bar_height / 2, -bar_height / 2]
+        else:
+            offsets = [bar_height, 0, -bar_height]
+
+        y_baseline = y_pos + offsets[0]
 
         # --- Baseline bar (top) ---
         propagate_pct = base_bd.get('Propagate', 0)
         if component == 'Propagate' and prop_sorted:
-            # Stacked propagation sub-components
             left = 0
             for j, (prop_comp, prop_pct) in enumerate(prop_sorted):
                 scaled_pct = (prop_pct / 100.0) * propagate_pct
@@ -357,11 +371,25 @@ def plot_combined_breakdown(baseline_data, accel_data, output_pdf):
             ax.text(base_pct + 0.5, y_baseline, f'{base_pct:.1f}%',
                     ha='left', va='center', fontsize=18)
 
-        # --- SATBlast bar (bottom) - uniform color ---
-        ax.barh(y_accel, accel_pct, height=bar_height,
-                color=accel_color, edgecolor='white', linewidth=1.5)
-        ax.text(accel_pct + 0.5, y_accel, f'{accel_pct:.1f}%',
-                ha='left', va='center', fontsize=18)
+        # --- Middle bar (if provided) ---
+        if has_middle:
+            bar_idx = 1
+            y_middle = y_pos + offsets[bar_idx]
+            middle_pct = middle_bd.get(component, 0)
+            ax.barh(y_middle, middle_pct, height=bar_height,
+                    color=middle_color, edgecolor='white', linewidth=1.5)
+            ax.text(middle_pct + 0.5, y_middle, f'{middle_pct:.1f}%',
+                    ha='left', va='center', fontsize=18)
+
+        # --- Accel/SATBlast bar (bottom) ---
+        if has_accel:
+            bar_idx = 1 + int(has_middle)
+            y_accel = y_pos + offsets[bar_idx]
+            accel_pct = accel_bd.get(component, 0)
+            ax.barh(y_accel, accel_pct, height=bar_height,
+                    color=accel_color, edgecolor='white', linewidth=1.5)
+            ax.text(accel_pct + 0.5, y_accel, f'{accel_pct:.1f}%',
+                    ha='left', va='center', fontsize=18)
 
         labels.append(component)
         y_pos += 1
@@ -373,11 +401,12 @@ def plot_combined_breakdown(baseline_data, accel_data, output_pdf):
     ax.grid(axis='x', alpha=0.3, linestyle='--')
 
     max_val = max(v for _, v in runtime_sorted)
-    max_accel = max(accel_bd.get(c, 0) for c, _ in runtime_sorted)
-    overall_max = max(max_val, max_accel)
+    max_middle = max((middle_bd.get(c, 0) for c, _ in runtime_sorted), default=0)
+    max_accel = max((accel_bd.get(c, 0) for c, _ in runtime_sorted), default=0)
+    overall_max = max(max_val, max_middle, max_accel)
     ax.set_xlim(0, overall_max * 1.15 if overall_max else 100)
 
-    # Two separate legends: propagation sub-components and baseline/SATBlast
+    # Two separate legends: propagation sub-components and config comparison
     if prop_sorted and propagate_pct > 0:
         prop_patches = [mpatches.Patch(color=prop_colors[j % len(prop_colors)], label=pc)
                         for j, (pc, _) in enumerate(prop_sorted)]
@@ -385,10 +414,11 @@ def plot_combined_breakdown(baseline_data, accel_data, output_pdf):
                                title='Propagation Components', fontsize=20, title_fontsize=22)
         ax.add_artist(prop_legend)
 
-    config_patches = [
-        mpatches.Patch(color=base_bar_color, label='Baseline'),
-        mpatches.Patch(color=accel_color, label='SATBlast'),
-    ]
+    config_patches = [mpatches.Patch(color=base_bar_color, label='Baseline')]
+    if has_middle:
+        config_patches.append(mpatches.Patch(color=middle_color, label=middle_name or 'Middle'))
+    if has_accel:
+        config_patches.append(mpatches.Patch(color=accel_color, label='SATBlast'))
     ax.legend(handles=config_patches, loc='upper right',
              bbox_to_anchor=(1.0, 0.72), fontsize=20)
 
@@ -467,15 +497,18 @@ def _parse_folder(folder_path, label=""):
     }
 
 
-def plot_breakdown_folder(folder_path, output_pdf=None, accel_data=None):
+def plot_breakdown_folder(folder_path, output_pdf=None, accel_data=None,
+                          middle_data=None, middle_name=None):
     """Parse log files in folder and generate breakdown plots.
 
     Args:
         folder_path: Path to folder containing log files (not multi-seed)
         output_pdf: Optional path to write PDF plot
         accel_data: Optional dict from _parse_folder() for accelerator comparison
+        middle_data: Optional dict from _parse_folder() for an intermediate comparison
+        middle_name: Display name for the middle data series
     """
-    baseline_data = _parse_folder(folder_path, label="Baseline" if accel_data else "")
+    baseline_data = _parse_folder(folder_path, label="Baseline" if (accel_data or middle_data) else "")
 
     if baseline_data is None:
         return
@@ -488,11 +521,12 @@ def plot_breakdown_folder(folder_path, output_pdf=None, accel_data=None):
             output_pdf,
         )
 
-        # Generate additional combined plot when accelerator data is provided
-        if accel_data:
+        # Generate additional combined plot when accelerator or middle data is provided
+        if accel_data or middle_data:
             pdf_path = Path(output_pdf)
             combined_pdf = str(pdf_path.parent / f"{pdf_path.stem}_combined{pdf_path.suffix}")
-            plot_combined_breakdown(baseline_data, accel_data, combined_pdf)
+            plot_combined_breakdown(baseline_data, accel_data, combined_pdf,
+                                   middle_data=middle_data, middle_name=middle_name)
     else:
         print("\nNo output file specified. Use: python plot_breakdown.py <logs_folder> <output.pdf>")
 
@@ -504,12 +538,15 @@ def main():
         epilog='Examples:\n'
                '  %(prog)s logs/baseline\n'
                '  %(prog)s logs/baseline breakdown.pdf\n'
-               '  %(prog)s logs/baseline breakdown.pdf --accel logs/accelerator\n'
+               '  %(prog)s logs/baseline breakdown.pdf --folder logs/optimized "Optimized"\n'
+               '  %(prog)s logs/baseline breakdown.pdf --folder logs/optimized "Optimized" --accel logs/accelerator\n'
     )
 
     parser.add_argument('logs_folder', help='Path to folder containing log files')
     parser.add_argument('output_pdf', nargs='?', default=None,
                        help='Output PDF file path (default: runtime_breakdown.pdf)')
+    parser.add_argument('--folder', nargs=2, metavar=('FOLDER', 'NAME'), default=None,
+                       help='Additional logs folder and display name, plotted between baseline and accel')
     parser.add_argument('--accel', metavar='ACCEL_FOLDER', default=None,
                        help='Path to accelerator logs folder for side-by-side comparison')
 
@@ -518,11 +555,18 @@ def main():
     if args.output_pdf is None:
         args.output_pdf = "runtime_breakdown.pdf"
 
+    middle_data = None
+    if args.folder:
+        folder_path, folder_name = args.folder
+        middle_data = _parse_folder(folder_path, label=folder_name)
+
     accel_data = None
     if args.accel:
         accel_data = _parse_folder(args.accel, label="Accelerator")
 
-    plot_breakdown_folder(args.logs_folder, args.output_pdf, accel_data=accel_data)
+    middle_name = args.folder[1] if args.folder else None
+    plot_breakdown_folder(args.logs_folder, args.output_pdf, accel_data=accel_data,
+                         middle_data=middle_data, middle_name=middle_name)
 
 
 if __name__ == "__main__":

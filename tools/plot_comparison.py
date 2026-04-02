@@ -29,6 +29,18 @@ FIG_SIZE = (12, 6)
 from unified_parser import parse_log_directory, format_bytes
 
 
+def wrap_label(text, max_len=9):
+    """Wrap text to next line if longer than max_len characters.
+    Splits after the first max_len characters at the nearest space, or exactly at max_len."""
+    if len(text) <= max_len:
+        return text
+    # Try to find a space near the max_len boundary to split cleanly
+    space_idx = text.rfind(' ', 0, max_len + 1)
+    if space_idx == -1:
+        space_idx = max_len
+    return text[:space_idx].rstrip() + '\n' + text[space_idx:].lstrip()
+
+
 # Manual exclusion list: add test case names here to exclude them from all comparisons
 MANUAL_EXCLUSIONS = set([
     "080896c437245ac25eb6d3ad6df12c4f-bv-term-small-rw_1492.smt2.cnf",
@@ -109,9 +121,12 @@ def normalize_test_case(name: str) -> str:
     return name
 
 
-def parse_raw_text_file(file_path, timeout_seconds):
+def parse_raw_text_file(file_path, timeout_seconds, normalize_sataccel=False):
     """Parse a raw text file with columns: name, sim_time_ms, par2_ms (or similar).
-    
+
+    Args:
+        normalize_sataccel: If True, divide all runtimes by 4 (SatAccel clock normalization).
+
     Returns:
         list of result dicts with keys: test_case, result, sim_time_ms, etc.
     """
@@ -151,27 +166,41 @@ def parse_raw_text_file(file_path, timeout_seconds):
     
     # Use par2 column if available, otherwise sim_time
     time_col = par2_col if par2_col is not None else sim_time_col
-    
+
     # Parse data rows
     for line in lines[1:]:
         parts = [p.strip() for p in line.split(',')]
         if len(parts) <= max(name_col, time_col):
             continue
-        
+
         test_case = parts[name_col]
         try:
             time_ms = float(parts[time_col])
         except (ValueError, IndexError):
             continue
-        
-        # Determine result based on time
-        if time_ms >= 2 * timeout_ms:
-            result = 'TIMEOUT'
-        elif time_ms > timeout_ms:
-            result = 'TIMEOUT'
+
+        if normalize_sataccel:
+            # Use par2 column to detect timeouts (par2 >= 2*timeout means timeout),
+            # then use sim_time column for actual runtime of solved tests.
+            is_timeout = (time_ms > timeout_ms)
+            if is_timeout:
+                result = 'TIMEOUT'
+                # Keep time_ms as-is (will get PAR-2 penalty downstream)
+            else:
+                result = 'SAT'
+                # Use sim_time_ms for the actual runtime if available, otherwise par2
+                if sim_time_col is not None and sim_time_col != time_col:
+                    try:
+                        time_ms = float(parts[sim_time_col])
+                    except (ValueError, IndexError):
+                        pass
+                time_ms /= 4.0
         else:
-            # Assume solved if within timeout
-            result = 'SAT'  # We don't know if SAT or UNSAT from raw data
+            # Determine result based on time
+            if time_ms > timeout_ms:
+                result = 'TIMEOUT'
+            else:
+                result = 'SAT'  # We don't know if SAT or UNSAT from raw data
         
         results.append({
             'original_test_case': test_case,
@@ -192,7 +221,7 @@ def is_raw_text_file(path):
     return p.is_file() and p.suffix in ('.txt', '.csv', '.tsv', '')
 
 
-def compute_metrics_for_folder(folder_path, timeout_seconds):
+def compute_metrics_for_folder(folder_path, timeout_seconds, normalize_sataccel=False):
     """Parse a folder or raw text file and compute key metrics.
     
     Returns:
@@ -207,7 +236,7 @@ def compute_metrics_for_folder(folder_path, timeout_seconds):
     
     # Check if it's a raw text file
     if is_raw_text_file(folder_path):
-        results = parse_raw_text_file(folder_path, timeout_seconds)
+        results = parse_raw_text_file(folder_path, timeout_seconds, normalize_sataccel=normalize_sataccel)
         
         if not results:
             return {
@@ -294,7 +323,9 @@ def compute_metrics_for_folder(folder_path, timeout_seconds):
             'variables', 'clauses', 'total_memory_bytes', 'sim_time_ms',
             'decisions', 'propagations', 'conflicts', 'learned', 'removed',
             'db_reductions', 'minimized', 'restarts',
-            'l1_total_requests', 'l1_total_miss_rate'
+            'l1_total_requests', 'l1_total_miss_rate',
+            'total_learnt_clause_length', 'avg_learnt_clause_length',
+            'unit_learnt_clauses', 'avg_lbd', 'avg_backtrack_level'
         ]
         
         aggregated_results = []
@@ -685,8 +716,8 @@ def compute_geomean_speedups(folder_metrics, shared_tests, timeout_seconds, base
     return geomeans
 
 
-def plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests, 
-                          exclusion_table, timeout_seconds, output_dir, exclude_timeouts=False, large_fonts=False):
+def plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests,
+                          exclusion_table, timeout_seconds, output_dir, exclude_timeouts=False, large_fonts=False, line=False, highlight_last=None):
     """Generate all comparison charts and save to PDF."""
     # Font scale factor: 1.5x larger when large_fonts is enabled
     font_scale = 1.2 if large_fonts else 1.0
@@ -721,31 +752,44 @@ def plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests,
             bar_spacing = 1.7  # Wider spacing to prevent overlap
         x_positions = [i * bar_spacing for i in range(num_folders)]
         folder_colors = get_folder_colors(folder_names)
-        bars = ax.bar(x_positions, par2_values, width=bar_width, color=folder_colors, alpha=0.85, edgecolor='black', linewidth=0.8)
         # Y-axis label depends on whether timeouts are excluded
         y_label = 'Average Runtime (s)' if exclude_timeouts else 'PAR-2 (s)'
-        ax.set_ylabel(y_label, fontsize=int(24 * font_scale))
-        ax.set_xticks([])  # no x-axis categories shown
+        ax.set_ylabel(y_label, fontsize=int(32 * font_scale))
         ax.tick_params(axis='y', labelsize=int(28 * font_scale))
         ax.grid(axis='y', alpha=0.3)
-        
-        # Set y-axis limit to provide more space for labels and legend at top
+
+        if line:
+            x_pad = bar_spacing * 0.4
+            ax.set_xlim(x_positions[0] - x_pad, x_positions[-1] + x_pad)
+            ax.fill_between(x_positions, par2_values, alpha=0.12, color='#1f77b4', zorder=2)
+            ax.plot(x_positions, par2_values, marker='o', markersize=10, linewidth=2.5,
+                    color='#1f77b4', zorder=3, markeredgecolor='white', markeredgewidth=1.5)
+            for i, (x, par2, solved) in enumerate(zip(x_positions, par2_values, solved_counts)):
+                ax.annotate(f'{par2:.2f} s\nSolved: {solved}',
+                           (x, par2), textcoords="offset points", xytext=(0, 12),
+                           ha='center', va='bottom', fontsize=int(20 * font_scale), fontweight='bold')
+            # Highlight the last point with a star and label
+            if highlight_last and len(x_positions) > 0:
+                last_x = x_positions[-1]
+                last_y = par2_values[-1]
+                ax.plot(last_x, last_y, marker='*', markersize=30, color='#1f77b4',
+                        zorder=4, markeredgecolor='white', markeredgewidth=1.0)
+                hl_label = wrap_label(highlight_last)
+                ax.annotate(hl_label, (last_x, last_y), textcoords="offset points",
+                           xytext=(0, -28), ha='center', va='top',
+                           fontsize=int(24 * font_scale), fontweight='bold', color='#1f77b4')
+        else:
+            bars = ax.bar(x_positions, par2_values, width=bar_width, color=folder_colors, alpha=0.85, edgecolor='black', linewidth=0.8)
+            for i, (bar, par2, solved) in enumerate(zip(bars, par2_values, solved_counts)):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{par2:.2f} s\nSolved: {solved}',
+                        ha='center', va='bottom', fontsize=int(24 * font_scale))
+
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels([wrap_label(n) for n in folder_names], fontsize=int(28 * font_scale), ha='center')
         max_par2 = max(par2_values) if par2_values else 1
-        # More space needed for legend when there are many folders (will wrap to multiple rows)
-        y_limit_factor = 1.5 if num_folders > 5 else 1.35
-        ax.set_ylim(0, max_par2 * y_limit_factor)  # Extra space for horizontal legend at top
-        
-        # Horizontal legend at top center
-        ax.legend(bars, folder_names, loc='upper center', fontsize=int(24 * font_scale), frameon=False, 
-                 ncol=min(num_folders, 5), bbox_to_anchor=(0.5, 1.02),
-                 handlelength=1.0, handletextpad=0.5, columnspacing=1.0)
-        
-        # Add value labels on bars (PAR-2 and solved count side by side)
-        for i, (bar, par2, solved) in enumerate(zip(bars, par2_values, solved_counts)):
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{par2:.2f} s\nSolved: {solved}',
-                    ha='center', va='bottom', fontsize=int(24 * font_scale))
+        ax.set_ylim(0, max_par2 * 1.25)
         
         plt.tight_layout()
         pdf.savefig(fig, bbox_inches='tight')
@@ -814,9 +858,9 @@ def plot_cactus_chart(folder_metrics, shared_tests, timeout_seconds, output_dir,
             ax.plot(x_vals, y_vals, linestyle=':', marker='o', markersize=4,
                     color=folder_colors[idx], label=folder_name)
 
-        ax.set_xlabel('Wallclock Time (s)', fontsize=int(26 * font_scale))
-        ax.set_ylabel('Solved Instances', fontsize=int(26 * font_scale))
-        ax.tick_params(axis='both', labelsize=int(22 * font_scale))
+        ax.set_xlabel('Wallclock Time (s)', fontsize=int(32 * font_scale))
+        ax.set_ylabel('Solved Instances', fontsize=int(32 * font_scale))
+        ax.tick_params(axis='both', labelsize=int(28 * font_scale))
         ax.grid(alpha=0.3, linestyle='--')
         # Compact legend without title, boxed
         ax.legend(loc='lower right', fontsize=int(26 * font_scale), frameon=True,
@@ -830,7 +874,7 @@ def plot_cactus_chart(folder_metrics, shared_tests, timeout_seconds, output_dir,
     print(f"Cactus plot saved to: {pdf_path}")
 
 
-def plot_geomean_chart(folder_metrics, shared_tests, timeout_seconds, output_dir, baseline_name, geomean_results, pdf_basename='geomean_speedups', large_fonts=False):
+def plot_geomean_chart(folder_metrics, shared_tests, timeout_seconds, output_dir, baseline_name, geomean_results, pdf_basename='geomean_speedups', large_fonts=False, line=False, highlight_last=None):
     """Plot geomean speedup bar chart in a separate PDF.
     geomean_results: dict folder_name -> geomean_speedup (float or None)
     """
@@ -867,27 +911,45 @@ def plot_geomean_chart(folder_metrics, shared_tests, timeout_seconds, output_dir
             bar_width = 1.4
             bar_spacing = 1.7  # Wider spacing to prevent overlap
         x_positions = [i * bar_spacing for i in range(num_folders)]
-        bars = ax.bar(x_positions, plot_vals, width=bar_width, color=folder_colors, alpha=0.85, edgecolor='black', linewidth=0.8)
-        ax.set_ylabel('Geomean Speedup', fontsize=int(24 * font_scale))
-        ax.set_xticks([])
+        ax.set_ylabel('Geomean Speedup', fontsize=int(32 * font_scale))
         ax.tick_params(axis='y', labelsize=int(28 * font_scale))
         ax.grid(axis='y', alpha=0.3)
-        
-        # Set y-axis limit with space for horizontal legend at top
+
+        if line:
+            # Add padding so first/last points don't sit on the axes
+            x_pad = bar_spacing * 0.5
+            ax.set_xlim(x_positions[0] - x_pad, x_positions[-1] + x_pad)
+            # Fill under the line for a polished look
+            ax.fill_between(x_positions, plot_vals, alpha=0.12, color='#1f77b4', zorder=2)
+            ax.plot(x_positions, plot_vals, marker='o', markersize=10, linewidth=2.5,
+                    color='#1f77b4', zorder=3, markeredgecolor='white', markeredgewidth=1.5)
+            for x, val in zip(x_positions, g_values):
+                label = 'n/a' if val is None else f'{val:.2f}×'
+                y = val if val is not None else 0.0
+                ax.annotate(label, (x, y), textcoords="offset points", xytext=(0, 12),
+                           ha='center', va='bottom', fontsize=int(22 * font_scale), fontweight='bold')
+            # Highlight the last point with a star and label
+            if highlight_last and len(x_positions) > 0:
+                last_x = x_positions[-1]
+                last_y = plot_vals[-1]
+                ax.plot(last_x, last_y, marker='*', markersize=30, color='#1f77b4',
+                        zorder=4, markeredgecolor='white', markeredgewidth=1.0)
+                hl_label = wrap_label(highlight_last)
+                ax.annotate(hl_label, (last_x, last_y), textcoords="offset points",
+                           xytext=(0, -28), ha='center', va='top',
+                           fontsize=int(24 * font_scale), fontweight='bold', color='#1f77b4')
+        else:
+            bars = ax.bar(x_positions, plot_vals, width=bar_width, color=folder_colors, alpha=0.85, edgecolor='black', linewidth=0.8)
+            for bar, val in zip(bars, g_values):
+                height = bar.get_height()
+                label = 'n/a' if val is None else f'{val:.2f}×'
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                        label, ha='center', va='bottom', fontsize=int(26 * font_scale))
+
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels([wrap_label(n) for n in folder_names], fontsize=int(28 * font_scale), ha='center')
         ymax = max(plot_vals) if plot_vals else 1.0
-        # More space needed for legend when there are many folders (will wrap to multiple rows)
-        y_limit_factor = 1.5 if num_folders > 5 else 1.35
-        ax.set_ylim(0, ymax * y_limit_factor)  # Extra space for legend
-        
-        # Always use horizontal legend at top center
-        ax.legend(bars, folder_names, loc='upper center', fontsize=int(24 * font_scale), frameon=False, 
-                 ncol=min(num_folders, 5), bbox_to_anchor=(0.5, 1.02),
-                 handlelength=1.0, handletextpad=0.5, columnspacing=1.0)
-        for bar, val in zip(bars, g_values):
-            height = bar.get_height()
-            label = 'n/a' if val is None else f'{val:.2f}×'
-            ax.text(bar.get_x() + bar.get_width()/2., height,
-                    label, ha='center', va='bottom', fontsize=int(26 * font_scale))
+        ax.set_ylim(0, ymax * 1.25)
         plt.tight_layout()
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
@@ -1021,23 +1083,23 @@ def plot_per_test_speedups(folder_metrics, shared_tests, timeout_seconds, output
         # Red dashed line at 1.0
         ax_bottom.axhline(y=1.0, color='darkred', linestyle='--', linewidth=1.5, alpha=0.8, zorder=3)
         
-        ax_bottom.tick_params(axis='y', labelsize=int(18 * font_scale))
+        ax_bottom.tick_params(axis='y', labelsize=int(22 * font_scale))
         
         # Set labels and horizontal legend at top with extra y-space
-        ax_bottom.set_ylabel('Speedup', fontsize=int(18 * font_scale))
+        ax_bottom.set_ylabel('Speedup', fontsize=int(24 * font_scale))
         ax_bottom.set_xticks([x + bar_width * (num_folders - 1) / 2 for x in x_base])
-        ax_bottom.set_xticklabels(test_labels, fontsize=int(18 * font_scale), ha='center')
+        ax_bottom.set_xticklabels(test_labels, fontsize=int(22 * font_scale), ha='center')
         
-        # Horizontal legend at top - more compact vertically with more space
-        # More space needed for legend when there are many folders (will wrap to multiple rows)
+        # Horizontal legend at top center
         if use_broken_axis:
-            y_limit = 23 if num_folders > 5 else 20  # More space for legend with many folders
+            y_limit = 23 if num_folders > 5 else 20
             ax_bottom.set_ylim(0, y_limit)
         else:
             y_limit_factor = 1.45 if num_folders > 5 else 1.3
-            ax_bottom.set_ylim(0, max_speedup * y_limit_factor)  # More space for legend
-        ax_bottom.legend(loc='upper center', fontsize=int(18 * font_scale), frameon=False, ncol=min(num_folders, 5), 
-                        bbox_to_anchor=(0.5, 1.02))
+            ax_bottom.set_ylim(0, max_speedup * y_limit_factor)
+        ax_bottom.legend(loc='upper center', fontsize=int(18 * font_scale), frameon=False,
+                        ncol=min(num_folders, 5), bbox_to_anchor=(0.5, 1.02),
+                        handlelength=1.0, handletextpad=0.5, columnspacing=1.0)
         
         # No title per request
         plt.tight_layout()
@@ -1073,6 +1135,12 @@ Examples:
                        help='Treat ERROR/UNKNOWN as timeout (1×timeout penalty) instead of excluding them')
     parser.add_argument('--large-fonts', action='store_true',
                        help='Use much larger font sizes for all plots (useful when scaling down for side-by-side comparisons)')
+    parser.add_argument('--line', action='store_true',
+                       help='Plot line charts instead of bar charts for PAR-2 and geomean speedup')
+    parser.add_argument('--highlight-last', type=str, default=None, metavar='LABEL',
+                       help='Highlight the last point in line charts with a star and label underneath (e.g. "SATBlast")')
+    parser.add_argument('--normalize-sataccel', action='store_true',
+                       help='Divide all runtimes in .txt file inputs by 4 (normalize SatAccel clock scaling)')
     
     args = parser.parse_args()
     
@@ -1100,7 +1168,7 @@ Examples:
             folder_name = Path(folder_path).name
         
         print(f"\nProcessing {folder_name} ({folder_path})...")
-        metrics = compute_metrics_for_folder(folder_path, args.timeout)
+        metrics = compute_metrics_for_folder(folder_path, args.timeout, normalize_sataccel=args.normalize_sataccel)
         
         if not metrics['results']:
             print(f"  Warning: No valid results found in {folder_path}")
@@ -1152,12 +1220,12 @@ Examples:
         print(f"{folder_name:<30} {par2:<12.6f} {solved:>8}/{total:<8} {speed_str:<12}")
     
     # Generate PAR-2 comparison chart PDF
-    plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests, 
-                          exclusion_table, args.timeout, args.output_dir, args.exclude_timeouts_geomean, args.large_fonts)
+    plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests,
+                          exclusion_table, args.timeout, args.output_dir, args.exclude_timeouts_geomean, args.large_fonts, args.line, highlight_last=args.highlight_last)
     # Generate cactus plot in separate PDF
     plot_cactus_chart(folder_metrics, shared_tests, args.timeout, args.output_dir, large_fonts=args.large_fonts)
     # Generate geomean speedup chart in separate PDF
-    plot_geomean_chart(folder_metrics, shared_tests, args.timeout, args.output_dir, baseline_name, geomean_results, large_fonts=args.large_fonts)
+    plot_geomean_chart(folder_metrics, shared_tests, args.timeout, args.output_dir, baseline_name, geomean_results, large_fonts=args.large_fonts, line=args.line, highlight_last=args.highlight_last)
     
     # Generate per-test speedup chart if exclusive set is specified
     if MANUAL_EXCLUSIVE_TESTS:
