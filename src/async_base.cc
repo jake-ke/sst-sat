@@ -45,12 +45,30 @@ void AsyncBase::write(uint64_t addr, size_t size, const std::vector<uint8_t>& da
     output.verbose(CALL_INFO, 8, 0, "Write at 0x%lx, size %zu\n", addr, size);
     
     if (WRITE_BUFFER) {
-        // Always add a new entry to the store queue
-        StoreQueueEntry entry(addr, size, data);
-        store_queue.push_back(entry);
-        output.verbose(CALL_INFO, 7, 0, 
-            "SQ[%zu]: [0x%lx-0x%lx], size %zu\n",
-            store_queue.size() - 1, addr, addr + size - 1, size);
+        // Check if this write falls within an existing SQ entry; if so,
+        // update that entry in-place so that a later full-range read sees
+        // the newest data instead of stale bytes from the old entry.
+        bool merged = false;
+        for (int i = store_queue.size() - 1; i >= 0; i--) {
+            uint64_t sq_start = store_queue[i].addr;
+            uint64_t sq_end   = sq_start + store_queue[i].size;
+            if (addr >= sq_start && addr + size <= sq_end) {
+                size_t offset = addr - sq_start;
+                memcpy(store_queue[i].data.data() + offset, data.data(), size);
+                output.verbose(CALL_INFO, 7, 0,
+                    "SQ[%d] merge: [0x%lx-0x%lx] into [0x%lx-0x%lx]\n",
+                    i, addr, addr + size - 1, sq_start, sq_end - 1);
+                merged = true;
+                break;
+            }
+        }
+        if (!merged) {
+            StoreQueueEntry entry(addr, size, data);
+            store_queue.push_back(entry);
+            output.verbose(CALL_INFO, 7, 0,
+                "SQ[%zu]: [0x%lx-0x%lx], size %zu\n",
+                store_queue.size() - 1, addr, addr + size - 1, size);
+        }
     }
 
     // Send to memory
@@ -214,9 +232,12 @@ void AsyncBase::handleMem(SST::Interfaces::StandardMem::Request* req) {
 
         uint64_t addr = write_resp->pAddr;
         
-        // Find and remove the oldest matching store queue entry by address (front of queue)
+        size_t size = write_resp->size;
+        // Find and remove the oldest matching store queue entry by address and size.
+        // Matching by size prevents a merged-write's response from removing the
+        // parent entry that was updated in-place.
         for (auto it = store_queue.begin(); it != store_queue.end(); ++it) {
-            if (it->addr == addr) {
+            if (it->addr == addr && it->size == size) {
                 output.verbose(CALL_INFO, 7, 0, "SQ removing 0x%lx\n", it->addr);
                 store_queue.erase(it);
                 break;

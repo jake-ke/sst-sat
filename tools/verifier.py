@@ -134,14 +134,15 @@ def parse_cnf(cnf_file: str) -> tuple[List[List[int]], int, int]:
     num_clauses = 0
     
     try:
+        pending = []  # accumulate literals across lines until 0-terminator
         with open(cnf_file, 'r') as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
-                
+
                 # Skip empty lines and comments
-                if not line or line.startswith('c'):
+                if not line or line.startswith('c') or line.startswith('%'):
                     continue
-                
+
                 # Parse problem line
                 if line.startswith('p cnf'):
                     parts = line.split()
@@ -151,21 +152,24 @@ def parse_cnf(cnf_file: str) -> tuple[List[List[int]], int, int]:
                     num_vars = int(parts[2])
                     num_clauses = int(parts[3])
                     continue
-                
-                # Parse clause
+
+                # Parse clause literals, accumulating across lines until 0
                 try:
-                    literals = [int(x) for x in line.split()]
-                    
-                    # Check if clause ends with 0
-                    if literals and literals[-1] == 0:
-                        literals = literals[:-1]  # Remove the trailing 0
-                    
-                    if literals:  # Only add non-empty clauses
-                        clauses.append(literals)
-                        
+                    for tok in line.split():
+                        lit = int(tok)
+                        if lit == 0:
+                            if pending:
+                                clauses.append(pending)
+                                pending = []
+                        else:
+                            pending.append(lit)
                 except ValueError:
                     print(f"Warning: Invalid clause format on line {line_num}: {line}")
                     continue
+
+        # Flush any remaining clause (file ended without trailing 0)
+        if pending:
+            clauses.append(pending)
                     
     except FileNotFoundError:
         print(f"Error: CNF file '{cnf_file}' not found")

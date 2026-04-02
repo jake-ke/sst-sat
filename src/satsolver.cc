@@ -499,6 +499,7 @@ void SATSolver::parseDIMACS(const std::string& filename) {
     }
     
     std::string line;
+    Clause pending_clause;  // accumulates literals across lines until 0-terminator
     while (std::getline(file, line)) {
         // Skip empty lines
         if (line.empty()) continue;
@@ -540,8 +541,7 @@ void SATSolver::parseDIMACS(const std::string& filename) {
             default: {  // Clause line
                 std::istringstream clause_iss(line);
                 int dimacs_lit;
-                Clause clause;
-                
+
                 // Validate the line contains only valid DIMACS literals
                 bool valid_clause = true;
                 for (char c : line) {
@@ -550,59 +550,79 @@ void SATSolver::parseDIMACS(const std::string& filename) {
                         break;
                     }
                 }
-                
+
                 if (!valid_clause) {
                     output.verbose(CALL_INFO, 4, 0, "Skipping invalid clause line: %s\n", line.c_str());
                     continue;
                 }
-                
-                while (clause_iss >> dimacs_lit && dimacs_lit != 0) {
-                    Lit lit = toLit(dimacs_lit);
-                    clause.literals.push_back(lit);
-                }
-                
-                // Skip empty clauses (can happen with corrupted data)
-                if (clause.literals.empty()) {
-                    output.verbose(CALL_INFO, 4, 0, "Skipping empty clause line\n");
-                    continue;
-                }
-                
-                if (clause.literals.size() == 1) {  // Unit clause
-                    if (std::find(initial_units.begin(), initial_units.end(), 
-                                  clause.literals[0]) == initial_units.end()) {
-                        initial_units.push_back(clause.literals[0]);
+
+                // Accumulate literals into pending_clause; emit when 0 is seen.
+                // This handles clauses that span multiple lines.
+                while (clause_iss >> dimacs_lit) {
+                    if (dimacs_lit == 0) {
+                        // Clause terminator: emit the accumulated clause
+                        if (pending_clause.literals.empty()) continue;
+
+                        if (pending_clause.literals.size() == 1) {  // Unit clause
+                            if (std::find(initial_units.begin(), initial_units.end(),
+                                          pending_clause.literals[0]) == initial_units.end()) {
+                                initial_units.push_back(pending_clause.literals[0]);
+                            }
+                            num_clauses--;
+                            output.verbose(CALL_INFO, 3, 0,
+                                "Unit clause: %d\n", toInt(pending_clause.literals[0]));
+                        } else {
+                            if (sort_clauses) {
+                                std::sort(pending_clause.literals.begin(), pending_clause.literals.end());
+                            }
+
+                            pending_clause.literals.erase(
+                                std::unique(pending_clause.literals.begin(), pending_clause.literals.end()),
+                                pending_clause.literals.end());
+
+                            pending_clause.num_lits = pending_clause.literals.size();
+                            parsed_clauses.push_back(pending_clause);
+
+                            output.verbose(CALL_INFO, 6, 0, "Added clause %lu: %s\n",
+                                           parsed_clauses.size() - 1, printClause(pending_clause.literals).c_str());
+                        }
+                        pending_clause = Clause();
+                    } else {
+                        Lit lit = toLit(dimacs_lit);
+                        pending_clause.literals.push_back(lit);
                     }
-                    num_clauses--;
-                    output.verbose(CALL_INFO, 3, 0,
-                        "Unit clause: %d\n", toInt(clause.literals[0]));
-                } else {
-                    if (sort_clauses) {
-                        // Sort literals in the clause
-                        std::sort(clause.literals.begin(), clause.literals.end());
-                    }
-
-                    // remove duplicates
-                    clause.literals.erase(
-                        std::unique(clause.literals.begin(), clause.literals.end()),
-                        clause.literals.end());
-
-                    clause.num_lits = clause.literals.size();
-                    parsed_clauses.push_back(clause);
-
-                    // debugging outputs
-                    output.verbose(CALL_INFO, 6, 0, "Added clause %lu: %s\n",
-                                   parsed_clauses.size() - 1, printClause(clause.literals).c_str());
                 }
+                // No break: if line had no 0, pending_clause carries over to next line
                 break;
             }
         }
     }
     
+    // Flush any remaining pending clause (file ended without trailing 0)
+    if (!pending_clause.literals.empty()) {
+        if (pending_clause.literals.size() == 1) {
+            if (std::find(initial_units.begin(), initial_units.end(),
+                          pending_clause.literals[0]) == initial_units.end()) {
+                initial_units.push_back(pending_clause.literals[0]);
+            }
+            num_clauses--;
+        } else {
+            if (sort_clauses) {
+                std::sort(pending_clause.literals.begin(), pending_clause.literals.end());
+            }
+            pending_clause.literals.erase(
+                std::unique(pending_clause.literals.begin(), pending_clause.literals.end()),
+                pending_clause.literals.end());
+            pending_clause.num_lits = pending_clause.literals.size();
+            parsed_clauses.push_back(pending_clause);
+        }
+    }
+
     // Close the file explicitly to ensure clean up
     file.close();
-    
+
     sst_assert(parsed_clauses.size() == num_clauses, CALL_INFO, -1,
-        "Parsing error: Expected %u clauses but got %zu\n", 
+        "Parsing error: Expected %u clauses but got %zu\n",
         num_clauses, parsed_clauses.size());
     
     // Initialize learnt clause adjustment parameters
@@ -1019,9 +1039,9 @@ void SATSolver::execAnalyze() {
     // Debug print for trail
     if (output.getVerboseLevel() >= 4) {
         int j = 0;
-        output.verbose(CALL_INFO, 4, 0, "Trail (%zu):", trail.size());
+        output.verbose(CALL_INFO, 4, 0, "Trail (%zu, level=%d):", trail.size(), current_level());
         for (int i = 0; i < trail.size(); i++) {
-            if (i == trail_lim[j]) {
+            if (j < (int)trail_lim.size() && i == trail_lim[j]) {
                 output.output("\n    dec=%d: ",j);
                 j++;
             }
