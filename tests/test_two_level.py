@@ -85,6 +85,12 @@ def parse_args():
                         help='Use glucose-style LBD-based restarts instead of Luby')
     parser.add_argument('--freq', dest='freq', type=str, default="1GHz",
                         help='Clock frequency for all components (e.g. 1GHz, 500MHz)')
+    parser.add_argument('--coprocessor-mode', dest='coprocessor_mode', type=int, default=0,
+                        help='Coprocessor mode (0=off, 1=propagate-only HW)')
+    parser.add_argument('--cpu-roundtrip', dest='cpu_roundtrip_cycles', type=int, default=10,
+                        help='Embedded CPU round-trip to on-chip SRAM in accel cycles')
+    parser.add_argument('--cpu-sf-scale', dest='cpu_sf_scale', type=float, default=1.0,
+                        help='Overall scaling factor for all CPU serialization factors (1.0 = default)')
 
     args = parser.parse_args()
     
@@ -180,8 +186,15 @@ if args.enable_speculative:
 print(f"Clock frequency: {args.freq}")
 if args.timeout_cycles > 0:
     print(f"Solver timeout set to: {args.timeout_cycles} cycles")
+<<<<<<< Updated upstream
 if args.glucose_restart:
     print(f"Glucose-style LBD-based restarts enabled")
+=======
+if args.coprocessor_mode > 0:
+    print(f"Coprocessor mode: {args.coprocessor_mode} (propagate-only HW)")
+    print(f"CPU round-trip cycles: {args.cpu_roundtrip_cycles}")
+    print(f"CPU SF scale: {args.cpu_sf_scale}")
+>>>>>>> Stashed changes
 
 # Create the SAT solver component
 solver = sst.Component("solver", "satsolver.SATSolver")
@@ -219,7 +232,13 @@ params = {
     "prefetch_enabled": str(args.enable_prefetch),
     "enable_speculative": str(args.enable_speculative),
     "timeout_cycles": str(args.timeout_cycles),
+<<<<<<< Updated upstream
     "glucose_restart": str(args.glucose_restart),
+=======
+    "coprocessor_mode": str(args.coprocessor_mode),
+    "cpu_roundtrip_cycles": str(args.cpu_roundtrip_cycles),
+    "cpu_sf_scale": str(args.cpu_sf_scale),
+>>>>>>> Stashed changes
 }
 if args.decision_path:
     params["decision_file"] = args.decision_path
