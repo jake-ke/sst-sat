@@ -186,15 +186,12 @@ if args.enable_speculative:
 print(f"Clock frequency: {args.freq}")
 if args.timeout_cycles > 0:
     print(f"Solver timeout set to: {args.timeout_cycles} cycles")
-<<<<<<< Updated upstream
 if args.glucose_restart:
     print(f"Glucose-style LBD-based restarts enabled")
-=======
 if args.coprocessor_mode > 0:
     print(f"Coprocessor mode: {args.coprocessor_mode} (propagate-only HW)")
     print(f"CPU round-trip cycles: {args.cpu_roundtrip_cycles}")
     print(f"CPU SF scale: {args.cpu_sf_scale}")
->>>>>>> Stashed changes
 
 # Create the SAT solver component
 solver = sst.Component("solver", "satsolver.SATSolver")
@@ -232,13 +229,10 @@ params = {
     "prefetch_enabled": str(args.enable_prefetch),
     "enable_speculative": str(args.enable_speculative),
     "timeout_cycles": str(args.timeout_cycles),
-<<<<<<< Updated upstream
     "glucose_restart": str(args.glucose_restart),
-=======
     "coprocessor_mode": str(args.coprocessor_mode),
     "cpu_roundtrip_cycles": str(args.cpu_roundtrip_cycles),
     "cpu_sf_scale": str(args.cpu_sf_scale),
->>>>>>> Stashed changes
 }
 if args.decision_path:
     params["decision_file"] = args.decision_path
