@@ -308,6 +308,14 @@ private:
     int conflicts_until_restart;        // Number of conflicts to trigger next restart
     int conflictC;                      // Number of conflicts since last restart
 
+    // Glucose-style restart parameters
+    bool glucose_restart;               // Whether to use glucose-style LBD-based restarts
+    double lbd_ema_fast;                // Fast-moving EMA of recent LBD values
+    double lbd_ema_slow;                // Slow-moving EMA of LBD values
+    double lbd_ema_fast_alpha;          // EMA smoothing factor for fast
+    double lbd_ema_slow_alpha;          // EMA smoothing factor for slow
+    int glucose_min_conflicts;          // Min conflicts before glucose restarts kick in
+
     // simulating parallel execution support
     ReorderBuffer reorder_buffer;                   // Reorder buffer for managing parallel read requests
     coro_t::pull_type* coroutine;                   // coroutine in the top level FSM

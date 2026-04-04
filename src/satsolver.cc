@@ -31,6 +31,12 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     curr_restarts(0),
     conflicts_until_restart(restart_first),
     conflictC(0),
+    glucose_restart(false),
+    lbd_ema_fast(0.0),
+    lbd_ema_slow(0.0),
+    lbd_ema_fast_alpha(1.0 / 50.0),
+    lbd_ema_slow_alpha(1.0 / 5000.0),
+    glucose_min_conflicts(100),
     yield_ptr(nullptr),
     // Initialize cycle counters
     cycles_propagate(0),
@@ -165,6 +171,10 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
 
     enable_speculative = params.find<bool>("enable_speculative", false);
     timeout_cycles = params.find<uint64_t>("timeout_cycles", 0);
+    glucose_restart = params.find<bool>("glucose_restart", false);
+    if (glucose_restart) {
+        output.output("Glucose-style LBD-based restarts enabled\n");
+    }
 
     // Open decision output file if specified
     std::string decision_output_file = params.find<std::string>("decision_output_file", "");
@@ -1023,7 +1033,9 @@ void SATSolver::execPropagate() {
             return;
         }
         state = ANALYZE;  // learn from the conflicts
-    } else if (conflictC >= conflicts_until_restart) state = RESTART;
+    } else if (glucose_restart ?
+        (conflictC > glucose_min_conflicts && lbd_ema_fast * 0.8 > lbd_ema_slow) :
+        (conflictC >= conflicts_until_restart)) state = RESTART;
     else if (nLearnts() - nAssigns() >= max_learnts) state = REDUCE;
     else state = DECIDE;
 
@@ -1227,6 +1239,12 @@ void SATSolver::execBacktrack() {
     // Conflict learning statistics
     stat_learnt_length->addDataNTimes(learnt_clause.size(), 1);
     stat_learnt_lbd->addDataNTimes(learnt_lbd, 1);
+
+    // Update glucose EMA trackers
+    if (glucose_restart) {
+        lbd_ema_fast = lbd_ema_fast * (1.0 - lbd_ema_fast_alpha) + learnt_lbd * lbd_ema_fast_alpha;
+        lbd_ema_slow = lbd_ema_slow * (1.0 - lbd_ema_slow_alpha) + learnt_lbd * lbd_ema_slow_alpha;
+    }
     stat_bt_level->addDataNTimes(bt_level, 1);
     if (learnt_clause.size() == 1) stat_learnt_units->addData(1);
 

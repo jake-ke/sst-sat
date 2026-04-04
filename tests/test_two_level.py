@@ -80,6 +80,9 @@ def parse_args():
                         help='Use classic heap implementation instead of pipelined heap')
     parser.add_argument('--timeout-cycles', dest='timeout_cycles', type=int, default=0,
                         help='Maximum solver cycles before timing out (0 = unlimited)')
+    parser.add_argument('--glucose-restart', dest='glucose_restart',
+                        action='store_true', default=False,
+                        help='Use glucose-style LBD-based restarts instead of Luby')
     parser.add_argument('--freq', dest='freq', type=str, default="1GHz",
                         help='Clock frequency for all components (e.g. 1GHz, 500MHz)')
 
@@ -177,6 +180,8 @@ if args.enable_speculative:
 print(f"Clock frequency: {args.freq}")
 if args.timeout_cycles > 0:
     print(f"Solver timeout set to: {args.timeout_cycles} cycles")
+if args.glucose_restart:
+    print(f"Glucose-style LBD-based restarts enabled")
 
 # Create the SAT solver component
 solver = sst.Component("solver", "satsolver.SATSolver")
@@ -214,6 +219,7 @@ params = {
     "prefetch_enabled": str(args.enable_prefetch),
     "enable_speculative": str(args.enable_speculative),
     "timeout_cycles": str(args.timeout_cycles),
+    "glucose_restart": str(args.glucose_restart),
 }
 if args.decision_path:
     params["decision_file"] = args.decision_path

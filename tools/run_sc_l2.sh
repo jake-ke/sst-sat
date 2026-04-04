@@ -23,6 +23,7 @@ show_usage() {
     echo "  --num-seeds NUM       Number of random seeds to run (default: 1)"
     echo "  --seed NUM            Run a single seed with the specified seed number (overrides --num-seeds)"
     echo "  --timeout-cycles N    Maximum solver cycles before timing out (0 or omit for unlimited)"
+    echo "  --glucose-restart     Use glucose-style LBD-based restarts instead of Luby"
     echo "  --freq FREQ           Clock frequency for all components (e.g. 1GHz, 500MHz)"
     echo "  -j, --jobs JOBS       Number of parallel jobs"
     echo "Example: $SCRIPT_NAME --bench-dir /path/to/benchmarks --l1-size 32KiB --l1-latency 2 --mem-latency 200ns --prefetch --timeout-cycles 100000000 --folder quick_test --num-seeds 5 -j 8"
@@ -52,6 +53,7 @@ NUM_SEEDS=1
 SPECIFIC_SEED=""
 TIMEOUT_CYCLES=""
 FREQ=""
+GLUCOSE_RESTART=""
 
 # Default number of parallel jobs (use available CPU cores)
 MAX_JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
@@ -228,6 +230,10 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        --glucose-restart)
+            GLUCOSE_RESTART="yes"
+            shift
+            ;;
         --freq)
             if [[ -n "$2" && "$2" != -* ]]; then
                 FREQ="$2"
@@ -341,6 +347,11 @@ if [[ -n "$SPEC" ]]; then
 else
     log_message "Speculative propagation: disabled"
 fi
+if [[ -n "$GLUCOSE_RESTART" ]]; then
+    log_message "Glucose-style LBD restarts: enabled"
+else
+    log_message "Glucose-style LBD restarts: disabled (Luby)"
+fi
 log_message "==============================================="
 
 # Array to store all child PIDs for cleanup
@@ -443,6 +454,7 @@ run_one_seed() {
     [[ -n "$SPEC" ]] && command+=" --spec"
     [[ -n "$TIMEOUT_CYCLES" ]] && command+=" --timeout-cycles $TIMEOUT_CYCLES"
     [[ -n "$FREQ" ]] && command+=" --freq $FREQ"
+    [[ -n "$GLUCOSE_RESTART" ]] && command+=" --glucose-restart"
 
     # Run the test with proper command
     eval $command > "$log_file" 2>&1
