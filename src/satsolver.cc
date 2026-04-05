@@ -50,14 +50,12 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     cycles_heap_insert(0),
     // Initialize coprocessor mode
     coprocessor_mode(0),
-    cpu_roundtrip_cycles(10),
-    cpu_sf_scale(1.0),
-    coproc_cycles_propagation(0),
-    coproc_cycles_learning(0),
-    coproc_cycles_minimization(0),
-    coproc_cycles_backtrack(0),
-    coproc_cycles_deletion(0),
-    coproc_cycles_decision(0),
+    coproc_sf_hw_learning(0),
+    coproc_sf_hw_minimize(0),
+    coproc_dep_decision(0),
+    coproc_dep_learning(0),
+    coproc_dep_minimize(0),
+    coproc_dep_backtrack(0),
     saved_trail_size(0),
     saved_bt_level(0),
     // Initialize cycle tracking
@@ -126,14 +124,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     
     // Coprocessor mode
     coprocessor_mode = params.find<int>("coprocessor_mode", 0);
-    cpu_roundtrip_cycles = params.find<uint64_t>("cpu_roundtrip_cycles", 10);
-    cpu_sf_scale = params.find<double>("cpu_sf_scale", 1.0);
     if (coprocessor_mode > 0) {
-        output.output("==================[ Coprocessor Mode Configuration ]===================\n");
-        output.output("Mode             : %d (propagate-only HW)\n", coprocessor_mode);
-        output.output("CPU round-trip   : %lu accel cycles\n", cpu_roundtrip_cycles);
-        output.output("SF scale         : %.2f\n", cpu_sf_scale);
-        output.output("========================================================================\n");
+        output.output("Coprocessor mode : %d (propagate-only HW, raw stats collection)\n", coprocessor_mode);
     }
 
     // Load decision sequence if provided
@@ -518,43 +510,16 @@ void SATSolver::finish() {
     output.output("Detail Sum         : %lu cycles\n", propagation_detail_sum);
     output.output("===========================================================================\n");
 
-    // Coprocessor mode statistics
+    // Coprocessor mode: raw statistics for offline computation
     if (coprocessor_mode > 0) {
-        uint64_t coproc_total = coproc_cycles_propagation + coproc_cycles_learning +
-                                coproc_cycles_minimization + coproc_cycles_backtrack +
-                                coproc_cycles_deletion + coproc_cycles_decision;
-
-        // Corresponding HW cycles for each merged phase
-        uint64_t hw_propagation = cycles_propagate + cycles_heap_insert + cycles_heap_bump;
-        uint64_t hw_learning = cycles_analyze; // BTLEVEL is lumped into cycles_minimize
-        uint64_t hw_minimization = cycles_minimize; // includes BTLEVEL
-        uint64_t hw_backtrack = cycles_backtrack + cycles_restart;
-        uint64_t hw_deletion = cycles_reduce;
-        uint64_t hw_decision = cycles_decision;
-
-        double cp_pct_prop = coproc_total > 0 ? (double)coproc_cycles_propagation * 100.0 / coproc_total : 0;
-        double cp_pct_learn = coproc_total > 0 ? (double)coproc_cycles_learning * 100.0 / coproc_total : 0;
-        double cp_pct_min = coproc_total > 0 ? (double)coproc_cycles_minimization * 100.0 / coproc_total : 0;
-        double cp_pct_bt = coproc_total > 0 ? (double)coproc_cycles_backtrack * 100.0 / coproc_total : 0;
-        double cp_pct_del = coproc_total > 0 ? (double)coproc_cycles_deletion * 100.0 / coproc_total : 0;
-        double cp_pct_dec = coproc_total > 0 ? (double)coproc_cycles_decision * 100.0 / coproc_total : 0;
-
-        output.output("================[ Coprocessor Mode: Propagate-Only HW ]=================\n");
-        output.output("CPU round-trip to on-chip SRAM: %lu cycles, SF scale: %.2f\n", cpu_roundtrip_cycles, cpu_sf_scale);
-        output.output("%-17s %15s %8s %15s\n", "Phase", "Coproc Cycles", "%", "HW Cycles");
-        output.output("%-17s %15lu %7.2f%% %15lu\n", "Propagation", coproc_cycles_propagation, cp_pct_prop, hw_propagation);
-        output.output("%-17s %15lu %7.2f%% %15lu\n", "Clause Learning", coproc_cycles_learning, cp_pct_learn, hw_learning);
-        output.output("%-17s %15lu %7.2f%% %15lu\n", "Minimization", coproc_cycles_minimization, cp_pct_min, hw_minimization);
-        output.output("%-17s %15lu %7.2f%% %15lu\n", "Backtrack", coproc_cycles_backtrack, cp_pct_bt, hw_backtrack);
-        output.output("%-17s %15lu %7.2f%% %15lu\n", "Deletion", coproc_cycles_deletion, cp_pct_del, hw_deletion);
-        output.output("%-17s %15lu %7.2f%% %15lu\n", "Decision", coproc_cycles_decision, cp_pct_dec, hw_decision);
-        output.output("---------------------------------------------------------\n");
-        output.output("%-17s %15lu %7.2f%% %15lu\n", "Total", coproc_total, 100.0, total_counted);
-        output.output("HW-only Total  : %lu cycles\n", total_cycles);
-        output.output("Coproc Total   : %lu cycles\n", coproc_total);
-        if (coproc_total > 0)
-            output.output("Coproc / HW    : %.2fx\n", (double)coproc_total / total_cycles);
-        output.output("========================================================================\n");
+        output.output("=============[ Coprocessor Raw Statistics ]=============\n");
+        output.output("sf_hw_learning    = %lu\n", coproc_sf_hw_learning);
+        output.output("sf_hw_minimize    = %lu\n", coproc_sf_hw_minimize);
+        output.output("dep_decision      = %lu\n", coproc_dep_decision);
+        output.output("dep_learning      = %lu\n", coproc_dep_learning);
+        output.output("dep_minimize      = %lu\n", coproc_dep_minimize);
+        output.output("dep_backtrack     = %lu\n", coproc_dep_backtrack);
+        output.output("========================================================\n");
     }
 }
 
@@ -811,62 +776,6 @@ void SATSolver::handleHeapResponse(SST::Event* ev) {
     delete resp;
 }
 
-uint64_t SATSolver::computeCpuPhaseCost(SolverState phase, uint64_t hw_elapsed) {
-    const int LITS_PER_CACHELINE = 16; // sizeof(Lit)=4, cacheline=64B
-    double sf = 1.0;
-    uint64_t dep_accesses = 0;
-
-    switch (phase) {
-        case PROPAGATE:
-            // HW execution + per-invocation round-trip (command + result)
-            return hw_elapsed + 2 * cpu_roundtrip_cycles;
-        case DECIDE:
-            sf = 3.0;
-            // Heap extract-max + insert: dependent per-level accesses
-            dep_accesses = 2 * (uint64_t)std::ceil(std::log2(std::max((uint32_t)1, num_vars)));
-            break;
-        case ANALYZE:
-        case BTLEVEL: {
-            // Clause Learning: parallel learners → 1 serial
-            sf = std::min((int)conflicts.size(), LEARNERS);
-            if (sf < 1.0) sf = 1.0;
-            // Trail burst reads: contiguous, ceil(entries / 16) round-trips
-            uint64_t trail_entries = 0;
-            if (bt_level < (int)trail_lim.size())
-                trail_entries = trail.size() - trail_lim[bt_level];
-            dep_accesses = (trail_entries + LITS_PER_CACHELINE - 1) / LITS_PER_CACHELINE;
-            break;
-        }
-        case MINIMIZE:
-            sf = std::min((int)learnt_clause.size() - 1, MINIMIZERS);
-            if (sf < 1.0) sf = 1.0;
-            dep_accesses = (learnt_clause.size() + LITS_PER_CACHELINE - 1) / LITS_PER_CACHELINE;
-            break;
-        case BACKTRACK:
-        case RESTART: {
-            sf = 2.0;
-            uint64_t vars_to_unassign;
-            if (phase == RESTART) {
-                vars_to_unassign = saved_trail_size;
-            } else {
-                vars_to_unassign = (saved_bt_level < (uint64_t)trail_lim.size()) ?
-                    saved_trail_size - trail_lim[saved_bt_level] : 0;
-            }
-            // Trail read (burst) + heap re-insert (batch)
-            dep_accesses = 2 * ((vars_to_unassign + LITS_PER_CACHELINE - 1) / LITS_PER_CACHELINE);
-            break;
-        }
-        case REDUCE:
-            sf = 1.5;
-            dep_accesses = 0;
-            break;
-        default:
-            return hw_elapsed;
-    }
-
-    return (uint64_t)(hw_elapsed * sf * cpu_sf_scale) + dep_accesses * cpu_roundtrip_cycles;
-}
-
 bool SATSolver::clockTick(SST::Cycle_t cycle) {
     // Check for timeout before doing any work. If exceeded, terminate simulation.
     if (timeout_cycles > 0 && cycle >= timeout_cycles && state != DONE) {
@@ -924,31 +833,39 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
                 break;
         }
     
-        // Accumulate coprocessor theoretical cycles (separate from HW counters)
+        // Accumulate coprocessor raw statistics for offline computation
         if (coprocessor_mode == 1) {
-            uint64_t coproc_elapsed;
-            if (prev_state == WAIT_HEAP) {
-                coproc_elapsed = elapsed; // WAIT_HEAP passes through unchanged
-            } else {
-                coproc_elapsed = computeCpuPhaseCost(prev_state, elapsed);
-            }
+            const int LITS_PER_CL = 16;
             switch (prev_state) {
-                case PROPAGATE:
-                    coproc_cycles_propagation += coproc_elapsed; break;
                 case ANALYZE:
-                case BTLEVEL:
-                    coproc_cycles_learning += coproc_elapsed; break;
+                case BTLEVEL: {
+                    double sf = std::min((int)conflicts.size(), LEARNERS);
+                    if (sf < 1.0) sf = 1.0;
+                    coproc_sf_hw_learning += (uint64_t)(elapsed * sf);
+                    uint64_t trail_entries = 0;
+                    if (bt_level < (int)trail_lim.size())
+                        trail_entries = trail.size() - trail_lim[bt_level];
+                    coproc_dep_learning += (trail_entries + LITS_PER_CL - 1) / LITS_PER_CL;
+                    break;
+                }
                 case MINIMIZE:
-                    coproc_cycles_minimization += coproc_elapsed; break;
-                case BACKTRACK:
-                case RESTART:
-                    coproc_cycles_backtrack += coproc_elapsed; break;
-                case REDUCE:
-                    coproc_cycles_deletion += coproc_elapsed; break;
+                    coproc_sf_hw_minimize += (uint64_t)(elapsed *
+                        std::max(1.0, (double)std::min((int)learnt_clause.size() - 1, MINIMIZERS)));
+                    coproc_dep_minimize += (learnt_clause.size() + LITS_PER_CL - 1) / LITS_PER_CL;
+                    break;
                 case DECIDE:
-                    coproc_cycles_decision += coproc_elapsed; break;
-                case WAIT_HEAP:
-                    coproc_cycles_propagation += coproc_elapsed; break;
+                    coproc_dep_decision += 2 * (uint64_t)std::ceil(
+                        std::log2(std::max((size_t)2, order_heap->size())));
+                    break;
+                case BACKTRACK: {
+                    uint64_t vars = (saved_bt_level < (uint64_t)trail_lim.size()) ?
+                        saved_trail_size - trail_lim[saved_bt_level] : 0;
+                    coproc_dep_backtrack += 2 * ((vars + LITS_PER_CL - 1) / LITS_PER_CL);
+                    break;
+                }
+                case RESTART:
+                    coproc_dep_backtrack += 2 * ((saved_trail_size + LITS_PER_CL - 1) / LITS_PER_CL);
+                    break;
                 default: break;
             }
         }

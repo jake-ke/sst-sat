@@ -77,9 +77,7 @@ public:
         {"prefetch_enabled", "Enable prefetching", "false"},
         {"enable_speculative", "Enable speculative propagation", "false"},
         {"timeout_cycles", "Maximum solver cycles before timing out (0 = no timeout)", "0"},
-        {"coprocessor_mode", "Coprocessor mode (0=off, 1=propagate-only HW)", "0"},
-        {"cpu_roundtrip_cycles", "Embedded CPU round-trip to on-chip SRAM in accel cycles", "10"},
-        {"cpu_sf_scale", "Overall scaling factor for all serialization factors (1.0 = default)", "1.0"}
+        {"coprocessor_mode", "Coprocessor mode (0=off, 1=propagate-only HW)", "0"}
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -376,21 +374,17 @@ private:
     uint64_t cycles_heap_insert;
     uint64_t total_cycles;
 
-    // Coprocessor mode
+    // Coprocessor mode: raw statistics for offline cost computation
     int coprocessor_mode;
-    uint64_t cpu_roundtrip_cycles;
-    double cpu_sf_scale;  // Overall scaling factor for all serialization factors
-    // Coprocessor theoretical cycle counters (6 merged phases)
-    uint64_t coproc_cycles_propagation;  // PROPAGATE + WAIT_HEAP (HW + roundtrip)
-    uint64_t coproc_cycles_learning;     // ANALYZE + BTLEVEL (CPU)
-    uint64_t coproc_cycles_minimization; // MINIMIZE (CPU)
-    uint64_t coproc_cycles_backtrack;    // BACKTRACK + RESTART (CPU)
-    uint64_t coproc_cycles_deletion;     // REDUCE (CPU)
-    uint64_t coproc_cycles_decision;     // DECIDE (CPU)
+    uint64_t coproc_sf_hw_learning;   // sum(elapsed * sf) for ANALYZE+BTLEVEL
+    uint64_t coproc_sf_hw_minimize;   // sum(elapsed * sf) for MINIMIZE
+    uint64_t coproc_dep_decision;     // total dependent accesses for DECIDE
+    uint64_t coproc_dep_learning;     // total dependent accesses for ANALYZE+BTLEVEL
+    uint64_t coproc_dep_minimize;     // total dependent accesses for MINIMIZE
+    uint64_t coproc_dep_backtrack;    // total dependent accesses for BACKTRACK+RESTART
     // Trail snapshots (saved before BACKTRACK/RESTART modify trail)
     uint64_t saved_trail_size;
     uint64_t saved_bt_level;
-    uint64_t computeCpuPhaseCost(SolverState phase, uint64_t hw_elapsed);
 
     // Cycle tracking
     SolverState prev_state;

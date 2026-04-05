@@ -752,6 +752,22 @@ def parse_log_file(log_file_path):
         }
 
 
+def parse_coprocessor_raw_statistics(content):
+    """Parse Coprocessor Raw Statistics section (key=value pairs)."""
+    stats = {}
+    section = re.search(
+        r'=+\[ Coprocessor Raw Statistics \]=+\n(.*?)\n=+',
+        content, re.DOTALL
+    )
+    if not section:
+        return stats
+    for line in section.group(1).splitlines():
+        m = re.match(r'\s*(\w+)\s*=\s*(\d+)', line)
+        if m:
+            stats[f"coproc_{m.group(1)}"] = int(m.group(2))
+    return stats
+
+
 def parse_satsolver_log(log_file_path, content):
     """
     Parse a satsolver format log file and extract all relevant information.
@@ -872,7 +888,8 @@ def parse_satsolver_log(log_file_path, content):
         result.update(parse_directed_prefetcher_statistics(content))
         result.update(parse_reduced_clause_access_statistics(content))
         result.update(parse_conflict_learning_statistics(content))
-        
+        result.update(parse_coprocessor_raw_statistics(content))
+
         # For abnormal results (ERROR/UNKNOWN), clear all numeric fields except test_case and result
         if result['result'] in ('ERROR', 'UNKNOWN'):
             # Keep only test_case and result, clear everything else
