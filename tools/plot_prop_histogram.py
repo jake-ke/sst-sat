@@ -242,7 +242,7 @@ def plot_propagation_histograms(results, output_pdf, weighted_only=False):
 
         if weighted_only:
             bars1b = ax1.bar(x_pos, watcher_weighted, width,
-                             alpha=0.8, color='coral', edgecolor='black',
+                             alpha=0.8, color='steelblue', edgecolor='black',
                              linewidth=1.0, label='Weighted')
         else:
             # Create grouped bars
@@ -256,10 +256,11 @@ def plot_propagation_histograms(results, output_pdf, weighted_only=False):
         ax1.set_xticks(x_pos)
         ax1.set_xticklabels(watcher_labels, fontsize=24)
         ax1.set_xlabel('# Watchers Processed per Literal', fontsize=26, fontweight='bold')
-        ax1.set_ylabel('Percentage (%)', fontsize=26, fontweight='bold')
+        ax1.set_ylabel('Norm. Work' if weighted_only else 'Percentage (%)', fontsize=26, fontweight='bold')
         ax1.tick_params(axis='y', which='major', labelsize=24)
         ax1.grid(True, axis='y', alpha=0.3, linestyle='--')
-        ax1.legend(fontsize=20, loc='upper center', ncol=2, framealpha=0.9)
+        if not weighted_only:
+            ax1.legend(fontsize=20, loc='upper center', ncol=2, framealpha=0.9)
         ax1.text(0.5, -0.28, '(a)', transform=ax1.transAxes, fontsize=26, fontweight='bold', va='top', ha='center')
 
         # Add percentage labels on top of bars (only if within ylim)
@@ -338,7 +339,7 @@ def plot_propagation_histograms(results, output_pdf, weighted_only=False):
 
         if weighted_only:
             bars2b = ax2.bar(x_pos, variable_weighted, width,
-                             alpha=0.8, color='gold', edgecolor='black',
+                             alpha=0.8, color='seagreen', edgecolor='black',
                              linewidth=1.0, label='Weighted')
         else:
             # Create grouped bars
@@ -351,11 +352,12 @@ def plot_propagation_histograms(results, output_pdf, weighted_only=False):
 
         ax2.set_xticks(x_pos)
         ax2.set_xticklabels(variable_labels, fontsize=24)
-        ax2.set_xlabel('# Literals Residing in Trail', fontsize=26, fontweight='bold')
-        ax2.set_ylabel('Percentage (%)', fontsize=26, fontweight='bold')
+        ax2.set_xlabel('# Outstanding Literals in Trail', fontsize=26, fontweight='bold')
+        ax2.set_ylabel('Norm. Work' if weighted_only else 'Percentage (%)', fontsize=26, fontweight='bold')
         ax2.tick_params(axis='y', which='major', labelsize=24)
         ax2.grid(True, axis='y', alpha=0.3, linestyle='--')
-        ax2.legend(fontsize=20, loc='upper center', ncol=2, framealpha=0.9)
+        if not weighted_only:
+            ax2.legend(fontsize=20, loc='upper center', ncol=2, framealpha=0.9)
         ax2.text(0.5, -0.28, '(b)', transform=ax2.transAxes, fontsize=26, fontweight='bold', va='top', ha='center')
 
         # Add percentage labels on top of bars (only if within ylim)

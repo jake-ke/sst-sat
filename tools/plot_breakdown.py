@@ -18,6 +18,7 @@ import argparse
 from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import numpy as np
 from unified_parser import parse_log_directory
 
 
@@ -212,47 +213,50 @@ def _plot_single_breakdown(ax, runtime_breakdown, runtime_raw, prop_breakdown,
                             color=prop_colors[j % len(prop_colors)],
                             edgecolor='white', linewidth=1.5)
 
-                    if j < 3:
+                    if j < 3 and scaled_pct > 4:
                         ax.text(left + scaled_pct/2, y_pos,
                                f'{scaled_pct:.1f}%',
-                               ha='center', va='center', fontsize=22)
+                               ha='center', va='center', fontsize=16, color='#555555')
 
                     left += scaled_pct
 
                 labels.append('Propagate')
                 ax.text(propagate_pct + 0.5, y_pos,
-                       f'{propagate_pct:.1f}%', ha='left', va='center', fontsize=22)
+                       f'{propagate_pct:.1f}%', ha='left', va='center', fontsize=16, color='#555555')
             elif component == 'Priority Queue' and runtime_raw.get('Priority Queue') and show_pq_boxplot:
                 # Box and whisker plot for Priority Queue
                 pq_data = runtime_raw['Priority Queue']
                 ax.boxplot([pq_data], positions=[y_pos], vert=False, widths=0.6,
                            patch_artist=True, showmeans=True,
                            boxprops=dict(facecolor=bar_color, alpha=0.7),
-                           medianprops=dict(color='red', linewidth=2.5),
-                           meanprops=dict(marker='D', markerfacecolor='black', markersize=10))
-                labels.append(component)
+                           medianprops=dict(color='red', linewidth=1.5),
+                           meanprops=dict(marker='D', markerfacecolor='black', markersize=6))
+                labels.append('Decision')
 
-                ax.text(pct + 0.5, y_pos, f'{pct:.1f}%',
-                       ha='left', va='center', fontsize=22)
+                q1, q3 = np.percentile(pq_data, [25, 75])
+                iqr = q3 - q1
+                whisker_max = max(x for x in pq_data if x <= q3 + 1.5 * iqr)
+                ax.text(whisker_max + 0.5, y_pos, f'{pct:.1f}%',
+                       ha='left', va='center', fontsize=16, color='#555555')
             else:
                 # Regular solid bar
                 ax.barh(y_pos, pct, color=bar_color,
                         edgecolor='white', linewidth=1.5)
-                labels.append(component)
+                labels.append('Decision' if component == 'Priority Queue' else component)
 
                 ax.text(pct + 0.5, y_pos, f'{pct:.1f}%',
-                       ha='left', va='center', fontsize=22)
+                       ha='left', va='center', fontsize=16, color='#555555')
 
             y_pos += 1
 
         ax.set_yticks(range(len(labels)))
-        ax.set_yticklabels(labels, fontsize=24)
-        ax.set_xlabel('Percentage of Total Runtime (%)', fontsize=26)
-        ax.tick_params(axis='x', which='major', labelsize=22)
+        ax.set_yticklabels(labels, fontsize=16)
+        ax.set_xlabel('Runtime (%)', fontsize=18, fontweight='bold')
+        ax.tick_params(axis='x', which='major', labelsize=16)
         ax.grid(axis='x', alpha=0.3, linestyle='--')
 
         if title:
-            ax.set_title(title, fontsize=26, fontweight='bold')
+            ax.set_title(title, fontsize=18, fontweight='bold')
 
         # Add legend for propagation components if they exist
         if prop_sorted and propagate_pct > 0 and show_prop_stacked:
@@ -260,12 +264,13 @@ def _plot_single_breakdown(ax, runtime_breakdown, runtime_raw, prop_breakdown,
                                             label=prop_comp)
                             for j, (prop_comp, _) in enumerate(prop_sorted)]
             ax.legend(handles=legend_patches, loc='upper right',
-                     title='Propagation Components', fontsize=20, title_fontsize=22)
+                     title='Propagation', fontsize=16, title_fontsize=16,
+                     labelspacing=0.3, handlelength=1.2, handletextpad=0.4, borderpad=0.3)
 
         return max(item[1] for item in runtime_sorted)
     else:
         ax.text(0.5, 0.5, 'No runtime breakdown data available',
-                ha='center', va='center', transform=ax.transAxes, fontsize=18)
+                ha='center', va='center', transform=ax.transAxes, fontsize=28)
         return 0
 
 
@@ -277,7 +282,7 @@ def plot_breakdowns(runtime_breakdown, runtime_raw, prop_breakdown, output_pdf):
     Priority Queue shows a box and whisker plot.
     All sorted by percentage in descending order.
     """
-    fig, ax = plt.subplots(1, 1, figsize=(12, 8))
+    fig, ax = plt.subplots(1, 1, figsize=(7, 4))
 
     max_val = _plot_single_breakdown(
         ax, runtime_breakdown, runtime_raw, prop_breakdown,
@@ -285,8 +290,8 @@ def plot_breakdowns(runtime_breakdown, runtime_raw, prop_breakdown, output_pdf):
     )
     ax.set_xlim(0, max_val * 1.15 if max_val else 100)
 
-    plt.tight_layout()
-    plt.savefig(output_pdf, format='pdf', bbox_inches='tight', dpi=300)
+    plt.tight_layout(pad=0.3)
+    plt.savefig(output_pdf, format='pdf', bbox_inches='tight', pad_inches=0.05, dpi=300)
     print(f"Plot saved to: {output_pdf}")
     plt.close()
 
@@ -302,18 +307,14 @@ def plot_combined_breakdown(baseline_data, accel_data, output_pdf,
     Y-axis order matches the original plot (baseline percentage descending).
     """
     base_bd = baseline_data['runtime_breakdown']
-    base_raw = baseline_data['runtime_raw']
-    prop_bd = baseline_data['prop_breakdown']
     accel_bd = accel_data['runtime_breakdown'] if accel_data else {}
 
     middle_bd = middle_data['runtime_breakdown'] if middle_data else {}
 
     # Same order as original plot: baseline percentage descending
     runtime_sorted = sorted(base_bd.items(), key=lambda x: x[1], reverse=True)
-    prop_sorted = sorted(prop_bd.items(), key=lambda x: x[1], reverse=True)
 
     base_bar_color = plt.cm.Set3.colors[0]
-    prop_colors = plt.cm.Pastel1.colors
     accel_color = '#5B9BD5'
     middle_color = '#F4A460'
 
@@ -321,109 +322,73 @@ def plot_combined_breakdown(baseline_data, accel_data, output_pdf,
     has_accel = bool(accel_bd)
     num_bars = 1 + int(has_middle) + int(has_accel)
 
-    fig, ax = plt.subplots(1, 1, figsize=(12, 10))
+    n_components = len(runtime_sorted)
+    fig_width = max(4.0, n_components * num_bars * 0.22 + 1.0)
+    fig, ax = plt.subplots(1, 1, figsize=(fig_width, 4))
 
-    bar_height = 0.8 / num_bars
+    bar_width = 0.22
+    gap = 0.08
+    group_width = bar_width * num_bars + gap
     labels = []
 
-    y_pos = 0
-    for i, (component, base_pct) in enumerate(runtime_sorted):
-        # Position bars symmetrically around y_pos
+    x_pos = 0
+    for _, (component, base_pct) in enumerate(runtime_sorted):
+        # Position bars within group
         offsets = []
         if num_bars == 1:
             offsets = [0]
         elif num_bars == 2:
-            offsets = [bar_height / 2, -bar_height / 2]
+            offsets = [-bar_width / 2, bar_width / 2]
         else:
-            offsets = [bar_height, 0, -bar_height]
+            offsets = [-bar_width, 0, bar_width]
 
-        y_baseline = y_pos + offsets[0]
-
-        # --- Baseline bar (top) ---
-        propagate_pct = base_bd.get('Propagate', 0)
-        if component == 'Propagate' and prop_sorted:
-            left = 0
-            for j, (prop_comp, prop_pct) in enumerate(prop_sorted):
-                scaled_pct = (prop_pct / 100.0) * propagate_pct
-                ax.barh(y_baseline, scaled_pct, height=bar_height, left=left,
-                        color=prop_colors[j % len(prop_colors)],
-                        edgecolor='white', linewidth=1.5)
-                if j < 3:
-                    ax.text(left + scaled_pct / 2, y_baseline,
-                            f'{scaled_pct:.1f}%',
-                            ha='center', va='center', fontsize=18)
-                left += scaled_pct
-            ax.text(propagate_pct + 0.5, y_baseline,
-                    f'{propagate_pct:.1f}%', ha='left', va='center', fontsize=18)
-        elif component == 'Priority Queue' and base_raw.get('Priority Queue'):
-            pq_data = base_raw['Priority Queue']
-            ax.boxplot([pq_data], positions=[y_baseline], vert=False,
-                       widths=bar_height * 0.9,
-                       patch_artist=True, showmeans=True,
-                       boxprops=dict(facecolor=base_bar_color, alpha=0.7),
-                       medianprops=dict(color='red', linewidth=2.5),
-                       meanprops=dict(marker='D', markerfacecolor='black', markersize=8))
-            ax.text(base_pct + 0.5, y_baseline, f'{base_pct:.1f}%',
-                    ha='left', va='center', fontsize=18)
-        else:
-            ax.barh(y_baseline, base_pct, height=bar_height,
-                    color=base_bar_color, edgecolor='white', linewidth=1.5)
-            ax.text(base_pct + 0.5, y_baseline, f'{base_pct:.1f}%',
-                    ha='left', va='center', fontsize=18)
+        # --- Baseline bar (left) ---
+        ax.bar(x_pos + offsets[0], base_pct, width=bar_width,
+               color=base_bar_color, edgecolor='white', linewidth=1.5)
 
         # --- Middle bar (if provided) ---
         if has_middle:
-            bar_idx = 1
-            y_middle = y_pos + offsets[bar_idx]
+            x_middle = x_pos + offsets[1]
             middle_pct = middle_bd.get(component, 0)
-            ax.barh(y_middle, middle_pct, height=bar_height,
-                    color=middle_color, edgecolor='white', linewidth=1.5)
-            ax.text(middle_pct + 0.5, y_middle, f'{middle_pct:.1f}%',
-                    ha='left', va='center', fontsize=18)
+            ax.bar(x_middle, middle_pct, width=bar_width,
+                   color=middle_color, edgecolor='white', linewidth=1.5)
 
-        # --- Accel/SATBlast bar (bottom) ---
+        # --- Accel/SATBlast bar (right) ---
         if has_accel:
             bar_idx = 1 + int(has_middle)
-            y_accel = y_pos + offsets[bar_idx]
+            x_accel = x_pos + offsets[bar_idx]
             accel_pct = accel_bd.get(component, 0)
-            ax.barh(y_accel, accel_pct, height=bar_height,
-                    color=accel_color, edgecolor='white', linewidth=1.5)
-            ax.text(accel_pct + 0.5, y_accel, f'{accel_pct:.1f}%',
-                    ha='left', va='center', fontsize=18)
+            ax.bar(x_accel, accel_pct, width=bar_width,
+                   color=accel_color, edgecolor='white', linewidth=1.5)
 
-        labels.append(component)
-        y_pos += 1
+        labels.append('Decision' if component == 'Priority Queue' else component)
+        x_pos += group_width
 
-    ax.set_yticks(range(len(labels)))
-    ax.set_yticklabels(labels, fontsize=24)
-    ax.set_xlabel('Percentage of Total Runtime (%)', fontsize=26)
-    ax.tick_params(axis='x', which='major', labelsize=22)
-    ax.grid(axis='x', alpha=0.3, linestyle='--')
+    ax.set_xticks([i * group_width for i in range(len(labels))])
+    ax.set_xticklabels(labels, fontsize=16, rotation=35, ha='right')
+    ax.set_ylabel('Runtime (%)', fontsize=18, fontweight='bold')
+    ax.tick_params(axis='y', which='major', labelsize=16)
+    ax.grid(axis='y', alpha=0.3, linestyle='--')
 
     max_val = max(v for _, v in runtime_sorted)
     max_middle = max((middle_bd.get(c, 0) for c, _ in runtime_sorted), default=0)
     max_accel = max((accel_bd.get(c, 0) for c, _ in runtime_sorted), default=0)
     overall_max = max(max_val, max_middle, max_accel)
-    ax.set_xlim(0, overall_max * 1.15 if overall_max else 100)
+    ax.set_ylim(0, overall_max * 1.1 if overall_max else 100)
+    ax.set_xlim(-group_width * 0.6, (n_components - 1) * group_width + group_width * 0.6)
 
-    # Two separate legends: propagation sub-components and config comparison
-    if prop_sorted and propagate_pct > 0:
-        prop_patches = [mpatches.Patch(color=prop_colors[j % len(prop_colors)], label=pc)
-                        for j, (pc, _) in enumerate(prop_sorted)]
-        prop_legend = ax.legend(handles=prop_patches, loc='upper right',
-                               title='Propagation Components', fontsize=20, title_fontsize=22)
-        ax.add_artist(prop_legend)
-
+    # Config legend only
     config_patches = [mpatches.Patch(color=base_bar_color, label='Baseline')]
     if has_middle:
         config_patches.append(mpatches.Patch(color=middle_color, label=middle_name or 'Middle'))
     if has_accel:
         config_patches.append(mpatches.Patch(color=accel_color, label='SATBlast'))
     ax.legend(handles=config_patches, loc='upper right',
-             bbox_to_anchor=(1.0, 0.72), fontsize=20)
+              fontsize=16,
+              labelspacing=0.3, handlelength=1.2, handletextpad=0.4, borderpad=0.3)
 
-    plt.tight_layout()
-    plt.savefig(output_pdf, format='pdf', bbox_inches='tight', dpi=300)
+    plt.tight_layout(pad=0.3)
+    plt.savefig(output_pdf, format='pdf', bbox_inches='tight', pad_inches=0.05, dpi=300)
     print(f"Combined plot saved to: {output_pdf}")
     plt.close()
 

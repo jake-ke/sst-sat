@@ -435,8 +435,13 @@ def compute_metrics_for_folder(folder_path, timeout_seconds, normalize_sataccel=
                 sim_ms = 0.0
             
             if r.get('result') in ('SAT', 'UNSAT') and sim_ms > timeout_ms:
+                orig_result = r['result']
                 r['result'] = 'TIMEOUT'
-            
+                print(f"Timeout ({orig_result} but {sim_ms/1000:.1f}s > {timeout_ms/1000:.0f}s limit): "
+                      f"{r.get('log_path', r.get('test_case', '?'))}")
+            elif r.get('result') == 'TIMEOUT':
+                print(f"Timeout: {r.get('log_path', r.get('test_case', '?'))}")
+
             if r.get('result') == 'TIMEOUT':
                 r['sim_time_ms'] = par2_penalty_ms
 
@@ -719,8 +724,8 @@ def compute_geomean_speedups(folder_metrics, shared_tests, timeout_seconds, base
 def plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests,
                           exclusion_table, timeout_seconds, output_dir, exclude_timeouts=False, large_fonts=False, line=False, highlight_last=None):
     """Generate all comparison charts and save to PDF."""
-    # Font scale factor: 1.5x larger when large_fonts is enabled
-    font_scale = 1.2 if large_fonts else 1.0
+    # Font scale factor: significantly larger when large_fonts is enabled
+    font_scale = 3.0 if large_fonts else 1.0
     # Scale figure size proportionally to accommodate larger fonts
     fig_size = (FIG_SIZE[0] * (font_scale + 0.05), FIG_SIZE[1] * (font_scale + 0.05)) if large_fonts else FIG_SIZE
     
@@ -805,10 +810,9 @@ def plot_cactus_chart(folder_metrics, shared_tests, timeout_seconds, output_dir,
     Each line: sorted solve times (ms->s) of SAT/UNSAT results within timeout on the shared test set.
     Saved as a separate PDF.
     """
-    # Font scale factor: 1.75x larger when large_fonts is enabled
-    font_scale = 1.2 if large_fonts else 1.0
-    # Scale figure size proportionally to accommodate larger fonts
-    fig_size = (FIG_SIZE[0] * (font_scale + 0.05), FIG_SIZE[1] * (font_scale + 0.05)) if large_fonts else FIG_SIZE
+    # Cactus plot: no font scaling even with --large-fonts
+    font_scale = 1.0
+    fig_size = FIG_SIZE
     
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -878,8 +882,8 @@ def plot_geomean_chart(folder_metrics, shared_tests, timeout_seconds, output_dir
     """Plot geomean speedup bar chart in a separate PDF.
     geomean_results: dict folder_name -> geomean_speedup (float or None)
     """
-    # Font scale factor: 1.75x larger when large_fonts is enabled
-    font_scale = 1.2 if large_fonts else 1.0
+    # Font scale factor: significantly larger when large_fonts is enabled
+    font_scale = 3.0 if large_fonts else 1.0
     # Scale figure size proportionally to accommodate larger fonts
     fig_size = (FIG_SIZE[0] * (font_scale + 0.05), FIG_SIZE[1] * (font_scale + 0.05)) if large_fonts else FIG_SIZE
     
@@ -962,8 +966,8 @@ def plot_per_test_speedups(folder_metrics, shared_tests, timeout_seconds, output
     Uses broken axis for high speedups (>50).
     Only generated when exclusive test set is specified.
     """
-    # Font scale factor: 1.75x larger when large_fonts is enabled
-    font_scale = 1.2 if large_fonts else 1.0
+    # Font scale factor: significantly larger when large_fonts is enabled
+    font_scale = 3.0 if large_fonts else 1.0
     # Scale figure size proportionally to accommodate larger fonts
     # Use half height for more compact per-test speedup chart
     per_test_fig_size = (FIG_SIZE[0] * font_scale, FIG_SIZE[1] / 2 * font_scale) if large_fonts else (FIG_SIZE[0], FIG_SIZE[1] / 2)
@@ -1175,8 +1179,10 @@ Examples:
             continue
         
         folder_metrics[folder_name] = metrics
-        print(f"  Found {len(metrics['results'])} tests, PAR-2: {metrics['par2_score']:.2f}s, "
-              f"Solved: {metrics['solved_count']}/{metrics['total_count']}")
+        excluded = len(metrics['results']) - metrics['total_count']
+        timedout = metrics['total_count'] - metrics['solved_count']
+        print(f"  Found {len(metrics['results'])} tests ({excluded} excluded, {timedout} timeout), "
+              f"PAR-2: {metrics['par2_score']:.2f}s, Solved: {metrics['solved_count']}/{metrics['total_count']}")
     
     if len(folder_metrics) < 2:
         print("\nError: Need at least 2 folders with valid results")

@@ -148,6 +148,7 @@ def parse_minisat_log(log_file_path, content):
             result['result'] = 'SAT'
         elif 'INDETERMINATE' in content:
             result['result'] = 'TIMEOUT'
+            print(f"Warning: TIMEOUT (INDETERMINATE) in {log_file_path}")
         # Any other case (incomplete, error, etc.) stays as UNKNOWN
         
     except Exception as e:
@@ -429,6 +430,41 @@ def parse_cache_statistics(content, level):
 def parse_l1_cache_statistics(content):
     """Parse L1 Cache Profiler Statistics section (backward-compatible wrapper)."""
     return parse_cache_statistics(content, "L1")
+
+
+def parse_aggregate_cache_statistics(content):
+    """Parse the aggregate Cache Statistics section (includes cold misses and prefetch traffic).
+
+    This section is printed by parse_stats.py from .stats.csv and contains total
+    cache hits/misses for L1, L2, and L3 (DDR). Unlike the Cache Profiler Statistics,
+    these counts include cold misses and prefetch traffic.
+
+    Returns:
+        dict with int counts: agg_l1_hits, agg_l1_misses, agg_l1_total_requests,
+        agg_l2_hits, agg_l2_misses, agg_l2_total_requests (same for l3).
+    """
+    stats = {}
+    section_pattern = r'={4,}\[ Cache Statistics \]={4,}\n(.*?)\n={4,}'
+    section_match = re.search(section_pattern, content, re.DOTALL)
+    if not section_match:
+        return stats
+
+    section_text = section_match.group(1)
+    for level in ['L1', 'L2', 'L3']:
+        prefix = f'agg_{level.lower()}'
+        level_pattern = (
+            rf'{level} Cache Statistics:\s*\n'
+            rf'\s*Cache Hits:\s*(\d+)\s*\n'
+            rf'\s*Cache Misses:\s*(\d+)\s*\n'
+            rf'\s*Total Requests:\s*(\d+)'
+        )
+        match = re.search(level_pattern, section_text)
+        if match:
+            stats[f'{prefix}_hits'] = int(match.group(1))
+            stats[f'{prefix}_misses'] = int(match.group(2))
+            stats[f'{prefix}_total_requests'] = int(match.group(3))
+
+    return stats
 
 
 def parse_clauses_fragmentation(content):
@@ -842,6 +878,7 @@ def parse_satsolver_log(log_file_path, content):
                 result['result'] = 'UNSAT'
             elif has_timeout:
                 result['result'] = 'TIMEOUT'
+                print(f"Warning: TIMEOUT in {log_file_path}")
             else:
                 print(f"Warning: Simulation complete but no SAT/UNSAT/TIMEOUT result in {log_file_path}")
                 result['result'] = 'UNKNOWN'
@@ -875,6 +912,7 @@ def parse_satsolver_log(log_file_path, content):
         result.update(parse_solver_statistics(content))
         result.update(parse_l1_cache_statistics(content))
         result.update(parse_cache_statistics(content, "L2"))
+        result.update(parse_aggregate_cache_statistics(content))
         result.update(parse_clauses_fragmentation(content))
         result.update(parse_cycle_statistics(content))
 
@@ -938,6 +976,7 @@ def parse_log_directory(logs_dir, exclude_summary=True):
         result = parse_log_file(log_file)
         # Always include result, even if partial or failed
         if result:
+            result['log_path'] = str(log_file)
             results.append(result)
     
     return results

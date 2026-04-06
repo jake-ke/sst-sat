@@ -330,7 +330,7 @@ def plot_bandwidth_comparison(common_tests, all_metrics, folder_names, colors, f
                color=colors[folder_idx],
                alpha=0.85, edgecolor='black', linewidth=0.8)
 
-    ax.set_ylabel('Bandwidth (GB/s)', fontsize=fonts['axis_label'], fontweight=fonts['axis_label_weight'])
+    ax.set_ylabel('L2 Bandwidth (GB/s)', fontsize=fonts['axis_label'], fontweight=fonts['axis_label_weight'])
     ax.set_xticks([x + bar_width * (num_folders - 1) / 2 for x in x_base])
     ax.set_xticklabels(labels, fontsize=max(8, fonts['tick'] - 4), rotation=45, ha='right')
     ax.tick_params(axis='y', labelsize=fonts['tick'])
@@ -556,7 +556,7 @@ Examples:
         print(f"\n{folder_name}:")
         print(f"  Avg propagations/s:       {avg_ps:.2e}")
         print(f"  Max propagations/s:       {max_ps:.2e}  (empirical peak compute)")
-        print(f"  Avg bandwidth (GB/s):     {avg_bw:.4f}")
+        print(f"  Avg L2 bandwidth (GB/s):     {avg_bw:.4f}")
         print(f"  Avg operational intensity: {avg_oi:.4f} prop/byte")
         print(f"  Avg L1 req/propagation:   {avg_rpp:.1f}")
         print(f"  Median L1 req/propagation: {median_rpp:.1f}")

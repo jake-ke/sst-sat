@@ -242,8 +242,8 @@ def plot_miss_rates(cache_sizes, miss_rate_data, output_pdf):
     Shows total miss rate as a line, and stacked area chart for breakdown
     by data structure. Legends are ranked by their average miss rate percentage.
     """
-    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-    
+    fig, ax = plt.subplots(1, 1, figsize=(4.5, 3.5))
+
     # Prepare data for plotting
     data_structures = ['priority_queue', 'clauses', 'variables', 'watchlist']
     labels_map = {
@@ -252,7 +252,7 @@ def plot_miss_rates(cache_sizes, miss_rate_data, output_pdf):
         'variables': 'Variables',
         'watchlist': 'Watchlist'
     }
-    
+
     # Calculate average miss rate for each data structure for ranking
     avg_miss_rates = {}
     for ds in data_structures:
@@ -261,10 +261,10 @@ def plot_miss_rates(cache_sizes, miss_rate_data, output_pdf):
             avg_miss_rates[ds] = sum(rates) / len(rates)
         else:
             avg_miss_rates[ds] = 0
-    
+
     # Sort data structures by average miss rate (descending)
     sorted_ds = sorted(data_structures, key=lambda x: avg_miss_rates[x], reverse=True)
-    
+
     # Color palette
     colors = {
         'priority_queue': '#8dd3c7',
@@ -272,52 +272,50 @@ def plot_miss_rates(cache_sizes, miss_rate_data, output_pdf):
         'variables': '#bebada',
         'watchlist': '#fb8072'
     }
-    
+
     # Plot stacked area chart for data structure breakdown
     y_data = []
     for ds in sorted_ds:
         y_data.append(miss_rate_data[ds])
-    
+
     ax.stackplot(cache_sizes, *y_data,
                 labels=[labels_map[ds] for ds in sorted_ds],
                 colors=[colors[ds] for ds in sorted_ds],
                 alpha=0.7)
-    
+
     # Plot total miss rate as a line
-    ax.plot(cache_sizes, miss_rate_data['total'], 
-           color='red', linewidth=2.5, marker='o', markersize=6,
+    ax.plot(cache_sizes, miss_rate_data['total'],
+           color='red', linewidth=2.5, marker='o', markersize=5,
            label='Total', linestyle='-', zorder=10)
-    
+
     # Formatting
-    ax.set_xlabel('L1 Cache Size (KB)', fontsize=20, fontweight='bold')
-    ax.set_ylabel('Miss Rate (%)', fontsize=20, fontweight='bold')
+    ax.set_xlabel('L1 Cache Size (KB)', fontsize=16, fontweight='bold')
+    ax.set_ylabel('Miss Rate (%)', fontsize=16, fontweight='bold')
     ax.grid(True, alpha=0.3, linestyle='--')
-    ax.tick_params(axis='both', which='major', labelsize=18)
-    
+    ax.tick_params(axis='both', which='major', labelsize=14)
+
     # Use log2 scale for x-axis
     ax.set_xscale('log', base=2)
     ax.set_xlim(min(cache_sizes) * 0.9, max(cache_sizes) * 1.1)
     ax.set_ylim(0, max(miss_rate_data['total']) * 1.15 if miss_rate_data['total'] else 100)
-    
+
     # Set x-axis ticks to show cache sizes explicitly
     ax.set_xticks(cache_sizes)
-    ax.set_xticklabels([str(s) for s in cache_sizes], fontsize=18)
-    
+    ax.set_xticklabels([str(s) for s in cache_sizes], fontsize=14)
+
     # Legend ranked by average miss rate (total line first, then data structures)
     handles, labels = ax.get_legend_handles_labels()
-    # Reorder to put Total first, then others in descending order
+    # Remove Total from legend
     total_idx = labels.index('Total')
-    total_handle = handles.pop(total_idx)
-    total_label = labels.pop(total_idx)
-    
-    # Insert total at the beginning
-    handles.insert(0, total_handle)
-    labels.insert(0, total_label)
-    
-    ax.legend(handles, labels, loc='upper right', fontsize=16, title='Data Structure', title_fontsize=18)
-    
-    plt.tight_layout()
-    plt.savefig(output_pdf, format='pdf', bbox_inches='tight', dpi=300)
+    handles.pop(total_idx)
+    labels.pop(total_idx)
+
+    ax.legend(handles, labels, loc='upper right', fontsize=12,
+             framealpha=0.9, edgecolor='gray', ncol=2,
+             handlelength=1.2, handletextpad=0.4, labelspacing=0.25, columnspacing=0.8)
+
+    plt.subplots_adjust(left=0.18, right=0.97, top=0.97, bottom=0.16)
+    plt.savefig(output_pdf, format='pdf', bbox_inches='tight', pad_inches=0.02, dpi=300)
     print(f"\nPlot saved to: {output_pdf}")
     plt.close()
 
