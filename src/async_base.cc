@@ -10,23 +10,9 @@ AsyncBase::AsyncBase(const std::string& prefix, int verbose, SST::Interfaces::St
 void AsyncBase::read(uint64_t addr, size_t size, uint64_t worker_id) {
     if (WRITE_BUFFER) {
         // First check store queue for forwarding
-        int idx = findStoreQueueEntry(addr, size);
-        if (idx >= 0) {
-            // Store-to-load forwarding: data found in store queue
-            output.verbose(CALL_INFO, 7, 0, "Read at 0x%lx, size %zu, forwarded from SQ[%d] 0x%lx\n", 
-                    addr, size, idx, store_queue[idx].addr);
-            
-            // Ensure the read size is less than or equal to store size
-            assert(size <= store_queue[idx].size && "Read size must be <= SQ entry size");
-
-            // Calculate offset into the stored data
-            size_t offset = addr - store_queue[idx].addr;
-            
-            // Extract the requested portion
-            std::vector<uint8_t> forwarded_data(size);
-            memcpy(forwarded_data.data(), store_queue[idx].data.data() + offset, size);
-                    
-            // Register forwarded data directly into reorder buffer
+        std::vector<uint8_t> forwarded_data;
+        if (findStoreQueueData(addr, size, forwarded_data)) {
+            output.verbose(CALL_INFO, 7, 0, "Read at 0x%lx, size %zu, forwarded from SQ\n", addr, size);
             reorder_buffer->storeDataByWorkerId(worker_id, forwarded_data);
             return;
         }
@@ -64,30 +50,43 @@ void AsyncBase::writeUntimed(uint64_t addr, size_t size, const std::vector<uint8
         addr, size, data, true, 0x1)); // posted, not cacheable
 }
 
-// Find a matching entry in the store queue by address range
-int AsyncBase::findStoreQueueEntry(uint64_t addr, size_t size) {
-    // Search from newest to oldest (back to front)
-    for (int i = store_queue.size() - 1; i >= 0; i--) {
-        // Check if read address range falls completely within the store address range
-        uint64_t store_start = store_queue[i].addr;
-        uint64_t store_end = store_start + store_queue[i].size - 1;
-        uint64_t read_end = addr + size - 1;
-        
-        // debugging check but cannot be guaranteed such rescale all
-        // if((addr >= store_start && addr <= store_end) && read_end > store_end){
-        //     printf("Checking SQ[%d]: read [0x%lx-0x%lx] against store [0x%lx-0x%lx]\n",
-        //         i, addr, read_end, store_start, store_end);
-        //     output.fatal(CALL_INFO, -1, "Read address range exceeds store range");
-        // }
+// Find store queue data for the given read range [addr, addr+size).
+// Single-pass newest→oldest: newer entries write into out_data first,
+// older entries only fill bytes not yet written. Newest data always wins.
+bool AsyncBase::findStoreQueueData(uint64_t addr, size_t size, std::vector<uint8_t>& out_data) {
+    uint64_t read_end = addr + size;  // exclusive
+    out_data.resize(size);
+    size_t bytes_filled = 0;
+    std::vector<bool> written(size, false);
 
-        if (addr >= store_start && read_end <= store_end) {
-            output.verbose(CALL_INFO, 7, 0, 
-                "SQ[%d] match: read [0x%lx-0x%lx] within store [0x%lx-0x%lx]\n",
-                i, addr, read_end, store_start, store_end);
-            return i;
+    for (int i = store_queue.size() - 1; i >= 0; i--) {
+        uint64_t sq_start = store_queue[i].addr;
+        uint64_t sq_end   = sq_start + store_queue[i].size;
+
+        // Compute overlap with [addr, read_end)
+        uint64_t ov_start = std::max(addr, sq_start);
+        uint64_t ov_end   = std::min(read_end, sq_end);
+        if (ov_start >= ov_end) continue;
+
+        // Copy only bytes not yet written by a newer entry
+        for (uint64_t b = ov_start; b < ov_end; b++) {
+            size_t dst = b - addr;
+            if (!written[dst]) {
+                out_data[dst] = store_queue[i].data[b - sq_start];
+                written[dst] = true;
+                bytes_filled++;
+            }
+        }
+
+        // If every byte in the read range is filled, we're done
+        if (bytes_filled == size) {
+            output.verbose(CALL_INFO, 7, 0,
+                "SQ match: read [0x%lx-0x%lx] fully forwarded\n",
+                addr, read_end - 1);
+            return true;
         }
     }
-    return -1; // Not found
+    return false;
 }
 
 std::vector<AsyncBase::CacheChunk> AsyncBase::calculateCacheChunks(uint64_t start_addr, size_t total_size) {
@@ -127,27 +126,9 @@ void AsyncBase::readBurst(uint64_t start_addr, size_t total_size, uint64_t worke
 
         if (WRITE_BUFFER) {
             // Check store queue for forwarding
-            int idx = findStoreQueueEntry(chunk.addr, chunk.size);
-            if (idx >= 0) {
-                // Store-to-load forwarding from store queue
-                output.verbose(CALL_INFO, 7, 0, 
-                    "ReadBurst chunk addr 0x%lx, size %zu forwarded from SQ[%d]: addr=0x%lx, size=%zu\n",
-                    chunk.addr, chunk.size, idx, store_queue[idx].addr, store_queue[idx].size);
-
-                // Ensure the read size is less than or equal to store size
-                assert(chunk.size <= store_queue[idx].size && "Read size must be <= SQ entry size");
-
-                // Calculate offset into the stored data
-                size_t offset = chunk.addr - store_queue[idx].addr;
-
-                // Extract the requested portion
-                std::vector<uint8_t> forwarded_data(chunk.size);
-                memcpy(forwarded_data.data(), store_queue[idx].data.data() + offset, chunk.size);
-
-                // Register forwarded data directly into reorder buffer
+            std::vector<uint8_t> forwarded_data;
+            if (findStoreQueueData(chunk.addr, chunk.size, forwarded_data)) {
                 reorder_buffer->storeDataByWorkerId(worker_id, forwarded_data, true, chunk.offset_in_data);
-
-                // Update burst state
                 if (--worker_state.pending_read_count == 0) worker_state.completed = true;
                 continue;
             }

@@ -66,8 +66,10 @@ protected:
         BurstReadState() : start_addr(0), offset(0), pending_read_count(0), completed(false) {}
     };
     
-    // Find a store queue entry with matching address range
-    int findStoreQueueEntry(uint64_t addr, size_t size);
+    // Find store queue data for the given address range.
+    // Returns true if a covering entry was found (data written to out_data).
+    // Merges newer partial overlaps on top so forwarded data is never stale.
+    bool findStoreQueueData(uint64_t addr, size_t size, std::vector<uint8_t>& out_data);
 
     // Member variables
     SST::Output output;
