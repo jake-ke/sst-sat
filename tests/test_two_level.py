@@ -85,8 +85,6 @@ def parse_args():
                         help='Use glucose-style LBD-based restarts instead of Luby')
     parser.add_argument('--freq', dest='freq', type=str, default="1GHz",
                         help='Clock frequency for all components (e.g. 1GHz, 500MHz)')
-    parser.add_argument('--coprocessor-mode', dest='coprocessor_mode', type=int, default=0,
-                        help='Coprocessor mode (0=off, 1=propagate-only HW)')
 
     args = parser.parse_args()
     
@@ -184,9 +182,6 @@ if args.timeout_cycles > 0:
     print(f"Solver timeout set to: {args.timeout_cycles} cycles")
 if args.glucose_restart:
     print(f"Glucose-style LBD-based restarts enabled")
-if args.coprocessor_mode > 0:
-    print(f"Coprocessor mode: {args.coprocessor_mode} (propagate-only HW)")
-    print(f"CPU round-trip cycles: collected for offline analysis")
 
 # Create the SAT solver component
 solver = sst.Component("solver", "satsolver.SATSolver")
@@ -225,7 +220,6 @@ params = {
     "enable_speculative": str(args.enable_speculative),
     "timeout_cycles": str(args.timeout_cycles),
     "glucose_restart": str(args.glucose_restart),
-    "coprocessor_mode": str(args.coprocessor_mode),
 }
 if args.decision_path:
     params["decision_file"] = args.decision_path

@@ -48,8 +48,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     cycles_restart(0),
     cycles_heap_bump(0),
     cycles_heap_insert(0),
-    // Initialize coprocessor mode
-    coprocessor_mode(0),
+    // Initialize coprocessor raw statistics
     coproc_sf_hw_learning(0),
     coproc_sf_hw_minimize(0),
     coproc_dep_decision(0),
@@ -123,10 +122,6 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     var_act_base_addr = std::stoull(params.find<std::string>("var_act_base_addr", "0x70000000"), nullptr, 0);
     
     // Coprocessor mode
-    coprocessor_mode = params.find<int>("coprocessor_mode", 0);
-    if (coprocessor_mode > 0) {
-        output.output("Coprocessor mode : %d (propagate-only HW, raw stats collection)\n", coprocessor_mode);
-    }
 
     // Load decision sequence if provided
     std::string decision_file = params.find<std::string>("decision_file", "");
@@ -511,7 +506,7 @@ void SATSolver::finish() {
     output.output("===========================================================================\n");
 
     // Coprocessor mode: raw statistics for offline computation
-    if (coprocessor_mode > 0) {
+    {
         output.output("=============[ Coprocessor Raw Statistics ]=============\n");
         output.output("sf_hw_learning    = %lu\n", coproc_sf_hw_learning);
         output.output("sf_hw_minimize    = %lu\n", coproc_sf_hw_minimize);
@@ -834,7 +829,7 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
         }
     
         // Accumulate coprocessor raw statistics for offline computation
-        if (coprocessor_mode == 1) {
+        {
             const int LITS_PER_CL = 16;
             switch (prev_state) {
                 case ANALYZE:
@@ -1027,10 +1022,8 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
             }
             break;
         case BACKTRACK:
-            if (coprocessor_mode > 0) {
-                saved_trail_size = trail.size();
-                saved_bt_level = bt_level;
-            }
+            saved_trail_size = trail.size();
+            saved_bt_level = bt_level;
             coroutine = new coro_t::pull_type(
                 [this](coro_t::push_type &yield) {
                     yield_ptr = &yield;
@@ -1055,9 +1048,7 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
             } else state = IDLE;
             break;
         case RESTART:
-            if (coprocessor_mode > 0) {
-                saved_trail_size = trail.size();
-            }
+            saved_trail_size = trail.size();
             coroutine = new coro_t::pull_type(
                 [this](coro_t::push_type &yield) {
                     yield_ptr = &yield;
