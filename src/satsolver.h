@@ -77,7 +77,6 @@ public:
         {"prefetch_enabled", "Enable prefetching", "false"},
         {"enable_speculative", "Enable speculative propagation", "false"},
         {"timeout_cycles", "Maximum solver cycles before timing out (0 = no timeout)", "0"},
-        {"coprocessor_mode", "Coprocessor mode (0=off, 1=propagate-only HW)", "0"}
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -374,8 +373,7 @@ private:
     uint64_t cycles_heap_insert;
     uint64_t total_cycles;
 
-    // Coprocessor mode: raw statistics for offline cost computation
-    int coprocessor_mode;
+    // Coprocessor raw statistics for offline cost computation (always collected)
     uint64_t coproc_sf_hw_learning;   // sum(elapsed * sf) for ANALYZE+BTLEVEL
     uint64_t coproc_sf_hw_minimize;   // sum(elapsed * sf) for MINIMIZE
     uint64_t coproc_dep_decision;     // total dependent accesses for DECIDE
