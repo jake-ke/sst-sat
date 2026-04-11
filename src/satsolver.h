@@ -77,6 +77,7 @@ public:
         {"prefetch_enabled", "Enable prefetching", "false"},
         {"enable_speculative", "Enable speculative propagation", "false"},
         {"timeout_cycles", "Maximum solver cycles before timing out (0 = no timeout)", "0"},
+        {"profile_2wl", "Enable 2WL clause-access reduction profiling (host-side; counts only original clauses)", "false"},
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -392,6 +393,9 @@ private:
     bool prefetch_enabled;
     SST::Link* prefetch_link;
     void issuePrefetch(uint64_t addr);
+
+    // 2WL clause-access reduction profiling (host-side, no simulated memory access)
+    bool profile_2wl;
 
     // Propagation timing counters
     uint64_t cycles_read_headptr;        // Time spent reading head pointers
