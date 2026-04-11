@@ -182,6 +182,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
 
     enable_speculative = params.find<bool>("enable_speculative", false);
     timeout_cycles = params.find<uint64_t>("timeout_cycles", 0);
+    profile_2wl = params.find<bool>("profile_2wl", false);
     glucose_restart = params.find<bool>("glucose_restart", false);
     if (glucose_restart) {
         output.output("Glucose-style LBD-based restarts enabled\n");
@@ -255,11 +256,15 @@ void SATSolver::init(unsigned int phase) {
         watches.initWatches(2 * (num_vars + 1), parsed_clauses);
         clauses.initialize(parsed_clauses);
 
-        // Precompute occurrence list sizes for each literal
-        lit_occ_count.resize(2 * (num_vars + 1), 0);
-        for (auto& c : parsed_clauses) {
-            for (auto& lit : c.literals) {
-                lit_occ_count[toWatchIndex(~lit)]++;
+        // Precompute occurrence list sizes for each literal (original clauses only).
+        // Conservative under-count: learnt clauses are not tracked, so the
+        // "naive" occurrence cost reflects the original CNF only.
+        if (profile_2wl) {
+            lit_occ_count.resize(2 * (num_vars + 1), 0);
+            for (auto& c : parsed_clauses) {
+                for (auto& lit : c.literals) {
+                    lit_occ_count[toWatchIndex(~lit)]++;
+                }
             }
         }
 
@@ -372,17 +377,19 @@ void SATSolver::finish() {
         }
     }
     
-    // Reduced clause access statistics
-    {
+    // Reduced clause access statistics (only meaningful when profile_2wl is enabled).
+    // Note: lit_occ_count tracks the original CNF only, so total_occ_sum is a
+    // conservative under-count of what a naive occurrence-list propagator would do.
+    if (profile_2wl) {
         uint64_t total_occ_sum = getStatCount(stat_total_occ);
         uint64_t watcher_sum = getStatCount(stat_watcher_traversed);
         uint64_t reduced = total_occ_sum - watcher_sum;
         double reduction_pct = (total_occ_sum > 0)
             ? (double)reduced / total_occ_sum * 100.0 : 0.0;
         output.output("=================[ Reduced Clause Access Statistics ]===================\n");
-        output.output("Full Occurrence List (naive) : %lu\n", total_occ_sum);
-        output.output("2WL Watchers Traversed      : %lu\n", watcher_sum);
-        output.output("Reduced Clause Accesses     : %lu (%.1f%%)\n", reduced, reduction_pct);
+        output.output("Full Occurrence List (naive, original clauses only) : %lu\n", total_occ_sum);
+        output.output("2WL Watchers Traversed                              : %lu\n", watcher_sum);
+        output.output("Reduced Clause Accesses                             : %lu (%.1f%%)\n", reduced, reduction_pct);
         output.output("===========================================================================\n");
     }
 
@@ -1322,9 +1329,6 @@ void SATSolver::execBacktrack() {
             "Added learnt clause 0x%x: %s\n", 
             addr, printClause(new_clause.literals).c_str());
         attachClause(addr, new_clause);
-        for (auto& lit : new_clause.literals) {
-            lit_occ_count[toWatchIndex(~lit)]++;
-        }
         trailEnqueue(learnt_clause[0], addr);
         stat_learned->addData(1);
     }
@@ -1877,8 +1881,10 @@ void SATSolver::propagateLiteral(
 
     stat_para_watchers->addData(para_watchers);
     stat_watcher_occ->addData(watcher_occ);
-    stat_total_occ->addDataNTimes(lit_occ_count[watch_idx], 1);
-    stat_watcher_traversed->addDataNTimes(watcher_occ, 1);
+    if (profile_2wl) {
+        stat_total_occ->addDataNTimes(lit_occ_count[watch_idx], 1);
+        stat_watcher_traversed->addDataNTimes(watcher_occ, 1);
+    }
 
     // Track metrics based on whether this literal was speculative
     if (is_speculative) {
@@ -2264,16 +2270,9 @@ void SATSolver::reduceDB() {
 
         // Only remove non-binary, unlocked clauses
         if (cls_size > 2 && !locked(addr) && (i < learnts.size() / 2 || act < extra_lim)) {
-            output.verbose(CALL_INFO, 4, 0, 
+            output.verbose(CALL_INFO, 4, 0,
                 "REDUCEDB: Marking clause 0x%x for removal\n", addr);
 
-            // update occurrence counts before detaching
-            {
-                const Clause& c = clauses.readClause(addr);
-                for (int li = 0; li < c.litSize(); li++) {
-                    lit_occ_count[toWatchIndex(~c[li])]--;
-                }
-            }
             // remove watchers
             detachClause(addr);
             clauses.freeClause(addr, cls_size);
