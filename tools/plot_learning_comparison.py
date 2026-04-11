@@ -18,6 +18,7 @@ from pathlib import Path
 from collections import OrderedDict
 import matplotlib.pyplot as plt
 import matplotlib.backends.backend_pdf
+import matplotlib.ticker as mticker
 
 from plot_comparison import (
     compute_metrics_for_folder, get_shared_test_set, get_folder_colors,
@@ -26,27 +27,36 @@ from plot_comparison import (
 FIG_SIZE = (13, 6)
 
 LEARNING_METRICS = [
-    ('avg_backtrack_level', 'Avg BT Level'),
-    ('avg_lbd', 'Avg LBD'),
-    ('avg_learnt_clause_length', 'Avg CL Length'),
-    ('unit_learnt_clauses', '# Unit Learned'),
-    ('decisions', '# Decisions'),
+    ('avg_backtrack_level', 'BT\nLevel'),
+    ('avg_lbd', 'LBD'),
+    ('avg_learnt_clause_length', 'CL\nLength'),
+    ('unit_learnt_clauses', 'Unit\nClauses'),
+    ('decisions', 'Decisions'),
 ]
 
 LEARNING_METRICS_NO_BT = [
-    ('avg_lbd', 'Avg LBD'),
-    ('avg_learnt_clause_length', 'Avg CL Length'),
-    ('unit_learnt_clauses', '# Unit Learned'),
-    ('decisions', '# Decisions'),
+    ('avg_lbd', 'LBD'),
+    ('avg_learnt_clause_length', 'CL\nLength'),
+    ('unit_learnt_clauses', 'Unit\nClauses'),
+    ('decisions', 'Decisions'),
 ]
 
 
 def get_learning_colors(folder_names):
-    """Like get_folder_colors but forces the second folder to SATBlast blue."""
-    colors = get_folder_colors(folder_names)
-    if len(colors) >= 3:
-        colors[2] = '#1f77b4'  # SATBlast blue
-    return colors
+    """Return a single-hue transitioning palette (light-to-dark blue)."""
+    palette = [
+        '#c6dbef',  # Lightest blue
+        '#6baed6',  # Light blue
+        '#2171b5',  # Medium blue
+        '#08306b',  # Dark blue
+        '#4292c6',  # Blue
+        '#084594',  # Deep blue
+    ]
+    return palette[:len(folder_names)]
+
+
+# Hatch patterns for B/W distinguishability
+LEARNING_HATCHES = ['', '///', '...', 'xxx', '\\\\\\', '---']
 
 
 def compute_learning_averages(folder_metrics, shared_tests):
@@ -136,8 +146,8 @@ def compute_learning_geomean_ratios(folder_metrics, shared_tests, baseline_name)
 
 def plot_learning_grouped(folder_metrics, shared_tests, output_dir, large_fonts=False):
     """Generate a single grouped bar chart: 4 metric groups, one bar per folder."""
-    font_scale = 1.2 if large_fonts else 1.0
-    fig_size = (FIG_SIZE[0] * (font_scale + 0.05), FIG_SIZE[1] * (font_scale + 0.05)) if large_fonts else FIG_SIZE
+    font_scale = 1.6 if large_fonts else 1.3
+    fig_size = (FIG_SIZE[0] * (font_scale + 0.05), FIG_SIZE[1] * (font_scale + 0.05))
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -161,6 +171,7 @@ def plot_learning_grouped(folder_metrics, shared_tests, output_dir, large_fonts=
             ax.bar(x_positions, values, bar_width,
                    label=folder_name,
                    color=folder_colors[folder_idx],
+                   hatch=LEARNING_HATCHES[folder_idx % len(LEARNING_HATCHES)],
                    alpha=0.9, edgecolor='black', linewidth=0.5)
 
             # Value annotations
@@ -168,11 +179,12 @@ def plot_learning_grouped(folder_metrics, shared_tests, output_dir, large_fonts=
                 ax.text(x, val * 1.02, f'{val:.1f}', ha='center', va='bottom',
                         fontsize=int(24 * font_scale))
 
-        ax.set_ylabel('Value', fontsize=int(28 * font_scale))
+        ax.set_ylabel('Value', fontsize=int(32 * font_scale))
         ax.set_xticks([x + bar_width * (num_folders - 1) / 2 for x in x_base])
         ax.set_xticklabels([label for _, label in LEARNING_METRICS],
-                           fontsize=int(19 * font_scale), ha='center')
-        ax.tick_params(axis='y', labelsize=int(24 * font_scale))
+                           fontsize=int(30 * font_scale), ha='center')
+        ax.tick_params(axis='y', labelsize=int(28 * font_scale))
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.1f'))
         ax.grid(axis='y', alpha=0.3)
         ax.set_axisbelow(True)
 
@@ -197,7 +209,7 @@ def plot_learning_per_test_ratios(folder_metrics, shared_tests, output_dir, base
     For each metric, plots grouped bars per test with one bar per folder
     (absolute values). Sorted by baseline value. One page per metric, 4 pages total.
     """
-    font_scale = 1.2 if large_fonts else 1.0
+    font_scale = 1.6 if large_fonts else 1.3
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = output_dir / 'learning_per_test.pdf'
@@ -252,6 +264,7 @@ def plot_learning_per_test_ratios(folder_metrics, shared_tests, output_dir, base
                 ax.bar(x_positions, values, bar_width,
                        label=folder_name,
                        color=folder_colors[folder_idx],
+                       hatch=LEARNING_HATCHES[folder_idx % len(LEARNING_HATCHES)],
                        alpha=0.85, edgecolor='black', linewidth=0.5)
 
             ax.set_ylabel(label, fontsize=int(18 * font_scale))
@@ -259,6 +272,7 @@ def plot_learning_per_test_ratios(folder_metrics, shared_tests, output_dir, base
             ax.set_xticklabels(labels, fontsize=max(7, int(10 * font_scale)),
                                rotation=45, ha='right')
             ax.tick_params(axis='y', labelsize=int(14 * font_scale))
+            ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.1f'))
             ax.grid(axis='y', alpha=0.3, linestyle='--')
             ax.set_axisbelow(True)
 
@@ -275,8 +289,8 @@ def plot_learning_per_test_ratios(folder_metrics, shared_tests, output_dir, base
 
 def plot_learning_geomean(folder_metrics, shared_tests, output_dir, baseline_name, large_fonts=False):
     """Generate a grouped bar chart of per-metric geomean ratios vs baseline."""
-    font_scale = 1.2 if large_fonts else 1.0
-    fig_size = (FIG_SIZE[0] * (font_scale + 0.05), FIG_SIZE[1] * (font_scale + 0.05)) if large_fonts else FIG_SIZE
+    font_scale = 2.0 if large_fonts else 1.5
+    fig_size = (FIG_SIZE[0] * (font_scale + 0.05), FIG_SIZE[1] * (font_scale + 0.05))
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -303,14 +317,17 @@ def plot_learning_geomean(folder_metrics, shared_tests, output_dir, baseline_nam
             ax.bar(x_positions, values, bar_width,
                    label=folder_name,
                    color=folder_colors[folder_idx],
+                   hatch=LEARNING_HATCHES[folder_idx % len(LEARNING_HATCHES)],
                    alpha=0.9, edgecolor='black', linewidth=0.5)
 
-        ax.set_ylabel('Geomean Ratio vs Baseline', fontsize=int(28 * font_scale))
+        ax.set_ylabel('Geomean Ratio', fontsize=int(32 * font_scale))
         group_centers = [x + bar_width * (num_folders - 1) / 2 for x in x_base]
         ax.set_xticks(group_centers)
         ax.set_xticklabels([label for _, label in LEARNING_METRICS],
-                           fontsize=int(19 * font_scale), ha='center')
-        ax.tick_params(axis='y', labelsize=int(24 * font_scale))
+                           fontsize=int(30 * font_scale), ha='center')
+        ax.tick_params(axis='y', labelsize=int(28 * font_scale))
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.1f'))
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=5))
         ax.grid(axis='y', alpha=0.3)
         ax.set_axisbelow(True)
         ax.axhline(y=1.0, color='darkred', linestyle='--', linewidth=1.5, alpha=0.8, zorder=3)
@@ -320,13 +337,13 @@ def plot_learning_geomean(folder_metrics, shared_tests, output_dir, baseline_nam
         ax.set_ylim(0, max(max_val * 1.3, 1.5))
 
         # Add "Lower Better" / "Higher Better" labels per group above the 1.0 line
-        label_y = max_val * 1.3 * 0.85  # below legend, above bars
+        label_y = max_val * 1.3 * 0.90  # above bars, below legend
         for gi, (key, _) in enumerate(LEARNING_METRICS):
-            label_text = 'Higher Better' if key == 'unit_learnt_clauses' else 'Lower Better'
+            label_text = 'Higher\nBetter' if key == 'unit_learnt_clauses' else 'Lower\nBetter'
             ax.text(group_centers[gi], label_y, label_text, ha='center', va='top',
-                    fontsize=int(16 * font_scale), color='green', fontweight='bold')
+                    fontsize=int(22 * font_scale), color='green', fontweight='bold')
 
-        ax.legend(loc='upper center', fontsize=int(26 * font_scale), frameon=False,
+        ax.legend(loc='upper center', fontsize=int(30 * font_scale), frameon=False,
                   ncol=min(num_folders, 5), bbox_to_anchor=(0.5, 1.02),
                   handlelength=1.0, handletextpad=0.5, columnspacing=1.0)
 
@@ -339,8 +356,8 @@ def plot_learning_geomean(folder_metrics, shared_tests, output_dir, baseline_nam
 
 def plot_learning_geomean_no_bt(folder_metrics, shared_tests, output_dir, baseline_name, large_fonts=False):
     """Generate a grouped bar chart of per-metric geomean ratios vs baseline, excluding Avg BT Level."""
-    font_scale = 1.2 if large_fonts else 1.0
-    fig_size = (FIG_SIZE[0] * (font_scale + 0.05), FIG_SIZE[1] * (font_scale + 0.05)) if large_fonts else FIG_SIZE
+    font_scale = 2.0 if large_fonts else 1.5
+    fig_size = (FIG_SIZE[0] * (font_scale + 0.05), FIG_SIZE[1] * (font_scale + 0.05))
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -368,15 +385,18 @@ def plot_learning_geomean_no_bt(folder_metrics, shared_tests, output_dir, baseli
                 values.append(v if v is not None else 0.0)
             ax.bar(x_positions, values, bar_width,
                    label=folder_name,
+                   hatch=LEARNING_HATCHES[folder_idx % len(LEARNING_HATCHES)],
                    color=folder_colors[folder_idx],
                    alpha=0.9, edgecolor='black', linewidth=0.5)
 
-        ax.set_ylabel('Geomean Ratio vs Baseline', fontsize=int(28 * font_scale))
+        ax.set_ylabel('Geomean Ratio', fontsize=int(32 * font_scale))
         group_centers = [x + bar_width * (num_folders - 1) / 2 for x in x_base]
         ax.set_xticks(group_centers)
         ax.set_xticklabels([label for _, label in metrics],
-                           fontsize=int(19 * font_scale), ha='center')
-        ax.tick_params(axis='y', labelsize=int(24 * font_scale))
+                           fontsize=int(30 * font_scale), ha='center')
+        ax.tick_params(axis='y', labelsize=int(28 * font_scale))
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.1f'))
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=5))
         ax.grid(axis='y', alpha=0.3)
         ax.set_axisbelow(True)
         ax.axhline(y=1.0, color='darkred', linestyle='--', linewidth=1.5, alpha=0.8, zorder=3)
@@ -386,13 +406,13 @@ def plot_learning_geomean_no_bt(folder_metrics, shared_tests, output_dir, baseli
         ax.set_ylim(0, max(max_val * 1.3, 1.5))
 
         # Add "Lower Better" / "Higher Better" labels per group above the 1.0 line
-        label_y = max_val * 1.3 * 0.85  # below legend, above bars
+        label_y = max_val * 1.3 * 0.90  # above bars, below legend
         for gi, (key, _) in enumerate(metrics):
-            label_text = 'Higher Better' if key == 'unit_learnt_clauses' else 'Lower Better'
+            label_text = 'Higher\nBetter' if key == 'unit_learnt_clauses' else 'Lower\nBetter'
             ax.text(group_centers[gi], label_y, label_text, ha='center', va='top',
-                    fontsize=int(16 * font_scale), color='green', fontweight='bold')
+                    fontsize=int(22 * font_scale), color='green', fontweight='bold')
 
-        ax.legend(loc='upper center', fontsize=int(26 * font_scale), frameon=False,
+        ax.legend(loc='upper center', fontsize=int(30 * font_scale), frameon=False,
                   ncol=min(num_folders, 5), bbox_to_anchor=(0.5, 1.02),
                   handlelength=1.0, handletextpad=0.5, columnspacing=1.0)
 

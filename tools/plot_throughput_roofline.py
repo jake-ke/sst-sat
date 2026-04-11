@@ -142,11 +142,11 @@ def compute_metrics(results, timeout_ms):
 def get_font_sizes():
     """Return font size dict for publication-quality figures."""
     return {
-        'axis_label': 32,
+        'axis_label': 40,
         'axis_label_weight': 'bold',
-        'tick': 28,
-        'legend': 30,
-        'annotation': 26,
+        'tick': 36,
+        'legend': 46,
+        'annotation': 38,
     }
 
 
@@ -173,8 +173,8 @@ def plot_propagations_per_sec(common_tests, all_metrics, folder_names, colors, f
 
     labels = [tc[:6] for tc in sorted_tests]
 
-    fig_width = max(15, len(sorted_tests) * 0.6)
-    fig, ax = plt.subplots(figsize=(fig_width, 8))
+    fig_width = max(12, len(sorted_tests) * 0.5)
+    fig, ax = plt.subplots(figsize=(fig_width, 6.5))
 
     num_folders = len(folder_names)
     bar_width = 0.8 / num_folders
@@ -189,10 +189,11 @@ def plot_propagations_per_sec(common_tests, all_metrics, folder_names, colors, f
                color=colors[folder_idx],
                alpha=0.85, edgecolor='black', linewidth=0.8)
 
-    ax.set_ylabel('Propagations/s', fontsize=fonts['axis_label'], fontweight=fonts['axis_label_weight'])
+    ax.set_ylabel('Propagations\nper Second', fontsize=fonts['axis_label'], fontweight=fonts['axis_label_weight'])
     ax.set_xticks([x + bar_width * (num_folders - 1) / 2 for x in x_base])
-    ax.set_xticklabels(labels, fontsize=max(8, fonts['tick'] - 4), rotation=45, ha='right')
+    ax.set_xticklabels(labels, fontsize=20, rotation=45, ha='right')
     ax.tick_params(axis='y', labelsize=fonts['tick'])
+    ax.set_xlim(-0.5, len(sorted_tests) - 0.2)
 
     ax.grid(axis='y', alpha=0.6, linestyle='-', linewidth=1.2)
     ax.set_axisbelow(True)
@@ -314,8 +315,8 @@ def plot_bandwidth_comparison(common_tests, all_metrics, folder_names, colors, f
 
     labels = [tc[:6] for tc in sorted_tests]
 
-    fig_width = max(15, len(sorted_tests) * 0.6)
-    fig, ax = plt.subplots(figsize=(fig_width, 8))
+    fig_width = max(12, len(sorted_tests) * 0.5)
+    fig, ax = plt.subplots(figsize=(fig_width, 6.5))
 
     num_folders = len(folder_names)
     bar_width = 0.8 / num_folders
@@ -330,22 +331,23 @@ def plot_bandwidth_comparison(common_tests, all_metrics, folder_names, colors, f
                color=colors[folder_idx],
                alpha=0.85, edgecolor='black', linewidth=0.8)
 
-    ax.set_ylabel('L2 Bandwidth (GB/s)', fontsize=fonts['axis_label'], fontweight=fonts['axis_label_weight'])
+    ax.set_ylabel('L2 Bandwidth\n(GB/s)', fontsize=fonts['axis_label'], fontweight=fonts['axis_label_weight'])
     ax.set_xticks([x + bar_width * (num_folders - 1) / 2 for x in x_base])
-    ax.set_xticklabels(labels, fontsize=max(8, fonts['tick'] - 4), rotation=45, ha='right')
+    ax.set_xticklabels(labels, fontsize=20, rotation=45, ha='right')
     ax.tick_params(axis='y', labelsize=fonts['tick'])
+    ax.set_xlim(-0.5, len(sorted_tests) - 0.2)
 
     ax.grid(axis='y', alpha=0.6, linestyle='-', linewidth=1.2)
     ax.set_axisbelow(True)
 
     # Annotation for geometric mean
     ax.text(0.02, 0.95, f'Geomean BW ratio: {geomean_bw_ratio:.2f}x',
-            transform=ax.transAxes, fontsize=fonts['annotation'] + 6,
+            transform=ax.transAxes, fontsize=fonts['annotation'],
             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
     max_val = max(all_metrics[fn][tc]['actual_bandwidth_GBs'] for fn in folder_names for tc in sorted_tests)
     ax.set_ylim(0, max_val * 1.35)
-    ax.legend(loc='upper center', fontsize=fonts['legend'] + 6, frameon=True,
+    ax.legend(loc='upper center', fontsize=fonts['legend'], frameon=True,
               ncol=num_folders, bbox_to_anchor=(0.5, 1.02),
               handlelength=1.0, handletextpad=0.5, columnspacing=1.0)
 
@@ -374,7 +376,7 @@ def plot_throughput_vs_req_per_prop(common_tests, all_metrics, folder_names, col
 
     ax.set_xscale('log')
     ax.set_yscale('log')
-    ax.set_xlabel('L1 Requests / Propagation',
+    ax.set_xlabel('L1 Requests/Propagation',
                   fontsize=fonts['axis_label'], fontweight=fonts['axis_label_weight'])
     ax.set_ylabel('Propagations/s',
                   fontsize=fonts['axis_label'], fontweight=fonts['axis_label_weight'])
@@ -410,8 +412,8 @@ def plot_req_per_prop_bars(common_tests, all_metrics, folder_names, colors, font
     # First 5 characters of test name, slanted
     labels = [tc[:6] for tc in sorted_tests]
 
-    fig_width = max(15, len(sorted_tests) * 0.6)
-    fig, ax = plt.subplots(figsize=(fig_width, 8))
+    fig_width = max(12, len(sorted_tests) * 0.5)
+    fig, ax = plt.subplots(figsize=(fig_width, 6.5))
 
     num_folders = len(folder_names)
     bar_width = 0.8 / num_folders
@@ -427,22 +429,23 @@ def plot_req_per_prop_bars(common_tests, all_metrics, folder_names, colors, font
                alpha=0.85, edgecolor='black', linewidth=0.8)
 
     ax.set_yscale('log')
-    ax.set_ylabel('L1 Requests / Propagation',
+    ax.set_ylabel('L1 Requests /\nPropagation',
                   fontsize=fonts['axis_label'], fontweight=fonts['axis_label_weight'])
     ax.set_xticks([x + bar_width * (num_folders - 1) / 2 for x in x_base])
-    ax.set_xticklabels(labels, fontsize=max(8, fonts['tick'] - 4), rotation=45, ha='right')
+    ax.set_xticklabels(labels, fontsize=20, rotation=45, ha='right')
     ax.tick_params(axis='y', labelsize=fonts['tick'])
+    ax.set_xlim(-0.5, len(sorted_tests) - 0.2)
 
     ax.grid(axis='y', alpha=0.3, linestyle='--', which='both')
     ax.set_axisbelow(True)
 
     # Annotation for geometric mean (invert ratio so >1x means reduction)
     geomean_rpp_reduction = 1.0 / geomean_rpp_ratio if geomean_rpp_ratio > 0 else 1.0
-    ax.text(0.02, 0.95, f'Geomean req/prop reduction: {geomean_rpp_reduction:.2f}x',
-            transform=ax.transAxes, fontsize=fonts['annotation'] + 6,
+    ax.text(0.02, 0.95, f'Geomean req/prop\nreduction: {geomean_rpp_reduction:.2f}x',
+            transform=ax.transAxes, fontsize=fonts['annotation'],
             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
-    ax.legend(loc='upper center', fontsize=fonts['legend'] + 6, frameon=True,
+    ax.legend(loc='upper center', fontsize=fonts['legend'], frameon=True,
               ncol=num_folders, bbox_to_anchor=(0.5, 1.02),
               handlelength=1.0, handletextpad=0.5, columnspacing=1.0)
 

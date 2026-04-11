@@ -6,7 +6,12 @@ cp results/prop_histogram_weighted.pdf ../sat-micro26/charts/prop_histogram.pdf
 
 python3 tools/plot_breakdown.py ../sat-isca26-data/base_128KB/profile_base_l1_4_1_l2_8_32/seed0/ results/runtime_breakdown.pdf --accel ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ --folder ../sat-isca26-data/incr3/opt2_l1_4_1_l2_8_32/seed3/ "Parallel Prop"
 cp results/runtime_breakdown.pdf ../sat-micro26/charts/
-cp results/runtime_breakdown_combined.pdf ../sat-micro26/charts/
+# cp results/runtime_breakdown_combined.pdf ../sat-micro26/charts/
+
+# donut breakdown
+python3 tools/plot_pie_breakdown.py ../sat-isca26-data/base_128KB/profile_base_l1_4_1_l2_8_32/seed0/ results/donut_breakdown.pdf --accel ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ --folder ../sat-isca26-data/incr3/opt2_l1_4_1_l2_8_32/seed3/ "+Prop" --donut
+# cp results/breakdown_donut.pdf ../sat-micro26/charts/runtime_breakdown_combined.pdf
+cp results/breakdown_pie.pdf ../sat-micro26/charts/runtime_breakdown_combined.pdf
 
 python3 tools/plot_l1_miss_rate.py ../sat-isca26-data base_l1_4_1_l2_8_32/ results/l1_miss_rate.pdf
 cp results/l1_miss_rate.pdf ../sat-micro26/charts/
@@ -17,12 +22,10 @@ cp results/l2_sweep_lat.pdf ../sat-micro26/charts/
 # python3 tools/plot_l2_sweep.py --bw-dir ../sat-isca26-data/bw --bw-prefix base_l1_-1_1 --lat-dir ../sat-isca26-data/base_128KB --lat-prefix base_l1_4_1 results/l2_sweep.pdf
 
 
-# MUST!!!! specify MANUAL_EXCLUSIVE_TESTS in plot_comparison.py for large tests - no sat accel results
-# large tests per-seed
-python3 tools/plot_comparison.py --output-dir results/large_tests/ ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/seed3 ../sat-isca26-data/stereo_minisat_logs/ ../sat-isca26-data/stereo_kissat_logs/ ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ --names "Baseline" "MiniSAT" "Kissat" "SATBlast"
-# python3 tools/plot_comparison.py --output-dir results/large_tests/ ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/seed3 ../sat-isca26-data/kilia_minisat_logs/ ../sat-isca26-data/kilia_kissat_logs/ ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ --names "Baseline" "MiniSAT" "Kissat" "SATBlast"
+# large tests per-seed (uses hardcoded MANUAL_EXCLUSIVE_TESTS in plot_large_tests.py)
+python3 tools/plot_large_tests.py --output-dir results/large_tests/ ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/seed3 ../sat-isca26-data/stereo_minisat_logs/ ../sat-isca26-data/stereo_kissat_logs/ ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ --names "Baseline" "MiniSAT" "Kissat" "SATBlast"
+# python3 tools/plot_large_tests.py --output-dir results/large_tests/ ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/seed3 ../sat-isca26-data/kilia_minisat_logs/ ../sat-isca26-data/kilia_kissat_logs/ ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ --names "Baseline" "MiniSAT" "Kissat" "SATBlast"
 cp results/large_tests/per_test_speedups.pdf ../sat-micro26/charts/large_tests.pdf
-# below this, no MANUAL_EXCLUSIVE_TESTS !!!!!!!!!!!!!!!!!
 
 
 #### Comprehensive comparison of baseline, SATAccel, MiniSAT, Kissat, and SATBlast
@@ -51,7 +54,9 @@ cp results/incr/geomean_speedups.pdf ../sat-micro26/charts/incr_gmean.pdf
 # Lits-12, 1427381a809c64c721838894ece6756d-shuffling-2-s25242449-of-bench-sat04-727.used-as.sat04-753         
 # Lits-16, 43e492bccfd57029b758897b17d7f04f-pb_300_09_lb_07
 # add --errors-as-timeout back after fix
-python3 tools/plot_comparison.py --output-dir results/lits/ ../sat-isca26-data/lits3/lits-4/ ~/sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3 ../sat-isca26-data/lits3/lits-12/ ../sat-isca26-data/lits3/lits-16/ --names "Lits-4" "Lits-8" "Lits-12" "Lits-16" --line --errors-as-timeout
+python3 tools/plot_comparison.py --output-dir results/lits/ ../sat-isca26-data/lits3/lits-1/ ../sat-isca26-data/lits3/lits-4/seed3 ~/sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3 ../sat-isca26-data/lits3/lits-16/seed3 --names "Lits-1" "Lits-4" "Lits-8" "Lits-16" --line --errors-as-timeout --large-fonts
+# kept lit-12
+# python3 tools/plot_comparison.py --output-dir results/lits/ ../sat-isca26-data/lits3/lits-4/ ~/sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3 ../sat-isca26-data/lits3/lits-12/ ../sat-isca26-data/lits3/lits-16/ --names "Lits-4" "Lits-8" "Lits-12" "Lits-16" --line --errors-as-timeout
 cp results/lits/geomean_speedups.pdf ../sat-micro26/charts/lits_gmean.pdf
 
 # confl
@@ -60,7 +65,6 @@ cp results/lits/geomean_speedups.pdf ../sat-micro26/charts/lits_gmean.pdf
 # Confl-4, fce130da1efd25fa9b12e59620a4146b-g2-ak128diagobg1btaig  
 # add --errors-as-timeout back after fix
 python3 tools/plot_comparison.py --output-dir results/confl/ ../sat-isca26-data/confl3/confl1/ ../sat-isca26-data/confl3/confl4/ ~/sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3 ../sat-isca26-data/confl3/confl12/  --names "Confl-1" "Confl-4" "Confl-8" "Confl-12" --errors-as-timeout --line
-
 # confl8 is basically opt-final but added profiling?
 # python3 tools/plot_comparison.py --output-dir results/confl/ ../sat-isca26-data/confl3/confl1/ ../sat-isca26-data/confl3/confl4/ ~/sat-isca26-data/confl3/confl8/ ../sat-isca26-data/confl3/confl12/  --names "Confl-1" "Confl-4" "Confl-8" "Confl-12" --line --errors-as-timeout
 cp results/confl/geomean_speedups.pdf ../sat-micro26/charts/confl_gmean.pdf
@@ -82,8 +86,8 @@ cp results/cache_comparison.pdf ../sat-micro26/charts/
 
 # roofline, throughput, bandwidth comparison
 python3 tools/plot_throughput_roofline.py ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/seed3 ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ --names "Baseline" "SATBlast" --peak-bandwidth 512 --peak-compute 4.81e8 --output-dir results/
-cp results/roofline.pdf ../sat-micro26/charts/
-cp results/throughput_vs_req_per_prop.pdf ../sat-micro26/charts/
+# cp results/roofline.pdf ../sat-micro26/charts/
+# cp results/throughput_vs_req_per_prop.pdf ../sat-micro26/charts/
 cp results/req_per_prop.pdf ../sat-micro26/charts/
 cp results/bandwidth_comparison.pdf ../sat-micro26/charts/
 # cp results/propagations_per_sec.pdf ../sat-micro26/charts/
@@ -106,4 +110,31 @@ cp results/no_timeouts/geomean_speedups.pdf ../sat-micro26/charts/no_timeout_gme
 
 # Comparing SATBlast at 250MHz
 python3 tools/plot_comparison.py --output-dir results/ ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/seed3 ~/openhw-2025-SAT-FPGA/results.txt ../sat-isca26-data/stereo_minisat_logs/ ../sat-isca26-data/stereo_kissat_logs/ ../sat-isca26-data/opt-final250MHz_nospec_l1_4_1_l2_8_32/seed3/ --names "Baseline" "SAT-Accel" "MiniSAT" "Kissat" "SATBlast" --large-fonts
+
+
+# case study of coproc
+python3 tools/plot_coproc_comparison.py ~/sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ ~/scratch/coproc.154830/sst-sat/runs/opt-final_l1_4_1_l2_8_32/seed3/ ~/scratch/lbd-coproc.154831/sst-sat/runs/lbd-opt-final_l1_4_1_l2_8_32/seed3/
+# with SATBlast+LBD
+# python3 tools/plot_coproc_comparison.py ~/sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ ~/scratch/lbd-opt-final.154597/sst-sat/runs/lbd-opt-final_l1_4_1_l2_8_32/seed3/ ~/scratch/coproc.154830/sst-sat/runs/opt-final_l1_4_1_l2_8_32/seed3/ ~/scratch/lbd-coproc.154831/sst-sat/runs/lbd-opt-final_l1_4_1_l2_8_32/seed3/
+cp results/coproc_comparison.pdf ../sat-micro26/charts/copro_case_study.pdf
+
+
+# new large tests bar for exclusive tests only
+python3 tools/plot_large_tests.py --output-dir results/large_tests/ ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/seed3 ../sat-isca26-data/stereo_minisat_logs/ ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ --names "Baseline" "MiniSAT" "SATBlast"
+cp results/large_tests/per_test_speedups.pdf ../sat-micro26/charts/large_tests.pdf
+# large tests scatter
+# use multiple seeds better
+python3 tools/plot_speedup_scatter.py ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/ ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/ --names "Baseline" "SATBlast" --output-dir results/ --exclude-timeouts
+cp results/speedup_vs_runtime.pdf ../sat-micro26/charts/large_tests.pdf
+
+
+# combined lits and confl ablation plots
+python3 tools/plot_ablation.py --output-dir results/ablation/
+cp results/ablation/ablation_combined.pdf ../sat-micro26/charts/
+
+
+# combined overall perf
+python3 tools/plot_overall_perf.py --output-dir results/ ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/seed3 ~/openhw-2025-SAT-FPGA/results.txt ../sat-isca26-data/stereo_minisat_logs/ ../sat-isca26-data/stereo_kissat_logs/ ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ ~/scratch/lbd-coproc.154831/sst-sat/runs/lbd-opt-final_l1_4_1_l2_8_32/seed3/ --names "Baseline" "SAT-Accel" "MiniSAT" "Kissat" "SATBlast" "SATBlast+LBD" --normalize-sataccel
+cp results/overall_perf.pdf ../sat-micro26/charts/perf_comb.pdf
+cp results/overall_perf_no_timeouts.pdf ../sat-micro26/charts/perf_comb_no_timeouts.pdf
 

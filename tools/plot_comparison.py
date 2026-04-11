@@ -23,9 +23,10 @@ from collections import defaultdict
 import math
 import matplotlib.pyplot as plt
 import matplotlib.backends.backend_pdf
+from matplotlib.ticker import MaxNLocator, FormatStrFormatter
 
 # Unified figure size for all charts - wider to accommodate compact legend
-FIG_SIZE = (12, 6)
+FIG_SIZE = (14, 4)
 from unified_parser import parse_log_directory, format_bytes
 
 
@@ -645,6 +646,57 @@ def compute_par2_on_shared_set(folder_metrics, shared_tests, timeout_seconds, er
     return par2_scores
 
 
+def validate_result_agreement(folder_metrics, shared_tests, timeout_seconds, folder_paths=None):
+    """Check that all folders agree on SAT vs UNSAT for each shared test case.
+
+    Only compares results that are definitively SAT or UNSAT (skips TIMEOUT/ERROR/UNKNOWN).
+    Skips folders sourced from raw text files (no reliable SAT/UNSAT info).
+    Returns a list of (test_case, {folder_name: result, ...}) for mismatches.
+    """
+    timeout_ms = timeout_seconds * 1000.0
+
+    # Determine which folders to skip (raw text files don't have SAT/UNSAT info)
+    skip_folders = set()
+    if folder_paths:
+        for folder_name, path in folder_paths.items():
+            if is_raw_text_file(path):
+                skip_folders.add(folder_name)
+
+    # Build lookup: folder -> test_case -> result label
+    folder_results = {}
+    for folder_name, metrics in folder_metrics.items():
+        if folder_name in skip_folders:
+            continue
+        rmap = {}
+        for r in metrics['results']:
+            tc = r.get('test_case', '')
+            result = r.get('result', 'UNKNOWN')
+            primary = result.split()[0] if result else 'UNKNOWN'
+            try:
+                sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                sim_ms = 0.0
+            # Only consider solved results (SAT/UNSAT within timeout)
+            if primary in ('SAT', 'UNSAT') and sim_ms <= timeout_ms:
+                rmap[tc] = primary
+        folder_results[folder_name] = rmap
+
+    mismatches = []
+    for tc in shared_tests:
+        results_for_tc = {}
+        for folder_name, rmap in folder_results.items():
+            if tc in rmap:
+                results_for_tc[folder_name] = rmap[tc]
+        # Need at least 2 definitive results to compare
+        if len(results_for_tc) < 2:
+            continue
+        unique_results = set(results_for_tc.values())
+        if len(unique_results) > 1:
+            mismatches.append((tc, dict(results_for_tc)))
+
+    return mismatches
+
+
 def compute_geomean_speedups(folder_metrics, shared_tests, timeout_seconds, baseline_name, errors_as_timeout=False):
     """Compute geometric mean speedup for each folder vs baseline using the shared test set.
 
@@ -759,8 +811,8 @@ def plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests,
         folder_colors = get_folder_colors(folder_names)
         # Y-axis label depends on whether timeouts are excluded
         y_label = 'Average Runtime (s)' if exclude_timeouts else 'PAR-2 (s)'
-        ax.set_ylabel(y_label, fontsize=int(32 * font_scale))
-        ax.tick_params(axis='y', labelsize=int(28 * font_scale))
+        ax.set_ylabel(y_label, fontsize=int(28 * font_scale))
+        ax.tick_params(axis='y', labelsize=int(24 * font_scale))
         ax.grid(axis='y', alpha=0.3)
 
         if line:
@@ -883,10 +935,12 @@ def plot_geomean_chart(folder_metrics, shared_tests, timeout_seconds, output_dir
     geomean_results: dict folder_name -> geomean_speedup (float or None)
     """
     # Font scale factor: significantly larger when large_fonts is enabled
-    font_scale = 3.0 if large_fonts else 1.0
+    font_scale = 5.0 if large_fonts else 1.0
     # Scale figure size proportionally to accommodate larger fonts
-    fig_size = (FIG_SIZE[0] * (font_scale + 0.05), FIG_SIZE[1] * (font_scale + 0.05)) if large_fonts else FIG_SIZE
-    
+    # Scale figure less than fonts so text appears proportionally larger
+    fig_scale = font_scale * 0.8 if large_fonts else 1.0
+    fig_size = (FIG_SIZE[0] * fig_scale, FIG_SIZE[1] * fig_scale) if large_fonts else FIG_SIZE
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = output_dir / f'{pdf_basename}.pdf'
@@ -915,8 +969,8 @@ def plot_geomean_chart(folder_metrics, shared_tests, timeout_seconds, output_dir
             bar_width = 1.4
             bar_spacing = 1.7  # Wider spacing to prevent overlap
         x_positions = [i * bar_spacing for i in range(num_folders)]
-        ax.set_ylabel('Geomean Speedup', fontsize=int(32 * font_scale))
-        ax.tick_params(axis='y', labelsize=int(28 * font_scale))
+        ax.set_ylabel('Speedup', fontsize=int(28 * font_scale))
+        ax.tick_params(axis='y', labelsize=int(24 * font_scale))
         ax.grid(axis='y', alpha=0.3)
 
         if line:
@@ -925,13 +979,13 @@ def plot_geomean_chart(folder_metrics, shared_tests, timeout_seconds, output_dir
             ax.set_xlim(x_positions[0] - x_pad, x_positions[-1] + x_pad)
             # Fill under the line for a polished look
             ax.fill_between(x_positions, plot_vals, alpha=0.12, color='#1f77b4', zorder=2)
-            ax.plot(x_positions, plot_vals, marker='o', markersize=10, linewidth=2.5,
-                    color='#1f77b4', zorder=3, markeredgecolor='white', markeredgewidth=1.5)
+            ax.plot(x_positions, plot_vals, marker='o', markersize=10 * font_scale ** 1.5, linewidth=2.5 * font_scale ** 1.5,
+                    color='#1f77b4', zorder=3, markeredgecolor='white', markeredgewidth=1.5 * font_scale)
             for x, val in zip(x_positions, g_values):
-                label = 'n/a' if val is None else f'{val:.2f}×'
+                label = 'n/a' if val is None else f'{val:.3f}×'
                 y = val if val is not None else 0.0
-                ax.annotate(label, (x, y), textcoords="offset points", xytext=(0, 12),
-                           ha='center', va='bottom', fontsize=int(22 * font_scale), fontweight='bold')
+                ax.annotate(label, (x, y), textcoords="offset points", xytext=(0, 12 * font_scale),
+                           ha='center', va='bottom', fontsize=int(20 * font_scale), fontweight='bold')
             # Highlight the last point with a star and label
             if highlight_last and len(x_positions) > 0:
                 last_x = x_positions[-1]
@@ -946,7 +1000,7 @@ def plot_geomean_chart(folder_metrics, shared_tests, timeout_seconds, output_dir
             bars = ax.bar(x_positions, plot_vals, width=bar_width, color=folder_colors, alpha=0.85, edgecolor='black', linewidth=0.8)
             for bar, val in zip(bars, g_values):
                 height = bar.get_height()
-                label = 'n/a' if val is None else f'{val:.2f}×'
+                label = 'n/a' if val is None else f'{val:.3f}×'
                 ax.text(bar.get_x() + bar.get_width()/2., height,
                         label, ha='center', va='bottom', fontsize=int(26 * font_scale))
 
@@ -954,6 +1008,8 @@ def plot_geomean_chart(folder_metrics, shared_tests, timeout_seconds, output_dir
         ax.set_xticklabels([wrap_label(n) for n in folder_names], fontsize=int(28 * font_scale), ha='center')
         ymax = max(plot_vals) if plot_vals else 1.0
         ax.set_ylim(0, ymax * 1.25)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+        ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
         plt.tight_layout()
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
@@ -1163,22 +1219,24 @@ Examples:
     # Use OrderedDict to preserve order and handle duplicate names
     from collections import OrderedDict
     folder_metrics = OrderedDict()
-    
+    folder_paths = OrderedDict()  # folder_name -> original path (for validation)
+
     for i, folder_path in enumerate(args.folders):
         # Use custom name if provided, otherwise use folder name
         if args.names:
             folder_name = args.names[i]
         else:
             folder_name = Path(folder_path).name
-        
+
         print(f"\nProcessing {folder_name} ({folder_path})...")
         metrics = compute_metrics_for_folder(folder_path, args.timeout, normalize_sataccel=args.normalize_sataccel)
-        
+
         if not metrics['results']:
             print(f"  Warning: No valid results found in {folder_path}")
             continue
-        
+
         folder_metrics[folder_name] = metrics
+        folder_paths[folder_name] = folder_path
         excluded = len(metrics['results']) - metrics['total_count']
         timedout = metrics['total_count'] - metrics['solved_count']
         print(f"  Found {len(metrics['results'])} tests ({excluded} excluded, {timedout} timeout), "
@@ -1206,6 +1264,9 @@ Examples:
     if not shared_tests:
         print("Error: No shared tests found across all folders")
         sys.exit(1)
+
+    # Validate SAT/UNSAT agreement across folders (skip raw text file sources)
+    mismatches = validate_result_agreement(folder_metrics, shared_tests, args.timeout, folder_paths)
 
     # Compute PAR-2 on shared set
     shared_par2_scores = compute_par2_on_shared_set(folder_metrics, shared_tests, args.timeout, args.errors_as_timeout)
@@ -1237,6 +1298,96 @@ Examples:
     if MANUAL_EXCLUSIVE_TESTS:
         print(f"\nGenerating per-test speedup charts (exclusive set specified with {len(MANUAL_EXCLUSIVE_TESTS)} tests)...")
         plot_per_test_speedups(folder_metrics, shared_tests, args.timeout, args.output_dir, baseline_name, geomean_results, large_fonts=args.large_fonts)
+
+    # Dump per-test comparison CSV
+    dump_comparison_csv(folder_metrics, shared_tests, args.timeout, args.output_dir, args.errors_as_timeout)
+
+    # Report SAT/UNSAT agreement validation
+    if mismatches:
+        print(f"\n*** RESULT AGREEMENT ERRORS: {len(mismatches)} test(s) have SAT/UNSAT mismatches ***")
+        for tc, results_map in mismatches:
+            parts = [f"{folder}={res}" for folder, res in sorted(results_map.items())]
+            print(f"  {tc}: {', '.join(parts)}")
+    else:
+        print(f"\nResult agreement: OK (all folders agree on SAT/UNSAT for all shared tests)")
+
+
+def dump_comparison_csv(folder_metrics, shared_tests, timeout_seconds, output_dir, errors_as_timeout=False):
+    """Write a CSV with per-test runtime comparison across all folders, including variables and clauses."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = output_dir / 'comparison.csv'
+
+    timeout_ms = timeout_seconds * 1000.0
+    penalty_ms = 2 * timeout_ms
+    folder_names = list(folder_metrics.keys())
+
+    # Build lookup: test_case -> result dict per folder
+    folder_lookups = {}
+    for folder_name, metrics in folder_metrics.items():
+        lookup = {}
+        for r in metrics['results']:
+            tc = r.get('test_case')
+            if tc:
+                lookup[tc] = r
+        folder_lookups[folder_name] = lookup
+
+    # Use the first folder that has variable/clause data as the source for those fields
+    def get_vars_clauses(tc):
+        for fn in folder_names:
+            r = folder_lookups[fn].get(tc)
+            if r:
+                v = r.get('variables', 0) or 0
+                c = r.get('clauses', 0) or 0
+                if v or c:
+                    return int(v), int(c)
+        return 0, 0
+
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        header = ['test_case', 'variables', 'clauses']
+        for fn in folder_names:
+            header.append(f'{fn}_ms')
+        writer.writerow(header)
+
+        def _format_time(r):
+            if not r:
+                return ''
+            result = r.get('result', '')
+            try:
+                sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                sim_ms = penalty_ms
+            if result in ('SAT', 'UNSAT') and sim_ms <= timeout_ms:
+                return f'{sim_ms:.3f}'
+            elif result == 'TIMEOUT':
+                return f'{penalty_ms:.3f}'
+            elif result in ('ERROR', 'UNKNOWN') and errors_as_timeout:
+                return f'{timeout_ms:.3f}'
+            return ''
+
+        for tc in shared_tests:
+            variables, clauses = get_vars_clauses(tc)
+            row = [tc, variables, clauses]
+            for fn in folder_names:
+                row.append(_format_time(folder_lookups[fn].get(tc)))
+            writer.writerow(row)
+
+        # Non-shared tests: present in some folders but not all
+        shared_set = set(shared_tests)
+        all_tests = set()
+        for lookup in folder_lookups.values():
+            all_tests.update(lookup.keys())
+        non_shared = sorted(all_tests - shared_set)
+
+        for tc in non_shared:
+            variables, clauses = get_vars_clauses(tc)
+            row = [tc, variables, clauses]
+            for fn in folder_names:
+                row.append(_format_time(folder_lookups[fn].get(tc)))
+            writer.writerow(row)
+
+    print(f"\nComparison CSV written to {csv_path}")
 
 
 if __name__ == "__main__":
