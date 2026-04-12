@@ -88,6 +88,18 @@ def parse_args():
                         help='Use glucose-style LBD-based restarts instead of Luby')
     parser.add_argument('--freq', dest='freq', type=str, default="1GHz",
                         help='Clock frequency for all components (e.g. 1GHz, 500MHz)')
+    parser.add_argument('--profile-2wl', dest='profile_2wl',
+                        action='store_true', default=False,
+                        help='Enable 2WL clause-access reduction profiling (host-side)')
+    parser.add_argument('--profile-prop-timing', dest='profile_prop_timing',
+                        action='store_true', default=False,
+                        help='Enable per-propagation timing breakdown (auto-on with --spec)')
+    parser.add_argument('--enable-histograms', dest='enable_histograms',
+                        action='store_true', default=False,
+                        help='Enable per-propagation histogram statistics (watcher_occ, watcher_blocks, para_watchers, para_vars)')
+    parser.add_argument('--cache-profiler', dest='cache_profiler',
+                        action='store_true', default=False,
+                        help='Attach the satsolver.CacheProfiler subcomponent to L1 and L2 caches')
 
     args = parser.parse_args()
     
@@ -185,6 +197,14 @@ if args.timeout_cycles > 0:
     print(f"Solver timeout set to: {args.timeout_cycles} cycles")
 if args.glucose_restart:
     print(f"Glucose-style LBD-based restarts enabled")
+if args.profile_2wl:
+    print(f"2WL clause-access reduction profiling enabled")
+if args.profile_prop_timing or args.enable_speculative:
+    print(f"Per-propagation timing breakdown enabled")
+if args.enable_histograms:
+    print(f"Per-propagation histogram statistics enabled")
+if args.cache_profiler:
+    print(f"Cache profiler subcomponent enabled (L1+L2)")
 
 # Create the SAT solver component
 solver = sst.Component("solver", "satsolver-opt-final.SATSolver-opt-final")
@@ -223,6 +243,8 @@ params = {
     "enable_speculative": str(args.enable_speculative),
     "timeout_cycles": str(args.timeout_cycles),
     "glucose_restart": str(args.glucose_restart),
+    "profile_2wl": str(args.profile_2wl),
+    "profile_prop_timing": str(args.profile_prop_timing),
 }
 if args.decision_path:
     params["decision_file"] = args.decision_path
@@ -265,18 +287,19 @@ global_cache.addParams({
     "collect_stats" : "1"         # Make sure stats are collected
 })
 
-# Add CacheProfiler to L1 cache
-global_cache_profiler = global_cache.setSubComponent("prefetcher", "satsolver.CacheProfiler", 0)
-global_cache_profiler.addParams({
-    "cache_level": "L1",
-    "heap_base_addr": hex(heap_base_addr),
-    "variables_base_addr": hex(variables_base_addr),
-    "watches_base_addr": hex(watches_base_addr),
-    "clauses_cmd_base_addr": hex(clauses_cmd_base_addr),
-    "var_act_base_addr": hex(var_act_base_addr),
-    "verbose": str(args.verbose),
-    "exclude_cold_misses": "1"
-})
+# Add CacheProfiler to L1 cache (opt-in)
+if args.cache_profiler:
+    global_cache_profiler = global_cache.setSubComponent("prefetcher", "satsolver.CacheProfiler", 0)
+    global_cache_profiler.addParams({
+        "cache_level": "L1",
+        "heap_base_addr": hex(heap_base_addr),
+        "variables_base_addr": hex(variables_base_addr),
+        "watches_base_addr": hex(watches_base_addr),
+        "clauses_cmd_base_addr": hex(clauses_cmd_base_addr),
+        "var_act_base_addr": hex(var_act_base_addr),
+        "verbose": str(args.verbose),
+        "exclude_cold_misses": "1"
+    })
 
 # Create the directed prefetcher if enabled
 # prefetcher1 = global_cache.setSubComponent("prefetcher", "cassini.NextBlockPrefetcher", 1)
@@ -314,18 +337,19 @@ global_l2cache.addParams({
     "collect_stats" : "1"
 })
 
-# Add CacheProfiler to L2 cache
-global_l2cache_profiler = global_l2cache.setSubComponent("prefetcher", "satsolver.CacheProfiler")
-global_l2cache_profiler.addParams({
-    "cache_level": "L2",
-    "heap_base_addr": hex(heap_base_addr),
-    "variables_base_addr": hex(variables_base_addr),
-    "watches_base_addr": hex(watches_base_addr),
-    "clauses_cmd_base_addr": hex(clauses_cmd_base_addr),
-    "var_act_base_addr": hex(var_act_base_addr),
-    "verbose": str(args.verbose),
-    "exclude_cold_misses": "1"
-})
+# Add CacheProfiler to L2 cache (opt-in)
+if args.cache_profiler:
+    global_l2cache_profiler = global_l2cache.setSubComponent("prefetcher", "satsolver.CacheProfiler")
+    global_l2cache_profiler.addParams({
+        "cache_level": "L2",
+        "heap_base_addr": hex(heap_base_addr),
+        "variables_base_addr": hex(variables_base_addr),
+        "watches_base_addr": hex(watches_base_addr),
+        "clauses_cmd_base_addr": hex(clauses_cmd_base_addr),
+        "var_act_base_addr": hex(var_act_base_addr),
+        "verbose": str(args.verbose),
+        "exclude_cold_misses": "1"
+    })
 
 
 # Create memory controller for global operations
@@ -379,10 +403,12 @@ l2_to_mem_link.connect((global_l2cache, "lowlink", "1ns"), (global_memctrl, "hig
 # Enable statistics - different types for different stats
 sst.setStatisticLoadLevel(7)
 
-# Enable statistics for all metrics
-sst.enableStatisticsForComponentName("solver", [
+# Build solver stat list. Optional groups are appended only when their
+# corresponding flag is on (avoids enabling unused stats and the matching
+# CSV columns).
+solver_stats = [
     "decisions",
-    "propagations", 
+    "propagations",
     "assigns",
     "unassigns",
     "conflicts",
@@ -391,70 +417,36 @@ sst.enableStatisticsForComponentName("solver", [
     "db_reductions",
     "minimized_literals",
     "restarts",
-    "spec_started",
-    "spec_finished",
-    "total_occ",
-    "watcher_traversed",
     "learnt_length",
     "learnt_units",
     "learnt_lbd",
     "bt_level",
-], {
+]
+if args.enable_speculative:
+    solver_stats += ["spec_started", "spec_finished"]
+if args.profile_2wl:
+    solver_stats += ["total_occ", "watcher_traversed"]
+
+sst.enableStatisticsForComponentName("solver", solver_stats, {
     "type": "sst.AccumulatorStatistic",
     "rate": "1s"
 })
 
-# Enable histogram statistic for watchers occupancy
-sst.enableStatisticsForComponentName("solver", [
-    "watcher_occ"
-], {
-    "type": "sst.HistogramStatistic",
-    "minvalue": "0",
-    "binwidth": "1", 
-    "numbins": "20",
-    "dumpbinsonoutput": "1",
-    "includeoutofbounds": "1",
-    "rate": "1s"
-})
-
-# Enable histogram statistic for blocks visited during watcher insertion
-sst.enableStatisticsForComponentName("solver", [
-    "watcher_blocks"
-], {
-    "type": "sst.HistogramStatistic",
-    "minvalue": "0",
-    "binwidth": "1", 
-    "numbins": "20",
-    "dumpbinsonoutput": "1",
-    "includeoutofbounds": "1",
-    "rate": "1s"
-})
-
-# Enable histogram statistic for watchers inspected
-sst.enableStatisticsForComponentName("solver", [
-    "para_watchers"
-], {
-    "type": "sst.HistogramStatistic",
-    "minvalue": "0",
-    "binwidth": "1", 
-    "numbins": "20",
-    "dumpbinsonoutput": "1",
-    "includeoutofbounds": "1",
-    "rate": "1s"
-})
-
-# Enable histogram statistic for parallel variables
-sst.enableStatisticsForComponentName("solver", [
-    "para_vars"
-], {
-    "type": "sst.HistogramStatistic",
-    "minvalue": "0",
-    "binwidth": "1", 
-    "numbins": "20",
-    "dumpbinsonoutput": "1",
-    "includeoutofbounds": "1",
-    "rate": "1s"
-})
+# Per-propagation histograms (opt-in via --enable-histograms)
+if args.enable_histograms:
+    histogram_params = {
+        "type": "sst.HistogramStatistic",
+        "minvalue": "0",
+        "binwidth": "1",
+        "numbins": "20",
+        "dumpbinsonoutput": "1",
+        "includeoutofbounds": "1",
+        "rate": "1s"
+    }
+    sst.enableStatisticsForComponentName("solver", ["watcher_occ"], histogram_params)
+    sst.enableStatisticsForComponentName("solver", ["watcher_blocks"], histogram_params)
+    sst.enableStatisticsForComponentName("solver", ["para_watchers"], histogram_params)
+    sst.enableStatisticsForComponentName("solver", ["para_vars"], histogram_params)
 
 # Enable cache statistics for the L1 cache
 sst.enableStatisticsForComponentType("memHierarchy.Cache", [
@@ -467,23 +459,22 @@ sst.enableStatisticsForComponentType("memHierarchy.Cache", [
     "rate": "1s"
 })
 
-sst.enableStatisticsForComponentType("satsolver.CacheProfiler", [
-    "heap_hits",
-    "heap_misses",
-    "variables_hits",
-    "variables_misses",
-    "watches_hits",
-    "watches_misses",
-    "clauses_hits",
-    "clauses_misses",
-    "var_activity_hits",
-    "var_activity_misses",
-    "cla_activity_hits",
-    "cla_activity_misses",
-], {
-    "type": "sst.AccumulatorStatistic",
-    "rate": "1s"
-})
+if args.cache_profiler:
+    sst.enableStatisticsForComponentType("satsolver.CacheProfiler", [
+        "heap_hits",
+        "heap_misses",
+        "variables_hits",
+        "variables_misses",
+        "watches_hits",
+        "watches_misses",
+        "clauses_hits",
+        "clauses_misses",
+        "var_activity_hits",
+        "var_activity_misses",
+    ], {
+        "type": "sst.AccumulatorStatistic",
+        "rate": "1s"
+    })
 
 # Set statistics output to CSV file
 sst.setStatisticOutput("sst.statOutputCSV", 
