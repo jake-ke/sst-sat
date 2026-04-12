@@ -34,6 +34,15 @@ const int USE_FREE_LIST = 0;  // Use free list for watcher insertion
 // helpers
 const int FREE_IDX_BITS = pow(2, ceil(log(PROPAGATORS)/log(2)));  // next power of 2
 
+// Base worker_id for speculative-propagation workers. Must be strictly greater
+// than every worker_id that a main-side phase (unitPropagate / execAnalyze /
+// execMinimize) can produce, otherwise handleGlobalMemEvent misroutes main
+// responses into the spec path.
+constexpr int SPEC_WORKER_BASE =
+    (PARA_LITS * PROPAGATORS > LEARNERS
+        ? (PARA_LITS * PROPAGATORS > MINIMIZERS ? PARA_LITS * PROPAGATORS : MINIMIZERS)
+        : (LEARNERS > MINIMIZERS ? LEARNERS : MINIMIZERS));
+
 // Define types for variables and literals
 typedef int Var;
 const Var var_Undef = 0;

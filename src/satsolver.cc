@@ -740,11 +740,17 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
             }
         } else order_heap->handleMem(req);  // Heap request
 
-        // Activate appropriate workers based on worker_id range
+        // Activate appropriate workers based on worker_id range.
+        // Two-part guard:
+        //   (1) spec_coroutine != nullptr — don't classify as spec when no
+        //       spec coroutine exists.
+        //   (2) worker_id >= SPEC_WORKER_BASE — SPEC_WORKER_BASE is strictly
+        //       greater than every main-side worker_id (unitPropagate /
+        //       execAnalyze / execMinimize), so it's a sufficient
+        //       discriminator when spec *is* running.
         if (worker_id >= 0) {
-            // Check if it's a speculative worker (IDs >= PARA_LITS * PROPAGATORS)
-            if (worker_id >= PARA_LITS * PROPAGATORS) {
-                int spec_worker = worker_id - PARA_LITS * PROPAGATORS;
+            if (spec_coroutine != nullptr && worker_id >= SPEC_WORKER_BASE) {
+                int spec_worker = worker_id - SPEC_WORKER_BASE;
                 assert(spec_worker <= (int)spec_active_workers.size());
                 if (spec_active_workers.size() > 0)
                     spec_active_workers[spec_worker] = true;
@@ -1670,11 +1676,18 @@ void SATSolver::unitPropagate() {
 
         // Accumulate timing data of the last finished worker (gated)
         if (profile_prop_timing) {
-            cycles_read_headptr += lit_read_headptr[last_worker];
-            cycles_read_watcher_blocks += lit_read_watcher_blocks[last_worker];
-            cycles_read_clauses += lit_read_clauses[last_worker];
-            cycles_insert_watchers += lit_insert_watchers[last_worker];
-            cycles_polling += lit_polling[last_worker];
+            // Accumulate timing data of the last finished worker.
+            // last_worker stays -1 only in the degenerate case where every
+            // spawned lit coroutine completed synchronously without yielding
+            // (the while(!done) body above is skipped). Guard to avoid UB
+            // from vector[-1] indexing — mirrors the guard in propagateLiteral.
+            if (last_worker >= 0 && last_worker < PARA_LITS) {
+                cycles_read_headptr += lit_read_headptr[last_worker];
+                cycles_read_watcher_blocks += lit_read_watcher_blocks[last_worker];
+                cycles_read_clauses += lit_read_clauses[last_worker];
+                cycles_insert_watchers += lit_insert_watchers[last_worker];
+                cycles_polling += lit_polling[last_worker];
+            }
         }
 
         // Stop if we've reached MAX_CONFL conflicts (unless MAX_CONFL is -1, meaning no limit)
@@ -2760,8 +2773,9 @@ void SATSolver::speculativePropagate() {
         
         output.verbose(CALL_INFO, 2, 0, "SPEC: Processing literal %d\n", toInt(not_p));
         
-        // Use dedicated worker IDs starting from PARA_LITS * PROPAGATORS
-        int base_worker_id = PARA_LITS * PROPAGATORS;
+        // Use dedicated worker IDs starting from SPEC_WORKER_BASE so they
+        // never collide with any main-side phase's worker_id range.
+        int base_worker_id = SPEC_WORKER_BASE;
         
         // Read watch metadata - count as 1 cache line read
         cache_lines_read++;
