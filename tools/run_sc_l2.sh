@@ -5,7 +5,7 @@ SCRIPT_NAME=$(basename "$0")
 
 # Check if help is requested or show usage
 show_usage() {
-    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--prefetch] [--spec] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [-j jobs]"
+    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--mem-latency LATENCY] [--prefetch] [--spec] [--profile-2wl] [--profile-prop-timing] [--enable-histograms] [--cache-profiler] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [-j jobs]"
     echo "Options:"
     echo "  -b, --bench-dir DIR  Directory containing benchmark CNF files (required)"
     echo "  --ram2-cfg FILE       Ramulator2 configuration file"
@@ -18,7 +18,11 @@ show_usage() {
     echo "  --l2-bw BW            L2 cache bandwidth (max requests per cycle; use -1 for unlimited/auto)"
     echo "  --mem-latency LATENCY External memory latency"
     echo "  --prefetch            Enable directed prefetching"
-    echo "  --spec                Enable speculative propagation"
+    echo "  --spec                Enable speculative propagation (auto-enables --profile-prop-timing)"
+    echo "  --profile-2wl         Enable 2WL clause-access reduction profiling (host-side)"
+    echo "  --profile-prop-timing Enable per-propagation timing breakdown (read_*/insert/polling cycles, normal/spec metrics)"
+    echo "  --enable-histograms   Enable per-propagation histogram statistics (watcher_occ, watcher_blocks, para_watchers, para_vars)"
+    echo "  --cache-profiler      Attach the satsolver.CacheProfiler subcomponent to L1 and L2 caches"
     echo "  --folder FOLDER       Name for the logs folder (default: logs)"
     echo "  --num-seeds NUM       Number of random seeds to run (default: 1)"
     echo "  --seed NUM            Run a single seed with the specified seed number (overrides --num-seeds)"
@@ -54,6 +58,10 @@ SPECIFIC_SEED=""
 TIMEOUT_CYCLES=""
 FREQ=""
 GLUCOSE_RESTART=""
+PROFILE_2WL=""
+PROFILE_PROP_TIMING=""
+ENABLE_HISTOGRAMS=""
+CACHE_PROFILER=""
 
 # Default number of parallel jobs (use available CPU cores)
 MAX_JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
@@ -234,6 +242,22 @@ while [[ $# -gt 0 ]]; do
             GLUCOSE_RESTART="yes"
             shift
             ;;
+        --profile-2wl)
+            PROFILE_2WL="yes"
+            shift
+            ;;
+        --profile-prop-timing)
+            PROFILE_PROP_TIMING="yes"
+            shift
+            ;;
+        --enable-histograms)
+            ENABLE_HISTOGRAMS="yes"
+            shift
+            ;;
+        --cache-profiler)
+            CACHE_PROFILER="yes"
+            shift
+            ;;
         --freq)
             if [[ -n "$2" && "$2" != -* ]]; then
                 FREQ="$2"
@@ -352,6 +376,18 @@ if [[ -n "$GLUCOSE_RESTART" ]]; then
 else
     log_message "Glucose-style LBD restarts: disabled (Luby)"
 fi
+if [[ -n "$PROFILE_2WL" ]]; then
+    log_message "2WL profiling: enabled"
+fi
+if [[ -n "$PROFILE_PROP_TIMING" ]]; then
+    log_message "Per-propagation timing breakdown: enabled"
+fi
+if [[ -n "$ENABLE_HISTOGRAMS" ]]; then
+    log_message "Per-propagation histograms: enabled"
+fi
+if [[ -n "$CACHE_PROFILER" ]]; then
+    log_message "Cache profiler: enabled"
+fi
 log_message "==============================================="
 
 # Array to store all child PIDs for cleanup
@@ -455,6 +491,10 @@ run_one_seed() {
     [[ -n "$TIMEOUT_CYCLES" ]] && command+=" --timeout-cycles $TIMEOUT_CYCLES"
     [[ -n "$FREQ" ]] && command+=" --freq $FREQ"
     [[ -n "$GLUCOSE_RESTART" ]] && command+=" --glucose-restart"
+    [[ -n "$PROFILE_2WL" ]] && command+=" --profile-2wl"
+    [[ -n "$PROFILE_PROP_TIMING" ]] && command+=" --profile-prop-timing"
+    [[ -n "$ENABLE_HISTOGRAMS" ]] && command+=" --enable-histograms"
+    [[ -n "$CACHE_PROFILER" ]] && command+=" --cache-profiler"
 
     # Run the test with proper command
     eval $command > "$log_file" 2>&1

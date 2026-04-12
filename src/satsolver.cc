@@ -183,6 +183,13 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     enable_speculative = params.find<bool>("enable_speculative", false);
     timeout_cycles = params.find<uint64_t>("timeout_cycles", 0);
     profile_2wl = params.find<bool>("profile_2wl", false);
+    profile_prop_timing = params.find<bool>("profile_prop_timing", false);
+    // Speculative profiling depends on the same per-literal cycle data, so
+    // force the timing breakdown on whenever speculation is enabled.
+    if (enable_speculative) profile_prop_timing = true;
+    if (profile_prop_timing) {
+        output.output("Per-propagation timing breakdown enabled\n");
+    }
     glucose_restart = params.find<bool>("glucose_restart", false);
     if (glucose_restart) {
         output.output("Glucose-style LBD-based restarts enabled\n");
@@ -426,48 +433,50 @@ void SATSolver::finish() {
     output.output("Total Counted: %lu cycles\n", total_counted);
     output.output("===========================================================================\n");
     
-    // Add speculative propagation profiling
-    output.output("===================[ Speculative Propagation Profiling ]===================\n");
-    if (normal_metrics.count > 0) {
-        double avg_normal_headptr = (double)normal_metrics.read_headptr_cycles / normal_metrics.count;
-        double avg_normal_blocks = (double)normal_metrics.read_watcher_blocks_cycles / normal_metrics.count;
-        double avg_normal_clauses = (double)normal_metrics.read_clauses_cycles / normal_metrics.count;
-        double avg_normal_total = avg_normal_headptr + avg_normal_blocks + avg_normal_clauses;
-        
-        output.output("Normal Propagations (count: %lu):\n", normal_metrics.count);
-        output.output("  Avg cycles to read head pointer   : %.2f\n", avg_normal_headptr);
-        output.output("  Avg cycles to read watcher blocks : %.2f\n", avg_normal_blocks);
-        output.output("  Avg cycles to read clauses        : %.2f\n", avg_normal_clauses);
-        output.output("  Avg total memory latency          : %.2f\n", avg_normal_total);
-    } else {
-        output.output("Normal Propagations: No data collected\n");
-    }
-    
-    if (speculative_metrics.count > 0) {
-        double avg_spec_headptr = (double)speculative_metrics.read_headptr_cycles / speculative_metrics.count;
-        double avg_spec_blocks = (double)speculative_metrics.read_watcher_blocks_cycles / speculative_metrics.count;
-        double avg_spec_clauses = (double)speculative_metrics.read_clauses_cycles / speculative_metrics.count;
-        double avg_spec_total = avg_spec_headptr + avg_spec_blocks + avg_spec_clauses;
-        
-        output.output("Speculative Propagations (count: %lu):\n", speculative_metrics.count);
-        output.output("  Avg cycles to read head pointer   : %.2f\n", avg_spec_headptr);
-        output.output("  Avg cycles to read watcher blocks : %.2f\n", avg_spec_blocks);
-        output.output("  Avg cycles to read clauses        : %.2f\n", avg_spec_clauses);
-        output.output("  Avg total memory latency          : %.2f\n", avg_spec_total);
-        
-        // Calculate speedup if both have data
+    // Add speculative propagation profiling (gated by profile_prop_timing)
+    if (profile_prop_timing) {
+        output.output("===================[ Speculative Propagation Profiling ]===================\n");
         if (normal_metrics.count > 0) {
-            double avg_normal_total = (double)(normal_metrics.read_headptr_cycles + 
-                                               normal_metrics.read_watcher_blocks_cycles + 
-                                               normal_metrics.read_clauses_cycles) / normal_metrics.count;
-            double speedup = avg_normal_total / avg_spec_total;
-            double reduction = (1.0 - (avg_spec_total / avg_normal_total)) * 100.0;
-            output.output("Speedup: %.2fx (%.1f%% latency reduction)\n", speedup, reduction);
+            double avg_normal_headptr = (double)normal_metrics.read_headptr_cycles / normal_metrics.count;
+            double avg_normal_blocks = (double)normal_metrics.read_watcher_blocks_cycles / normal_metrics.count;
+            double avg_normal_clauses = (double)normal_metrics.read_clauses_cycles / normal_metrics.count;
+            double avg_normal_total = avg_normal_headptr + avg_normal_blocks + avg_normal_clauses;
+
+            output.output("Normal Propagations (count: %lu):\n", normal_metrics.count);
+            output.output("  Avg cycles to read head pointer   : %.2f\n", avg_normal_headptr);
+            output.output("  Avg cycles to read watcher blocks : %.2f\n", avg_normal_blocks);
+            output.output("  Avg cycles to read clauses        : %.2f\n", avg_normal_clauses);
+            output.output("  Avg total memory latency          : %.2f\n", avg_normal_total);
+        } else {
+            output.output("Normal Propagations: No data collected\n");
         }
-    } else {
-        output.output("Speculative Propagations: No data collected\n");
+
+        if (speculative_metrics.count > 0) {
+            double avg_spec_headptr = (double)speculative_metrics.read_headptr_cycles / speculative_metrics.count;
+            double avg_spec_blocks = (double)speculative_metrics.read_watcher_blocks_cycles / speculative_metrics.count;
+            double avg_spec_clauses = (double)speculative_metrics.read_clauses_cycles / speculative_metrics.count;
+            double avg_spec_total = avg_spec_headptr + avg_spec_blocks + avg_spec_clauses;
+
+            output.output("Speculative Propagations (count: %lu):\n", speculative_metrics.count);
+            output.output("  Avg cycles to read head pointer   : %.2f\n", avg_spec_headptr);
+            output.output("  Avg cycles to read watcher blocks : %.2f\n", avg_spec_blocks);
+            output.output("  Avg cycles to read clauses        : %.2f\n", avg_spec_clauses);
+            output.output("  Avg total memory latency          : %.2f\n", avg_spec_total);
+
+            // Calculate speedup if both have data
+            if (normal_metrics.count > 0) {
+                double avg_normal_total = (double)(normal_metrics.read_headptr_cycles +
+                                                   normal_metrics.read_watcher_blocks_cycles +
+                                                   normal_metrics.read_clauses_cycles) / normal_metrics.count;
+                double speedup = avg_normal_total / avg_spec_total;
+                double reduction = (1.0 - (avg_spec_total / avg_normal_total)) * 100.0;
+                output.output("Speedup: %.2fx (%.1f%% latency reduction)\n", speedup, reduction);
+            }
+        } else {
+            output.output("Speculative Propagations: No data collected\n");
+        }
+        output.output("===========================================================================\n");
     }
-    output.output("===========================================================================\n");
     
     // Add cache line statistics for speculative propagations
     if (!spec_prop_cache_lines.empty()) {
@@ -494,23 +503,25 @@ void SATSolver::finish() {
         output.output("===========================================================================\n");
     }
     
-    // Add new detailed propagation statistics
-    output.output("======================[ Propagation Detail Statistics ]===================\n");
-    double pct_read_headptr = (double)cycles_read_headptr * 100.0 / total_counted;
-    double pct_read_watcher_blocks = (double)cycles_read_watcher_blocks * 100.0 / total_counted;
-    double pct_read_clauses = (double)cycles_read_clauses * 100.0 / total_counted;
-    double pct_insert_watchers = (double)cycles_insert_watchers * 100.0 / total_counted;
-    double pct_polling = (double)cycles_polling * 100.0 / total_counted;
-    
-    output.output("Read Head Pointers : %.2f%% \t(%lu cycles)\n", pct_read_headptr, cycles_read_headptr);
-    output.output("Read Watcher Blocks: %.2f%% \t(%lu cycles)\n", pct_read_watcher_blocks, cycles_read_watcher_blocks);
-    output.output("Read Clauses       : %.2f%% \t(%lu cycles)\n", pct_read_clauses, cycles_read_clauses);
-    output.output("Insert Watchers    : %.2f%% \t(%lu cycles)\n", pct_insert_watchers, cycles_insert_watchers);
-    output.output("Polling for Busy   : %.2f%% \t(%lu cycles)\n", pct_polling, cycles_polling);
-    uint64_t propagation_detail_sum = cycles_read_headptr + cycles_read_watcher_blocks + 
-                                      cycles_read_clauses + cycles_insert_watchers + cycles_polling;
-    output.output("Detail Sum         : %lu cycles\n", propagation_detail_sum);
-    output.output("===========================================================================\n");
+    // Add new detailed propagation statistics (gated by profile_prop_timing)
+    if (profile_prop_timing) {
+        output.output("======================[ Propagation Detail Statistics ]===================\n");
+        double pct_read_headptr = (double)cycles_read_headptr * 100.0 / total_counted;
+        double pct_read_watcher_blocks = (double)cycles_read_watcher_blocks * 100.0 / total_counted;
+        double pct_read_clauses = (double)cycles_read_clauses * 100.0 / total_counted;
+        double pct_insert_watchers = (double)cycles_insert_watchers * 100.0 / total_counted;
+        double pct_polling = (double)cycles_polling * 100.0 / total_counted;
+
+        output.output("Read Head Pointers : %.2f%% \t(%lu cycles)\n", pct_read_headptr, cycles_read_headptr);
+        output.output("Read Watcher Blocks: %.2f%% \t(%lu cycles)\n", pct_read_watcher_blocks, cycles_read_watcher_blocks);
+        output.output("Read Clauses       : %.2f%% \t(%lu cycles)\n", pct_read_clauses, cycles_read_clauses);
+        output.output("Insert Watchers    : %.2f%% \t(%lu cycles)\n", pct_insert_watchers, cycles_insert_watchers);
+        output.output("Polling for Busy   : %.2f%% \t(%lu cycles)\n", pct_polling, cycles_polling);
+        uint64_t propagation_detail_sum = cycles_read_headptr + cycles_read_watcher_blocks +
+                                          cycles_read_clauses + cycles_insert_watchers + cycles_polling;
+        output.output("Detail Sum         : %lu cycles\n", propagation_detail_sum);
+        output.output("===========================================================================\n");
+    }
 
     // Coprocessor mode: raw statistics for offline computation
     {
@@ -1657,12 +1668,14 @@ void SATSolver::unitPropagate() {
         polling.clear();
         yield_ptr = parent_yield_ptr;
 
-        // Accumulate timing data of the last finished worker
-        cycles_read_headptr += lit_read_headptr[last_worker];
-        cycles_read_watcher_blocks += lit_read_watcher_blocks[last_worker];
-        cycles_read_clauses += lit_read_clauses[last_worker];
-        cycles_insert_watchers += lit_insert_watchers[last_worker];
-        cycles_polling += lit_polling[last_worker];
+        // Accumulate timing data of the last finished worker (gated)
+        if (profile_prop_timing) {
+            cycles_read_headptr += lit_read_headptr[last_worker];
+            cycles_read_watcher_blocks += lit_read_watcher_blocks[last_worker];
+            cycles_read_clauses += lit_read_clauses[last_worker];
+            cycles_insert_watchers += lit_insert_watchers[last_worker];
+            cycles_polling += lit_polling[last_worker];
+        }
 
         // Stop if we've reached MAX_CONFL conflicts (unless MAX_CONFL is -1, meaning no limit)
         if (MAX_CONFL >= 0 && (int)conflicts.size() >= MAX_CONFL) {
@@ -1714,10 +1727,12 @@ void SATSolver::propagateLiteral(
         lit_worker_id, toInt(not_p));
 
     // Measure time to read head pointer
-    SST::Cycle_t start_headptr = getCurrentSimCycle() / 1000;
+    SST::Cycle_t start_headptr = profile_prop_timing ? (getCurrentSimCycle() / 1000) : 0;
     WatchMetaData wmd = watches.readMetaData(watch_idx, base_worker_id);
-    SST::Cycle_t end_headptr = getCurrentSimCycle() / 1000;
-    read_headptr_cycles += (end_headptr - start_headptr);
+    if (profile_prop_timing) {
+        SST::Cycle_t end_headptr = getCurrentSimCycle() / 1000;
+        read_headptr_cycles += (end_headptr - start_headptr);
+    }
 
     // Prefetch the next watch metadata if available
     if (qhead < trail.size()) {
@@ -1744,11 +1759,13 @@ void SATSolver::propagateLiteral(
 
             if (curr_addr != 0) issuePrefetch(curr_addr);
         } else {
-            // Read current block with timing
-            SST::Cycle_t start_block = getCurrentSimCycle() / 1000;
+            // Read current block with optional timing
+            SST::Cycle_t start_block = profile_prop_timing ? (getCurrentSimCycle() / 1000) : 0;
             curr_block = watches.readBlock(curr_addr, base_worker_id);
-            SST::Cycle_t end_block = getCurrentSimCycle() / 1000;
-            read_watcher_blocks_cycles += (end_block - start_block);
+            if (profile_prop_timing) {
+                SST::Cycle_t end_block = getCurrentSimCycle() / 1000;
+                read_watcher_blocks_cycles += (end_block - start_block);
+            }
 
             if (curr_block.getNextBlock() != 0) issuePrefetch(curr_block.getNextBlock());
         }
@@ -1852,7 +1869,7 @@ void SATSolver::propagateLiteral(
 
         // After all workers finished, accumulate timing data to the literal-level counters
         // Only accumulate if we had valid workers (last_worker will be 0 for single worker, -1 if none completed)
-        if (last_worker >= 0 && last_worker < workers) {
+        if (profile_prop_timing && last_worker >= 0 && last_worker < workers) {
             // Accumulate to literal-level counters (passed by reference from unitPropagate)
             read_clauses_cycles += worker_read_clauses[last_worker];
             insert_watchers_cycles += worker_insert_watchers[last_worker];
@@ -1886,19 +1903,21 @@ void SATSolver::propagateLiteral(
         stat_watcher_traversed->addDataNTimes(watcher_occ, 1);
     }
 
-    // Track metrics based on whether this literal was speculative
-    if (is_speculative) {
-        // This variable was assigned during speculative propagation
-        speculative_metrics.read_headptr_cycles += read_headptr_cycles;
-        speculative_metrics.read_watcher_blocks_cycles += read_watcher_blocks_cycles;
-        speculative_metrics.read_clauses_cycles += read_clauses_cycles;
-        speculative_metrics.count++;
-    } else {
-        // Normal (non-speculative) propagation
-        normal_metrics.read_headptr_cycles += read_headptr_cycles;
-        normal_metrics.read_watcher_blocks_cycles += read_watcher_blocks_cycles;
-        normal_metrics.read_clauses_cycles += read_clauses_cycles;
-        normal_metrics.count++;
+    // Track metrics based on whether this literal was speculative (gated)
+    if (profile_prop_timing) {
+        if (is_speculative) {
+            // This variable was assigned during speculative propagation
+            speculative_metrics.read_headptr_cycles += read_headptr_cycles;
+            speculative_metrics.read_watcher_blocks_cycles += read_watcher_blocks_cycles;
+            speculative_metrics.read_clauses_cycles += read_clauses_cycles;
+            speculative_metrics.count++;
+        } else {
+            // Normal (non-speculative) propagation
+            normal_metrics.read_headptr_cycles += read_headptr_cycles;
+            normal_metrics.read_watcher_blocks_cycles += read_watcher_blocks_cycles;
+            normal_metrics.read_clauses_cycles += read_clauses_cycles;
+            normal_metrics.count++;
+        }
     }
 }
 
@@ -1920,22 +1939,26 @@ void SATSolver::propagateWatchers(
     Cref clause_addr = curr_block.nodes[watcher_i].getClauseAddr();
 
     // Check if the clause is already being processed by another worker
-    SST::Cycle_t start_poll = getCurrentSimCycle() / 1000;
+    SST::Cycle_t start_poll = profile_prop_timing ? (getCurrentSimCycle() / 1000) : 0;
     while (clause_locks.count(clause_addr) > 0) {
         polling[global_worker_id] = true;
         (*yield_ptr)();  // Yield to allow other workers to process
     }
-    SST::Cycle_t end_poll = getCurrentSimCycle() / 1000;
-    polling_cycles += (end_poll - start_poll);
+    if (profile_prop_timing) {
+        SST::Cycle_t end_poll = getCurrentSimCycle() / 1000;
+        polling_cycles += (end_poll - start_poll);
+    }
 
     // Lock the clause
     clause_locks.insert(clause_addr);
 
-    // Time the reading of clauses
-    SST::Cycle_t start_read = getCurrentSimCycle() / 1000;
+    // Time the reading of clauses (gated)
+    SST::Cycle_t start_read = profile_prop_timing ? (getCurrentSimCycle() / 1000) : 0;
     Clause c = clauses.readClause(clause_addr, global_worker_id);
-    SST::Cycle_t end_read = getCurrentSimCycle() / 1000;
-    read_clauses_cycles += (end_read - start_read);
+    if (profile_prop_timing) {
+        SST::Cycle_t end_read = getCurrentSimCycle() / 1000;
+        read_clauses_cycles += (end_read - start_read);
+    }
 
     // Print clause for debugging
     output.verbose(CALL_INFO, 4, 0,
@@ -1978,23 +2001,27 @@ void SATSolver::propagateWatchers(
 
             wl_q.add(toWatchIndex(~c[1]));
 
-            // Time spent polling for busy watches
-            SST::Cycle_t start_poll = getCurrentSimCycle() / 1000;
+            // Time spent polling for busy watches (gated)
+            SST::Cycle_t start_poll2 = profile_prop_timing ? (getCurrentSimCycle() / 1000) : 0;
             while (watches.isBusy(toWatchIndex(~c[1]))) {
                 polling[global_worker_id] = true;
                 (*yield_ptr)();  // Yield to allow other workers to process
             }
-            SST::Cycle_t end_poll = getCurrentSimCycle() / 1000;
-            polling_cycles += (end_poll - start_poll);
+            if (profile_prop_timing) {
+                SST::Cycle_t end_poll2 = getCurrentSimCycle() / 1000;
+                polling_cycles += (end_poll2 - start_poll2);
+            }
 
-            output.verbose(CALL_INFO, 5, 0, "  [L%d-W%d]Start watchlist insertion\n", 
+            output.verbose(CALL_INFO, 5, 0, "  [L%d-W%d]Start watchlist insertion\n",
                 lit_worker_id, worker_id);
 
-            // Time spent inserting watchers
-            SST::Cycle_t start_insert = getCurrentSimCycle() / 1000;
+            // Time spent inserting watchers (gated)
+            SST::Cycle_t start_insert = profile_prop_timing ? (getCurrentSimCycle() / 1000) : 0;
             int block_visits = watches.insertWatcher(toWatchIndex(~c[1]), clause_addr, first, global_worker_id);
-            SST::Cycle_t end_insert = getCurrentSimCycle() / 1000;
-            insert_watchers_cycles += (end_insert - start_insert);
+            if (profile_prop_timing) {
+                SST::Cycle_t end_insert = getCurrentSimCycle() / 1000;
+                insert_watchers_cycles += (end_insert - start_insert);
+            }
 
             // Record block visits statistics
             stat_watcher_blocks->addData(block_visits);

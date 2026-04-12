@@ -78,6 +78,7 @@ public:
         {"enable_speculative", "Enable speculative propagation", "false"},
         {"timeout_cycles", "Maximum solver cycles before timing out (0 = no timeout)", "0"},
         {"profile_2wl", "Enable 2WL clause-access reduction profiling (host-side; counts only original clauses)", "false"},
+        {"profile_prop_timing", "Enable per-propagation timing breakdown (cycles_read_headptr/blocks/clauses/insert/polling and spec/normal metrics). Auto-enabled when enable_speculative=true.", "false"},
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -396,6 +397,11 @@ private:
 
     // 2WL clause-access reduction profiling (host-side, no simulated memory access)
     bool profile_2wl;
+
+    // Per-propagation timing breakdown (gates cycles_read_* counters and
+    // speculative_metrics/normal_metrics structs). Auto-enabled when
+    // enable_speculative is on.
+    bool profile_prop_timing;
 
     // Propagation timing counters
     uint64_t cycles_read_headptr;        // Time spent reading head pointers
