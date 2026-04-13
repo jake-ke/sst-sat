@@ -421,6 +421,7 @@ solver_stats = [
     "learnt_units",
     "learnt_lbd",
     "bt_level",
+    "bt_distance",
 ]
 if args.enable_speculative:
     solver_stats += ["spec_started", "spec_finished"]

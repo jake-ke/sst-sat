@@ -351,7 +351,8 @@ private:
     Statistic<uint64_t>* stat_learnt_length;      // Accumulator: total length of learnt clauses
     Statistic<uint64_t>* stat_learnt_units;       // Count of unit-literal learnt clauses
     Statistic<uint64_t>* stat_learnt_lbd;         // Accumulator: total LBD of learnt clauses
-    Statistic<uint64_t>* stat_bt_level;           // Accumulator: total backtrack level
+    Statistic<uint64_t>* stat_bt_level;           // Accumulator: total backtrack level (destination level)
+    Statistic<uint64_t>* stat_bt_distance;        // Accumulator: total backtrack distance (levels jumped)
 
     std::vector<uint32_t> lit_occ_count;          // Precomputed occurrence count per literal index
 

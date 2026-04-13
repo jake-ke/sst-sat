@@ -230,6 +230,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_learnt_units = registerStatistic<uint64_t>("learnt_units");
     stat_learnt_lbd = registerStatistic<uint64_t>("learnt_lbd");
     stat_bt_level = registerStatistic<uint64_t>("bt_level");
+    stat_bt_distance = registerStatistic<uint64_t>("bt_distance");
 
     // Component should not end simulation until solution is found
     registerAsPrimaryComponent();
@@ -338,7 +339,8 @@ void SATSolver::finish() {
         uint64_t total_length = getStatCount(stat_learnt_length);
         uint64_t unit_count = getStatCount(stat_learnt_units);
         uint64_t total_lbd = getStatCount(stat_learnt_lbd);
-        uint64_t total_bt = getStatCount(stat_bt_level);
+        uint64_t total_bt_level = getStatCount(stat_bt_level);
+        uint64_t total_bt_distance = getStatCount(stat_bt_distance);
         output.output("===================[ Conflict Learning Statistics ]========================\n");
         output.output("Total Learnt Clause Length : %lu\n", total_length);
         output.output("Avg Learnt Clause Length   : %.2f\n",
@@ -347,7 +349,9 @@ void SATSolver::finish() {
         output.output("Avg LBD                    : %.2f\n",
             learned_count > 0 ? (double)total_lbd / learned_count : 0.0);
         output.output("Avg Backtrack Level        : %.2f\n",
-            learned_count > 0 ? (double)total_bt / learned_count : 0.0);
+            learned_count > 0 ? (double)total_bt_level / learned_count : 0.0);
+        output.output("Avg Backtrack Distance     : %.2f\n",
+            learned_count > 0 ? (double)total_bt_distance / learned_count : 0.0);
         output.output("===========================================================================\n");
     }
 
@@ -1333,6 +1337,7 @@ void SATSolver::execBacktrack() {
         lbd_ema_slow = lbd_ema_slow * (1.0 - lbd_ema_slow_alpha) + learnt_lbd * lbd_ema_slow_alpha;
     }
     stat_bt_level->addDataNTimes(bt_level, 1);
+    stat_bt_distance->addDataNTimes(current_level() - bt_level, 1);
     if (learnt_clause.size() == 1) stat_learnt_units->addData(1);
 
     if (learnt_clause.size() == 1) {
