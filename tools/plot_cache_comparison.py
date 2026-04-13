@@ -68,6 +68,173 @@ def get_folder_colors(folder_names):
     return colors
 
 
+RAW_COMPONENTS = ['heap', 'varactivity', 'clauses', 'variables', 'watches']
+
+CATEGORY_COMPONENTS = {
+    'watchlist': ['watches'],
+    'clauses': ['clauses'],
+    'priority_queue': ['heap', 'varactivity'],
+    'variables': ['variables'],
+}
+
+CATEGORY_LABELS = {
+    'watchlist': 'Watchlist',
+    'clauses': 'Clauses',
+    'priority_queue': 'P-Queue',
+    'variables': 'Variables',
+}
+
+
+def format_count(n):
+    """Format a large integer count with SI suffix."""
+    n = float(n)
+    for unit, div in (('T', 1e12), ('G', 1e9), ('M', 1e6), ('K', 1e3)):
+        if abs(n) >= div:
+            return f"{n/div:.2f}{unit}"
+    return f"{n:.0f}"
+
+
+def compute_cache_access_stats(results):
+    """Compute per-test-averaged access counts and miss rates.
+
+    For each finished test, derives raw per-component access/miss counts,
+    per-component miss rates, and per-component contribution shares of that
+    test's total. The per-folder summary is the unweighted mean across tests,
+    so every test contributes equally (consistent with compute_cache_miss_rates).
+
+    Returns dict with keys:
+        mean_accesses, mean_misses, overall_miss_rate,
+        categories: {cat -> {accesses, misses, miss_rate,
+                             access_share, miss_share}}
+    where accesses/misses are per-test means and rates/shares are unweighted
+    averages of per-test percentages.
+    """
+    finished = [r for r in results if r.get('result') not in ('ERROR', 'UNKNOWN')]
+    if not finished:
+        return None
+
+    per_test_total_acc = []
+    per_test_total_mis = []
+    per_test_overall_mr = []
+    per_test_cat = {
+        cat: {'accesses': [], 'misses': [], 'miss_rate': [],
+              'access_share': [], 'miss_share': []}
+        for cat in CATEGORY_COMPONENTS
+    }
+
+    for r in finished:
+        raw_total = {c: (r.get(f'l1_{c}_total', 0) or 0) for c in RAW_COMPONENTS}
+        raw_miss = {c: (r.get(f'l1_{c}_misses', 0) or 0) for c in RAW_COMPONENTS}
+        test_total = sum(raw_total.values())
+        test_miss = sum(raw_miss.values())
+        if test_total == 0:
+            continue
+
+        per_test_total_acc.append(test_total)
+        per_test_total_mis.append(test_miss)
+        per_test_overall_mr.append((test_miss / test_total) * 100.0)
+
+        for cat, comps in CATEGORY_COMPONENTS.items():
+            cat_tot = sum(raw_total[c] for c in comps)
+            cat_mis = sum(raw_miss[c] for c in comps)
+            per_test_cat[cat]['accesses'].append(cat_tot)
+            per_test_cat[cat]['misses'].append(cat_mis)
+            per_test_cat[cat]['miss_rate'].append(
+                (cat_mis / cat_tot) * 100.0 if cat_tot > 0 else 0.0)
+            per_test_cat[cat]['access_share'].append(
+                (cat_tot / test_total) * 100.0)
+            per_test_cat[cat]['miss_share'].append(
+                (cat_mis / test_miss) * 100.0 if test_miss > 0 else 0.0)
+
+    if not per_test_total_acc:
+        return None
+
+    def mean(lst):
+        return sum(lst) / len(lst) if lst else 0.0
+
+    categories = {}
+    for cat in CATEGORY_COMPONENTS:
+        categories[cat] = {
+            'accesses': mean(per_test_cat[cat]['accesses']),
+            'misses': mean(per_test_cat[cat]['misses']),
+            'miss_rate': mean(per_test_cat[cat]['miss_rate']),
+            'access_share': mean(per_test_cat[cat]['access_share']),
+            'miss_share': mean(per_test_cat[cat]['miss_share']),
+        }
+
+    return {
+        'mean_accesses': mean(per_test_total_acc),
+        'mean_misses': mean(per_test_total_mis),
+        'overall_miss_rate': mean(per_test_overall_mr),
+        'categories': categories,
+        'n_tests': len(per_test_total_acc),
+    }
+
+
+def print_access_comparison(folder_data, folder_names):
+    """Print per-folder per-test-averaged access/miss counts plus deltas."""
+    print("\n" + "=" * 100)
+    print("Per-Data-Structure Access Count & Miss Rate Comparison "
+          "(per-test mean, each test weighted equally)")
+    print("=" * 100)
+
+    for folder_name in folder_names:
+        stats = folder_data[folder_name].get('access_stats')
+        if stats is None:
+            print(f"\n[{folder_name}] No access stats available.")
+            continue
+        print(f"\n[{folder_name}]  tests={stats['n_tests']}")
+        print(f"  Mean accesses/test: {format_count(stats['mean_accesses']):>10}  "
+              f"({stats['mean_accesses']:,.0f})")
+        print(f"  Mean misses/test  : {format_count(stats['mean_misses']):>10}  "
+              f"({stats['mean_misses']:,.0f})")
+        print(f"  Overall miss rate : {stats['overall_miss_rate']:.3f}%")
+        header = (f"    {'Category':<10} {'Accesses':>10} {'Acc %':>8} "
+                  f"{'Misses':>10} {'Miss %':>8} {'Miss Rate':>11}")
+        print(header)
+        print("    " + "-" * (len(header) - 4))
+        for cat in ['watchlist', 'clauses', 'priority_queue', 'variables']:
+            c = stats['categories'][cat]
+            print(f"    {CATEGORY_LABELS[cat]:<10} "
+                  f"{format_count(c['accesses']):>10} "
+                  f"{c['access_share']:>7.2f}% "
+                  f"{format_count(c['misses']):>10} "
+                  f"{c['miss_share']:>7.2f}% "
+                  f"{c['miss_rate']:>10.3f}%")
+
+    # Side-by-side delta when exactly two folders
+    if len(folder_names) == 2:
+        a, b = folder_names
+        sa = folder_data[a].get('access_stats')
+        sb = folder_data[b].get('access_stats')
+        if sa and sb:
+            print("\n" + "-" * 100)
+            print(f"Delta: {b} vs {a}  (accesses: relative %, miss rate: absolute pp)")
+            print("-" * 100)
+            rows = [('Overall',
+                     sa['mean_accesses'], sb['mean_accesses'],
+                     sa['overall_miss_rate'], sb['overall_miss_rate'])]
+            for cat in ['watchlist', 'clauses', 'priority_queue', 'variables']:
+                ca = sa['categories'][cat]
+                cb = sb['categories'][cat]
+                rows.append((CATEGORY_LABELS[cat],
+                             ca['accesses'], cb['accesses'],
+                             ca['miss_rate'], cb['miss_rate']))
+            print(f"  {'Category':<10} {'Acc A':>10} {'Acc B':>10} {'Acc Δ':>10} "
+                  f"{'MR A':>9} {'MR B':>9} {'MR Δ (pp)':>11}")
+            print("  " + "-" * 72)
+            for label, acc_a, acc_b, mr_a, mr_b in rows:
+                acc_delta = ((acc_b - acc_a) / acc_a * 100.0) if acc_a > 0 else 0.0
+                mr_delta = mr_b - mr_a
+                print(f"  {label:<10} "
+                      f"{format_count(acc_a):>10} "
+                      f"{format_count(acc_b):>10} "
+                      f"{acc_delta:>+9.2f}% "
+                      f"{mr_a:>8.3f}% "
+                      f"{mr_b:>8.3f}% "
+                      f"{mr_delta:>+10.3f}")
+
+
 def compute_cache_miss_rates(results):
     """Compute L1 cache miss rates across finished tests.
     
@@ -362,13 +529,15 @@ Examples:
     for folder_name in folder_names:
         common_results = [all_results[folder_name][tc] for tc in common_valid_tests]
         miss_rates = compute_cache_miss_rates(common_results)
-        
+        access_stats = compute_cache_access_stats(common_results)
+
         if miss_rates is None:
             print(f"  Error: Could not compute miss rates for {folder_name}")
             sys.exit(1)
-        
+
         folder_data[folder_name] = {
             'miss_rates': miss_rates,
+            'access_stats': access_stats,
             'test_count': len(common_results)
         }
     
@@ -379,7 +548,10 @@ Examples:
         miss_rates = folder_data[folder_name]['miss_rates']
         print(f"{folder_name:<30} {miss_rates['overall']:>10.2f}% {miss_rates['watchlist']:>10.2f}% "
               f"{miss_rates['clauses']:>10.2f}% {miss_rates['priority_queue']:>13.2f}% {miss_rates['variables']:>10.2f}%")
-    
+
+    # Print per-data-structure access counts and exact miss rates
+    print_access_comparison(folder_data, folder_names)
+
     # Generate plot
     plot_cache_comparison(folder_data, folder_names, args.output_dir)
 
