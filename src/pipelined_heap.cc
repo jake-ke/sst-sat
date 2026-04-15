@@ -647,6 +647,7 @@ void PipelinedHeap::handleMem(SST::Interfaces::StandardMem::Request* req) {
             memcpy(write_data.data(), scaled_entries.data(), chunk_size);
 
             uint64_t write_addr = read_resp->pAddr;
+            if (tracer_) tracer_->emitMem(true, write_addr, (uint32_t)chunk_size);
             memory->send(new SST::Interfaces::StandardMem::Write(write_addr, chunk_size, write_data));
 
             if (rescale_pending_reads > 0) {
@@ -804,6 +805,7 @@ void PipelinedHeap::setVarMem(Var v, VarMem p) {
         store_queue.push_back(entry);
     }
 
+    if (tracer_) tracer_->emitMem(true, addr, (uint32_t)size);
     memory->send(new SST::Interfaces::StandardMem::Write(addr, size, data));
 }
 
@@ -841,6 +843,7 @@ void PipelinedHeap::getVarMem(Var v, bool bump) {
     // read from memory and handleMem will push to insert_queue
     auto req = new SST::Interfaces::StandardMem::Read(addr, size);
     req_to_op[req->getID()] = PendingMemOp(InsReq(v, 0.0, bump, 0));
+    if (tracer_) tracer_->emitMem(false, addr, (uint32_t)size);
     memory->send(req);
 }
 
@@ -891,6 +894,7 @@ void PipelinedHeap::readBurstAll(uint64_t start_addr, size_t total_size) {
         PendingMemOpType type = debug_heap_pending ? PendingMemOpType::DEBUG : PendingMemOpType::RESCALE;
         req_to_op.emplace(req->getID(), PendingMemOp(type, offset, chunk_size));
         rescale_pending_reads++;
+        if (tracer_) tracer_->emitMem(false, current_addr, (uint32_t)chunk_size);
         memory->send(req);
 
         offset += chunk_size;

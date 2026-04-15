@@ -232,6 +232,33 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_bt_level = registerStatistic<uint64_t>("bt_level");
     stat_bt_distance = registerStatistic<uint64_t>("bt_distance");
 
+    // Binary memory-access trace writer (opt-in).
+    std::string trace_file = params.find<std::string>("trace_file", "");
+    if (!trace_file.empty()) {
+        tracer_ = new TraceWriter();
+        size_t trace_buf = params.find<size_t>("trace_buffer_bytes", 4*1024*1024);
+        if (!tracer_->open(trace_file, trace_buf)) {
+            output.fatal(CALL_INFO, -1, "trace_file: could not open %s\n", trace_file.c_str());
+        }
+        TraceWriter::DsMap m;
+        m.nibble[(heap_base_addr        >> 28) & 0xF] = TraceWriter::DS_HEAP;
+        m.nibble[(indices_base_addr     >> 28) & 0xF] = TraceWriter::DS_INDICES;
+        m.nibble[(variables_base_addr   >> 28) & 0xF] = TraceWriter::DS_VARIABLES;
+        m.nibble[(watches_base_addr     >> 28) & 0xF] = TraceWriter::DS_WATCHES;
+        m.nibble[(watch_nodes_base_addr >> 28) & 0xF] = TraceWriter::DS_WATCH_NODES;
+        m.nibble[(clauses_cmd_base_addr >> 28) & 0xF] = TraceWriter::DS_CLAUSES_CMD;
+        m.nibble[(clauses_base_addr     >> 28) & 0xF] = TraceWriter::DS_CLAUSES;
+        m.nibble[(var_act_base_addr     >> 28) & 0xF] = TraceWriter::DS_VAR_ACT;
+        tracer_->setDsMap(m);
+
+        variables.setTracer(tracer_, TraceWriter::DS_VARIABLES);
+        watches  .setTracer(tracer_, TraceWriter::DS_WATCHES);
+        clauses  .setTracer(tracer_, TraceWriter::DS_CLAUSES);
+        order_heap->setTracer(tracer_, TraceWriter::DS_HEAP);
+        output.output("Binary trace writer enabled: %s (buffer=%zu B)\n",
+                      trace_file.c_str(), trace_buf);
+    }
+
     // Component should not end simulation until solution is found
     registerAsPrimaryComponent();
     primaryComponentDoNotEndSim();
@@ -296,6 +323,17 @@ void SATSolver::setup() {
     watches.setLineSize(line_size);
     clauses.setLineSize(line_size);
     order_heap->setLineSize(line_size);
+
+    // Write the trace file header now that num_vars/num_clauses are known
+    // (populated by init(phase=0) before setup runs). No trace events have
+    // been emitted yet because init paths use writeUntimed which is skipped.
+    if (tracer_) {
+        tracer_->writeHeader(cnf_file_path, random_seed, num_vars, num_clauses);
+        tracer_->emitPhase((uint8_t)state);
+        tracer_->emitLevel(0);
+        tracer_phase_cache_ = (uint8_t)state;
+        tracer_level_cache_ = 0;
+    }
 }
 
 void SATSolver::complete(unsigned int phase) {
@@ -304,7 +342,14 @@ void SATSolver::complete(unsigned int phase) {
 
 void SATSolver::finish() {
     global_memory->finish();
-    
+
+    // Flush and close the binary trace writer (if enabled).
+    if (tracer_) {
+        tracer_->close(total_cycles);
+        delete tracer_;
+        tracer_ = nullptr;
+    }
+
     // Close decision output file if open
     if (decision_output_stream.is_open()) {
         decision_output_stream.close();
@@ -809,6 +854,27 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
         total_cycles = cycle;
         primaryComponentOKToEndSim();
         return true; // signal done
+    }
+
+    // Trace-side: snapshot phase/level/cycle at the top of every tick so
+    // memory events emitted during this tick inherit the latest labels.
+    // STEP is a transient reply-handling state set by handleGlobalMemEvent;
+    // attribute events to the pre-STEP phase (saved_state).
+    if (tracer_) {
+        uint8_t phase = (state == STEP) ? (uint8_t)saved_state : (uint8_t)state;
+        if (phase != tracer_phase_cache_) {
+            tracer_->emitPhase(phase);
+            tracer_phase_cache_ = phase;
+        }
+        int32_t lvl = (int32_t)trail_lim.size();
+        if (lvl != tracer_level_cache_) {
+            tracer_->emitLevel(lvl);
+            tracer_level_cache_ = lvl;
+        }
+        if (tracer_->events() != tracer_events_at_tick_start_) {
+            tracer_->emitTick((uint64_t)cycle);
+            tracer_events_at_tick_start_ = tracer_->events();
+        }
     }
 
     // Calculate elapsed cycles since last state change if we're not in IDLE or STEP
@@ -1342,14 +1408,16 @@ void SATSolver::execBacktrack() {
 
     if (learnt_clause.size() == 1) {
         // Unit learnt clause will be instantly propagated
+        if (tracer_) tracer_->emitLearn(learnt_lbd, (int)learnt_clause.size(), bt_level, 0);
         trailEnqueue(learnt_clause[0]);
     } else {
         // Add the learned clause
         Clause new_clause(learnt_clause, cla_inc);
         Cref addr = clauses.addClause(new_clause);
-        output.verbose(CALL_INFO, 3, 0, 
-            "Added learnt clause 0x%x: %s\n", 
+        output.verbose(CALL_INFO, 3, 0,
+            "Added learnt clause 0x%x: %s\n",
             addr, printClause(new_clause.literals).c_str());
+        if (tracer_) tracer_->emitLearn(learnt_lbd, (int)learnt_clause.size(), bt_level, (int)addr);
         attachClause(addr, new_clause);
         trailEnqueue(learnt_clause[0], addr);
         stat_learned->addData(1);
@@ -1404,6 +1472,7 @@ void SATSolver::execReduce() {
 
 void SATSolver::execRestart() {
     output.verbose(CALL_INFO, 4, 0, "RESTART: Executing restart #%d\n", curr_restarts);
+    if (tracer_) tracer_->emitRestart(curr_restarts);
     backtrack(0);
     conflictC = 0;
     curr_restarts++;
@@ -1506,6 +1575,7 @@ bool SATSolver::decide() {
 
     if (decision_output_stream.is_open()) dumpDecision(lit);
     trail_lim.push_back(trail.size());  // new decision level
+    if (tracer_) tracer_->emitDecision(var(lit), sign(lit), current_level());
     trailEnqueue(lit);
 
     // Extract speculative literal for next decision
@@ -2064,6 +2134,7 @@ void SATSolver::propagateWatchers(
         if (std::find(conflicts.begin(), conflicts.end(), clause_addr) == conflicts.end()
             && conflicts.size() < MAX_CONFL) {
             conflicts.push_back(clause_addr);
+            if (tracer_) tracer_->emitConflict((int)clause_addr);
             output.verbose(CALL_INFO, 3, 0,
                 "  Conflict #%zu: Clause 0x%x has all literals false\n",
                 conflicts.size(), clause_addr);
@@ -2243,8 +2314,9 @@ void SATSolver::findBtLevel() {
 //-----------------------------------------------------------------------------------
 
 void SATSolver::backtrack(int backtrack_level) {
-    output.verbose(CALL_INFO, 4, 0, "BACKTRACK From level %d to level %d\n", 
+    output.verbose(CALL_INFO, 4, 0, "BACKTRACK From level %d to level %d\n",
         current_level(), backtrack_level);
+    if (tracer_) tracer_->emitBacktrack(current_level(), backtrack_level);
     
     // Unassign all variables above backtrack_level using the trail
     for (int i = trail.size() - 1; i >= int(trail_lim[backtrack_level]); i--) {
@@ -2335,6 +2407,7 @@ void SATSolver::reduceDB() {
         
     stat_db_reductions->addData(1);
     stat_removed->addDataNTimes(removed, 1);
+    if (tracer_) tracer_->emitReduce(removed, (int)to_keep.size());
 }
 
 //-----------------------------------------------------------------------------------
@@ -2343,6 +2416,7 @@ void SATSolver::reduceDB() {
 
 void SATSolver::trailEnqueue(Lit literal, int reason) {
     Var v = var(literal);
+    if (tracer_) tracer_->emitEnqueue(v, sign(literal), reason);
     var_assigned[v] = true;
     var_value[v] = !sign(literal);
     

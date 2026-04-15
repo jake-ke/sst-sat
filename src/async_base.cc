@@ -8,6 +8,7 @@ AsyncBase::AsyncBase(const std::string& prefix, int verbose, SST::Interfaces::St
 }
 
 void AsyncBase::read(uint64_t addr, size_t size, uint64_t worker_id) {
+    if (tracer_) tracer_->emitMem(false, addr, (uint32_t)size);
     if (WRITE_BUFFER) {
         // First check store queue for forwarding
         std::vector<uint8_t> forwarded_data;
@@ -29,7 +30,8 @@ void AsyncBase::read(uint64_t addr, size_t size, uint64_t worker_id) {
 
 void AsyncBase::write(uint64_t addr, size_t size, const std::vector<uint8_t>& data) {
     output.verbose(CALL_INFO, 8, 0, "Write at 0x%lx, size %zu\n", addr, size);
-    
+    if (tracer_) tracer_->emitMem(true, addr, (uint32_t)size);
+
     if (WRITE_BUFFER) {
         // Always add a new entry to the store queue
         StoreQueueEntry entry(addr, size, data);
@@ -120,9 +122,11 @@ void AsyncBase::readBurst(uint64_t start_addr, size_t total_size, uint64_t worke
     reorder_buffer->startBurst(worker_id, total_size);
 
     for (const auto& chunk : chunks) {
-        output.verbose(CALL_INFO, 8, 0, 
-            "ReadBurst chunk: addr=0x%lx, size=%zu, offset=%zu, worker=%lu\n", 
+        output.verbose(CALL_INFO, 8, 0,
+            "ReadBurst chunk: addr=0x%lx, size=%zu, offset=%zu, worker=%lu\n",
             chunk.addr, chunk.size, chunk.offset_in_data, worker_id);
+
+        if (tracer_) tracer_->emitMem(false, chunk.addr, (uint32_t)chunk.size);
 
         if (WRITE_BUFFER) {
             // Check store queue for forwarding

@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include "structs.h"
 #include "reorder_buffer.h"
+#include "trace_writer.h"
 
 
 class AsyncBase {
@@ -37,6 +38,7 @@ public:
     void setLineSize(size_t size) { line_size = size; }
     void setPreYieldCallback(PreYieldCallback cb) { pre_yield_callback = cb; }
     virtual void setReorderBuffer(ReorderBuffer* rb) { reorder_buffer = rb; }
+    void setTracer(TraceWriter* t, uint8_t ds_id) { tracer_ = t; ds_id_ = ds_id; }
     size_t size() const { return size_; }
     bool empty() const { return size_ == 0; }
     void reset() { burst_states.clear(); }
@@ -87,6 +89,10 @@ protected:
 
     // Store queue for Write->Read ordering
     std::vector<StoreQueueEntry> store_queue;
+
+    // Trace writer (shared, not owned). ds_id_ is set via setTracer.
+    TraceWriter* tracer_ = nullptr;
+    uint8_t ds_id_ = TraceWriter::DS_UNKNOWN;
 };
 
 #endif // ASYNC_BASE_H

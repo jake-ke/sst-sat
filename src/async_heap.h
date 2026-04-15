@@ -10,6 +10,7 @@
 #include "structs.h"
 #include "async_var_activity.h"
 #include "reorder_buffer.h"
+#include "trace_writer.h"
 
 
 class Heap : public SST::SubComponent {
@@ -49,6 +50,10 @@ public:
     void setHeapSize(size_t size) { heap_size = size; }
     void setVarIncPtr(double* ptr) { var_inc_ptr = ptr; }
     void setLineSize(size_t size) { line_size = size; var_activity.setLineSize(size); }
+    void setTracer(TraceWriter* t, uint8_t /*ds_id*/) {
+        tracer_ = t;
+        var_activity.setTracer(t, TraceWriter::DS_VAR_ACT);
+    }
     size_t size() const { return heap_size; }
     bool empty() const { return heap_size == 0; }
     
@@ -73,6 +78,7 @@ private:
 
     VarActivity var_activity;
     uint64_t var_act_base_addr;  // Base address for variable activity array
+    TraceWriter* tracer_ = nullptr;
     bool lt(Var x, Var y, int worker_id = 0);  // Comparison method using var_activity directly
 
     std::queue<HeapReqEvent*> pending_requests;

@@ -16,6 +16,7 @@
 #include "async_watches.h"
 #include "async_clauses.h"
 #include "async_activity.h"
+#include "trace_writer.h"
 
 //-----------------------------------------------------------------------------------
 // Type Definitions and Constants
@@ -79,6 +80,8 @@ public:
         {"timeout_cycles", "Maximum solver cycles before timing out (0 = no timeout)", "0"},
         {"profile_2wl", "Enable 2WL clause-access reduction profiling (host-side; counts only original clauses)", "false"},
         {"profile_prop_timing", "Enable per-propagation timing breakdown (cycles_read_headptr/blocks/clauses/insert/polling and spec/normal metrics). Auto-enabled when enable_speculative=true.", "false"},
+        {"trace_file", "Path to binary memory-access trace. Empty disables tracing.", ""},
+        {"trace_buffer_bytes", "Ring buffer size for trace writer (bytes).", "4194304"},
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -403,6 +406,12 @@ private:
     // speculative_metrics/normal_metrics structs). Auto-enabled when
     // enable_speculative is on.
     bool profile_prop_timing;
+
+    // Binary memory-access trace writer (nullptr when tracing disabled).
+    TraceWriter* tracer_ = nullptr;
+    uint8_t tracer_phase_cache_ = 0;
+    int32_t tracer_level_cache_ = -1;
+    uint64_t tracer_events_at_tick_start_ = 0;
 
     // Propagation timing counters
     uint64_t cycles_read_headptr;        // Time spent reading head pointers
