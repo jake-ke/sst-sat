@@ -100,6 +100,11 @@ def parse_args():
     parser.add_argument('--cache-profiler', dest='cache_profiler',
                         action='store_true', default=False,
                         help='Attach the satsolver.CacheProfiler subcomponent to L1 and L2 caches')
+    parser.add_argument('--trace-file', dest='trace_file', default='',
+                        help='Path to write binary memory-access trace (empty disables)')
+    parser.add_argument('--trace-buffer-bytes', dest='trace_buffer_bytes',
+                        type=int, default=4194304,
+                        help='Ring buffer size for trace writer (bytes)')
 
     args = parser.parse_args()
     
@@ -205,6 +210,8 @@ if args.enable_histograms:
     print(f"Per-propagation histogram statistics enabled")
 if args.cache_profiler:
     print(f"Cache profiler subcomponent enabled (L1+L2)")
+if args.trace_file:
+    print(f"Binary trace enabled: {args.trace_file} (buffer={args.trace_buffer_bytes} B)")
 
 # Create the SAT solver component
 solver = sst.Component("solver", "satsolver-opt-final.SATSolver-opt-final")
@@ -245,6 +252,8 @@ params = {
     "glucose_restart": str(args.glucose_restart),
     "profile_2wl": str(args.profile_2wl),
     "profile_prop_timing": str(args.profile_prop_timing),
+    "trace_file": args.trace_file,
+    "trace_buffer_bytes": str(args.trace_buffer_bytes),
 }
 if args.decision_path:
     params["decision_file"] = args.decision_path

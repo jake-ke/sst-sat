@@ -10,6 +10,7 @@
 #include <deque>
 #include <unordered_map>
 #include "structs.h"
+#include "trace_writer.h"
 
 // Define maximum number of heap levels and corresponding parameters
 #define MAX_HEAP_LEVELS 22
@@ -143,6 +144,7 @@ public:
     void setHeapSize(size_t size) { heap_size = size; num_vars = size; }
     void setVarIncPtr(double* ptr) { var_inc_ptr = ptr; }
     void setLineSize(size_t size) { line_size = size; }
+    void setTracer(TraceWriter* t, uint8_t /*ds_id*/) { tracer_ = t; }
 
     // Initialize heap with given size
     void initHeap(uint64_t random_seed = 0);
@@ -184,6 +186,9 @@ private:
     // Store queue for Write->Read ordering
     std::vector<StoreQueueEntry> store_queue;
     int findStoreQueueEntry(uint64_t addr, size_t size);
+
+    // Trace writer (shared, not owned).
+    TraceWriter* tracer_ = nullptr;
 
     // Request queues
     std::deque<PendingRequest> request_queue;

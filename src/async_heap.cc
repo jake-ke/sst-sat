@@ -248,6 +248,7 @@ Var Heap::read(uint64_t addr, int worker_id) {
     // Not found in store queue, create memory request
     auto req = new SST::Interfaces::StandardMem::Read(addr, sizeof(Var));
     reorder_buffer.registerRequest(req->getID(), worker_id);
+    if (tracer_) tracer_->emitMem(false, addr, (uint32_t)sizeof(Var));
     memory->send(req);
     // printf("HEAP read: 0x%lx\n", addr);
     outstanding_mem_requests++;
@@ -273,6 +274,7 @@ void Heap::write(uint64_t addr, Var val) {
     }
 
     // printf("HEAP write: 0x%lx, data %d\n", addr, val);
+    if (tracer_) tracer_->emitMem(true, addr, (uint32_t)sizeof(Var));
     memory->send(new SST::Interfaces::StandardMem::Write(addr, sizeof(Var), data));
 }
 
