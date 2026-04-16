@@ -68,9 +68,6 @@ protected:
         BurstReadState() : start_addr(0), offset(0), pending_read_count(0), completed(false) {}
     };
     
-    // Find a store queue entry with matching address range
-    int findStoreQueueEntry(uint64_t addr, size_t size);
-
     // Member variables
     SST::Output output;
     SST::Interfaces::StandardMem* memory;
