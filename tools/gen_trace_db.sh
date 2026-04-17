@@ -16,9 +16,20 @@ set -u
 
 BENCH_DIR="${BENCH_DIR:-/home/jakeke/sat_benchmarks/satcomp_sim}"
 DB_DIR="${DB_DIR:-./runs/trace_db}"
-TIMEOUT_CYCLES="${TIMEOUT_CYCLES:-10000000}"   # 10M cycles ~= 10 ms simulated
+TIMEOUT_CYCLES="${TIMEOUT_CYCLES:-36000000000}"   # 36B cycles ~= 36 ms simulated @ 1GHz
 NUM_SEEDS="${NUM_SEEDS:-4}"
 JOBS="${JOBS:-4}"
+
+# Hardware config defaults match the opt-final_l1_4_1_l2_8_32 profile used by
+# run_sc_l2.sh. Any of these can be overridden by exporting the env var.
+# Set any to the empty string to fall back to test_two_level.py defaults.
+RAM2_CFG="${RAM2_CFG-tests/ramulator2-ddr4.cfg}"
+L1_SIZE="${L1_SIZE-128KiB}"
+L1_LATENCY="${L1_LATENCY-1}"
+L1_BW="${L1_BW-4}"
+L2_LATENCY="${L2_LATENCY-32}"
+L2_BW="${L2_BW-8}"
+PREFETCH="${PREFETCH-1}"
 
 # Default CNF list: every *.cnf in BENCH_DIR if CNFS is unset.
 # Override with e.g.  CNFS="a.cnf b.cnf" tools/gen_trace_db.sh
@@ -73,6 +84,13 @@ echo " db_dir         : $DB_DIR"
 echo " num_seeds      : $NUM_SEEDS"
 echo " timeout_cycles : $TIMEOUT_CYCLES"
 echo " parallel jobs  : $JOBS"
+echo " ram2_cfg       : ${RAM2_CFG:-<simpleMem default>}"
+echo " l1_size        : ${L1_SIZE:-<default>}"
+echo " l1_latency     : ${L1_LATENCY:-<default>}"
+echo " l1_bw          : ${L1_BW:-<default>}"
+echo " l2_latency     : ${L2_LATENCY:-<default>}"
+echo " l2_bw          : ${L2_BW:-<default>}"
+echo " prefetch       : ${PREFETCH:+enabled}"
 echo " tasks          : $total"
 echo "=============================================================="
 
@@ -94,12 +112,22 @@ run_one() {
     fi
 
     local t0=$(date +%s)
+    local extra=()
+    [[ -n "$RAM2_CFG"    ]] && extra+=(--ram2-cfg "$RAM2_CFG")
+    [[ -n "$L1_SIZE"     ]] && extra+=(--l1-size "$L1_SIZE")
+    [[ -n "$L1_LATENCY"  ]] && extra+=(--l1-latency "$L1_LATENCY")
+    [[ -n "$L1_BW"       ]] && extra+=(--l1-bw "$L1_BW")
+    [[ -n "$L2_LATENCY"  ]] && extra+=(--l2-latency "$L2_LATENCY")
+    [[ -n "$L2_BW"       ]] && extra+=(--l2-bw "$L2_BW")
+    [[ -n "$PREFETCH"    ]] && extra+=(--prefetch)
+
     sst tests/test_two_level.py -- \
         --cnf "$cnf_path" \
         --rand "$seed" \
         --trace-file "$trace_file" \
         --stats-file "$stats_file" \
         --timeout-cycles "$TIMEOUT_CYCLES" \
+        "${extra[@]}" \
         >"$log_file" 2>&1
     local rc=$?
     local t1=$(date +%s)
@@ -128,6 +156,7 @@ run_one() {
 
 export -f run_one
 export DB_DIR RED GREEN YELLOW NC TIMEOUT_CYCLES
+export RAM2_CFG L1_SIZE L1_LATENCY L1_BW L2_LATENCY L2_BW PREFETCH
 
 # Serial if JOBS==1, else xargs-based parallel.
 if [[ $JOBS -le 1 ]]; then
