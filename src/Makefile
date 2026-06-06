@@ -32,7 +32,7 @@ endif
 # Source files
 SOURCES = memory_allocator.cc cache_profiler.cc async_base.cc async_heap.cc async_watches.cc async_clauses.cc async_activity.cc async_var_activity.cc satsolver.cc directedprefetch.cc pipelined_heap.cc pipelined_heap_test.cc trace_writer.cc
 OBJECTS = $(SOURCES:%.cc=$(BUILD_DIR)/%.o)
-TARGET = $(BUILD_DIR)/libsatsolver-opt-final.so
+TARGET = $(BUILD_DIR)/libsatsolver-mc.so
 
 # Build library
 all: $(TARGET)
@@ -48,9 +48,9 @@ $(BUILD_DIR)/%.o: %.cc | $(BUILD_DIR)
 
 # Install
 install: $(TARGET)
-	sst-register satsolver-opt-final satsolver-opt-final_LIBDIR=$(abspath $(BUILD_DIR))
-	sst-register SST_ELEMENT_SOURCE satsolver-opt-final=$(CURDIR)
-	sst-register SST_ELEMENT_TESTS satsolver-opt-final=$(abspath ../tests)
+	sst-register satsolver-mc satsolver-mc_LIBDIR=$(abspath $(BUILD_DIR))
+	sst-register SST_ELEMENT_SOURCE satsolver-mc=$(CURDIR)
+	sst-register SST_ELEMENT_TESTS satsolver-mc=$(abspath ../tests)
 
 # Clean
 clean:
