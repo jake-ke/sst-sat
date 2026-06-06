@@ -5,7 +5,7 @@ SCRIPT_NAME=$(basename "$0")
 
 # Check if help is requested or show usage
 show_usage() {
-    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--l2-latency LATENCY] [--l2-bw BW] [--l2-width WIDTH] [--mem-latency LATENCY] [--prefetch] [--spec] [--profile-2wl] [--profile-prop-timing] [--enable-histograms] [--cache-profiler] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [-j jobs]"
+    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--l2-latency LATENCY] [--l2-bw BW] [--l2-width WIDTH] [--mem-latency LATENCY] [--prefetch] [--spec] [--profile-2wl] [--profile-prop-timing] [--enable-histograms] [--cache-profiler] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [--max-confl N] [-j jobs]"
     echo "Options:"
     echo "  -b, --bench-dir DIR  Directory containing benchmark CNF files (required)"
     echo "  --ram2-cfg FILE       Ramulator2 configuration file"
@@ -28,6 +28,7 @@ show_usage() {
     echo "  --num-seeds NUM       Number of random seeds to run (default: 1)"
     echo "  --seed NUM            Run a single seed with the specified seed number (overrides --num-seeds)"
     echo "  --timeout-cycles N    Maximum solver cycles before timing out (0 or omit for unlimited)"
+    echo "  --max-confl N         Max conflicts collected/analyzed per round, batched by LEARNERS (-1 = no limit, default 8)"
     echo "  --glucose-restart     Use glucose-style LBD-based restarts instead of Luby"
     echo "  --freq FREQ           Clock frequency for all components (e.g. 1GHz, 500MHz)"
     echo "  -j, --jobs JOBS       Number of parallel jobs"
@@ -58,6 +59,7 @@ SPEC=""
 NUM_SEEDS=1
 SPECIFIC_SEED=""
 TIMEOUT_CYCLES=""
+MAX_CONFL=""
 FREQ=""
 GLUCOSE_RESTART=""
 PROFILE_2WL=""
@@ -250,6 +252,16 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        --max-confl)
+            if [[ -n "$2" && "$2" =~ ^-?[0-9]+$ ]]; then
+                MAX_CONFL=$2
+                shift 2
+            else
+                echo "Error: --max-confl requires an integer argument (-1 for no limit)"
+                show_usage
+                exit 1
+            fi
+            ;;
         --glucose-restart)
             GLUCOSE_RESTART="yes"
             shift
@@ -368,6 +380,9 @@ if [[ -n "$TIMEOUT_CYCLES" ]]; then
     log_message "Timeout cycles: $TIMEOUT_CYCLES"
 else
     log_message "Timeout cycles: unlimited"
+fi
+if [[ -n "$MAX_CONFL" ]]; then
+    log_message "Max conflicts per round: $MAX_CONFL"
 fi
 if [[ -n "$CLASSIC_HEAP" ]]; then
     log_message "Using Classic heap"
@@ -503,6 +518,7 @@ run_one_seed() {
     [[ -n "$PREFETCH" ]] && command+=" --prefetch"
     [[ -n "$SPEC" ]] && command+=" --spec"
     [[ -n "$TIMEOUT_CYCLES" ]] && command+=" --timeout-cycles $TIMEOUT_CYCLES"
+    [[ -n "$MAX_CONFL" ]] && command+=" --max-confl $MAX_CONFL"
     [[ -n "$FREQ" ]] && command+=" --freq $FREQ"
     [[ -n "$GLUCOSE_RESTART" ]] && command+=" --glucose-restart"
     [[ -n "$PROFILE_2WL" ]] && command+=" --profile-2wl"
