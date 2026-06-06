@@ -29,7 +29,7 @@ const bool OVERLAP_HEAP_INSERT = true;  // overlaps heap insertions (backtrackin
 const bool OVERLAP_HEAP_BUMP = true;  // overlaps heap bumping with clause minimization and find bt level
 const bool WRITE_BUFFER = true;  // enables write request buffering for improved performance
 const int PRE_WATCHERS = 7;  // Number of pre-watchers to store in metadata
-const int USE_FREE_LIST = 1;  // Use free list for watcher insertion
+const int USE_FREE_LIST = 0;  // Use free list for watcher insertion
 
 // helpers
 const int FREE_IDX_BITS = pow(2, ceil(log(PROPAGATORS)/log(2)));  // next power of 2

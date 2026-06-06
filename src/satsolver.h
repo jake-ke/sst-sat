@@ -48,8 +48,8 @@ public:
     // SST ELI Registrations
     SST_ELI_REGISTER_COMPONENT(
         SATSolver,
-        "satsolver-opt5-watchlist",
-        "SATSolver-opt5-watchlist",
+        "satsolver-opt5-prewatcher",
+        "SATSolver-opt5-prewatcher",
         SST_ELI_ELEMENT_VERSION(1,0,0),
         "SAT Solver Component",
         COMPONENT_CATEGORY_PROCESSOR
