@@ -78,6 +78,7 @@ public:
         {"prefetch_enabled", "Enable prefetching", "false"},
         {"enable_speculative", "Enable speculative propagation", "false"},
         {"timeout_cycles", "Maximum solver cycles before timing out (0 = no timeout)", "0"},
+        {"max_confl", "Maximum number of conflicts collected per propagation and analyzed (in batches of LEARNERS) per conflict round; -1 = no limit", "8"},
         {"profile_2wl", "Enable 2WL clause-access reduction profiling (host-side; counts only original clauses)", "false"},
         {"profile_prop_timing", "Enable per-propagation timing breakdown (cycles_read_headptr/blocks/clauses/insert/polling and spec/normal metrics). Auto-enabled when enable_speculative=true.", "false"},
         {"trace_file", "Path to binary memory-access trace. Empty disables tracing.", ""},
@@ -107,6 +108,8 @@ public:
         {"learnt_units", "Number of unit-literal learnt clauses", "count", 1},
         {"learnt_lbd", "Total LBD of learnt clauses", "count", 1},
         {"bt_level", "Total backtrack level", "count", 1},
+        {"multi_confl_rounds", "Number of conflict rounds that collected more than one conflict", "count", 1},
+        {"bt_level_diff", "Number of multi-conflict rounds whose conflicts disagree on the backtrack level (min < max)", "count", 1},
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -249,6 +252,7 @@ private:
     std::vector<Lit> learnt_clause;             // Learnt clause from conflict analysis
     int bt_level;                               // Backtrack level from conflict analysis
     int learnt_lbd;                             // LBD of learnt clause from conflict analysis
+    int round_max_bt;                           // Max backtrack level among conflicts analyzed this round (-1 = none yet)
     std::vector<char> seen;                     // Temporary array for conflict analysis
     std::vector<Cref> c_to_bump;
     std::vector<Var> v_to_bump;
@@ -300,6 +304,7 @@ private:
     double learntsize_factor;
     double learntsize_inc;
     double max_learnts;
+    int max_confl;                              // Max conflicts collected/analyzed per round (-1 = no limit)
     int learnt_adjust_start_confl;
     double learnt_adjust_inc;
     double learnt_adjust_confl;
@@ -355,6 +360,8 @@ private:
     Statistic<uint64_t>* stat_learnt_units;       // Count of unit-literal learnt clauses
     Statistic<uint64_t>* stat_learnt_lbd;         // Accumulator: total LBD of learnt clauses
     Statistic<uint64_t>* stat_bt_level;           // Accumulator: total backtrack level
+    Statistic<uint64_t>* stat_multi_confl_rounds; // Count of rounds that collected >1 conflict
+    Statistic<uint64_t>* stat_bt_level_diff;      // Count of multi-conflict rounds whose conflicts disagree on bt level
 
     std::vector<uint32_t> lit_occ_count;          // Precomputed occurrence count per literal index
 
