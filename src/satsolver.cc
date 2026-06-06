@@ -85,7 +85,6 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     output.output("==================[ SATSolver Configuration (structs.h) ]==================\n");
     output.output("PARA_LITS           : %d\n", PARA_LITS);
     output.output("PROPAGATORS         : %d\n", PROPAGATORS);
-    output.output("MAX_CONFL           : %d\n", MAX_CONFL);
     output.output("LEARNERS            : %d\n", LEARNERS);
     output.output("HEAPLANES           : %d\n", HEAPLANES);
     output.output("MINIMIZERS          : %d\n", MINIMIZERS);
@@ -182,6 +181,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
 
     enable_speculative = params.find<bool>("enable_speculative", false);
     timeout_cycles = params.find<uint64_t>("timeout_cycles", 0);
+    max_confl = params.find<int>("max_confl", 8);
+    output.output("MAX_CONFL           : %d\n", max_confl);
     profile_2wl = params.find<bool>("profile_2wl", false);
     profile_prop_timing = params.find<bool>("profile_prop_timing", false);
     // Speculative profiling depends on the same per-literal cycle data, so
@@ -231,6 +232,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_learnt_lbd = registerStatistic<uint64_t>("learnt_lbd");
     stat_bt_level = registerStatistic<uint64_t>("bt_level");
     stat_bt_distance = registerStatistic<uint64_t>("bt_distance");
+    stat_multi_confl_rounds = registerStatistic<uint64_t>("multi_confl_rounds");
+    stat_bt_level_diff = registerStatistic<uint64_t>("bt_level_diff");
 
     // Binary memory-access trace writer (opt-in).
     std::string trace_file = params.find<std::string>("trace_file", "");
@@ -368,6 +371,8 @@ void SATSolver::finish() {
     output.output("UnAssigns    : %lu\n", getStatCount(stat_unassigns));
     output.output("Minimized    : %lu\n", getStatCount(stat_minimized_literals));
     output.output("Restarts     : %lu\n", getStatCount(stat_restarts));
+    output.output("MultiConfl   : %lu\n", getStatCount(stat_multi_confl_rounds));
+    output.output("BtLevelDiff  : %lu\n", getStatCount(stat_bt_level_diff));
     // Speculative propagation statistics
     output.output("Spec Started : %lu\n", getStatCount(stat_spec_started));
     output.output("Spec Finished: %lu\n", getStatCount(stat_spec_finished));
@@ -1220,51 +1225,69 @@ void SATSolver::execAnalyze() {
     }
 
     coro_t::push_type* parent_yield_ptr = yield_ptr;
-    int workers = std::min(LEARNERS, (int)conflicts.size());
-    active_workers.resize(workers, false);
-    std::vector<coro_t::pull_type*> coroutines(workers);
-    std::vector<coro_t::push_type*> yield_ptrs(workers);
+    int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
-    bool done = true;
+    round_max_bt = -1;
 
-    // spawn sub-coroutines for each literal
-    for (int worker_id = 0; worker_id < workers; worker_id++) {
-        coroutines[worker_id] = new coro_t::pull_type(
-            [this, worker_id, &yield_ptrs](coro_t::push_type &yield) {
-                yield_ptr = &yield;
-                yield_ptrs[worker_id] = yield_ptr;
-                analyze(conflicts[worker_id], worker_id);
-            });
-        if (*coroutines[worker_id]) done = false;  // may finish without yielding
-    }
-    if (!done) (*parent_yield_ptr)();  // yield back to IDLE
+    // Analyze all collected conflicts in batches of LEARNERS hardware lanes.
+    // bt_level (min) and round_max_bt (max) persist across batches so the single
+    // best learnt clause is kept and the bt-level spread can be measured.
+    for (int batch_start = 0; batch_start < total_confl; batch_start += LEARNERS) {
+        int workers = std::min(LEARNERS, total_confl - batch_start);
+        active_workers.assign(workers, false);
+        std::vector<coro_t::pull_type*> coroutines(workers);
+        std::vector<coro_t::push_type*> yield_ptrs(workers);
+        bool done = true;
 
-    // stepping sub-coroutines
-    while (!done) {
-        done = true;
-        // Check if any worker is active
+        // spawn sub-coroutines, one hardware lane per conflict in this batch
         for (int worker_id = 0; worker_id < workers; worker_id++) {
-            if (active_workers[worker_id]) {
-                yield_ptr = yield_ptrs[worker_id];
-                (*coroutines[worker_id])();
-                active_workers[worker_id] = false;
-                if (*coroutines[worker_id]) {
-                    done = false;
-                } else {
-                    delete coroutines[worker_id];
-                    coroutines[worker_id] = nullptr;
-                    yield_ptrs[worker_id] = nullptr;
-                }
-            // waiting workers
-            } else if (coroutines[worker_id] != nullptr) done = false;
+            int conflict_idx = batch_start + worker_id;
+            coroutines[worker_id] = new coro_t::pull_type(
+                [this, worker_id, conflict_idx, &yield_ptrs](coro_t::push_type &yield) {
+                    yield_ptr = &yield;
+                    yield_ptrs[worker_id] = yield_ptr;
+                    analyze(conflicts[conflict_idx], worker_id);
+                });
+            if (*coroutines[worker_id]) done = false;  // may finish without yielding
         }
-
         if (!done) (*parent_yield_ptr)();  // yield back to IDLE
+
+        // stepping sub-coroutines
+        while (!done) {
+            done = true;
+            // Check if any worker is active
+            for (int worker_id = 0; worker_id < workers; worker_id++) {
+                if (active_workers[worker_id]) {
+                    yield_ptr = yield_ptrs[worker_id];
+                    (*coroutines[worker_id])();
+                    active_workers[worker_id] = false;
+                    if (*coroutines[worker_id]) {
+                        done = false;
+                    } else {
+                        delete coroutines[worker_id];
+                        coroutines[worker_id] = nullptr;
+                        yield_ptrs[worker_id] = nullptr;
+                    }
+                // waiting workers
+                } else if (coroutines[worker_id] != nullptr) done = false;
+            }
+
+            if (!done) (*parent_yield_ptr)();  // yield back to IDLE
+        }
     }
-    
+
     // finished all sub-coroutines
     active_workers.clear();
     yield_ptr = parent_yield_ptr;
+
+    // Measure the opportunity for multi-conflict learning: how often a round
+    // collects >1 conflict, and how often those conflicts disagree on the
+    // backtrack level (so selecting among them can actually change behavior).
+    // round_max_bt is the max bt level seen; bt_level is the min (selected).
+    if (total_confl > 1) {
+        stat_multi_confl_rounds->addData(1);
+        if (round_max_bt > bt_level) stat_bt_level_diff->addData(1);
+    }
 
     for (const Var& v : v_to_bump) {
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::BUMP, v));
@@ -1688,7 +1711,7 @@ void SATSolver::unitPropagate() {
                         lit_done = false;
 
                 if (lit_done && qhead < trail.size() 
-                    && !(MAX_CONFL >= 0 && (int)conflicts.size() >= MAX_CONFL)) {
+                    && !(max_confl >= 0 && (int)conflicts.size() >= max_confl)) {
                     // printf("Prop %lu, Cycle %lu\n", getStatCount(stat_propagations), getCurrentSimCycle()/1000);
                     // track max literal parallelism
                     if (qhead == batch_end) {
@@ -1765,9 +1788,9 @@ void SATSolver::unitPropagate() {
             }
         }
 
-        // Stop if we've reached MAX_CONFL conflicts (unless MAX_CONFL is -1, meaning no limit)
-        if (MAX_CONFL >= 0 && (int)conflicts.size() >= MAX_CONFL) {
-            output.verbose(CALL_INFO, 3, 0, "PROPAGATE: MAX_CONFL reached, stop\n");
+        // Stop if we've reached max_confl conflicts (unless max_confl is -1, meaning no limit)
+        if (max_confl >= 0 && (int)conflicts.size() >= max_confl) {
+            output.verbose(CALL_INFO, 3, 0, "PROPAGATE: max_confl reached, stop\n");
             qhead = trail.size();
         }
     }
@@ -1970,7 +1993,7 @@ void SATSolver::propagateLiteral(
             else watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block, wmd);
         }
 
-        if (MAX_CONFL >= 0 && conflicts.size() >= MAX_CONFL) break;
+        if (max_confl >= 0 && (int)conflicts.size() >= max_confl) break;
 
         // the current block is deleted if it has no valid nodes left
         if (curr_block.countValidNodes() != 0 && !do_prewatch) {
@@ -2132,7 +2155,7 @@ void SATSolver::propagateWatchers(
     if (var_assigned[var(first)] && value(first) == false) {
         // Conflict detected
         if (std::find(conflicts.begin(), conflicts.end(), clause_addr) == conflicts.end()
-            && conflicts.size() < MAX_CONFL) {
+            && (max_confl < 0 || (int)conflicts.size() < max_confl)) {
             conflicts.push_back(clause_addr);
             if (tracer_) tracer_->emitConflict((int)clause_addr);
             output.verbose(CALL_INFO, 3, 0,
@@ -2255,6 +2278,13 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     output.verbose(CALL_INFO, 4, 0, "ANALYZE[%d]: learnt: %s, bt_level=%d, lbd=%d\n",
         worker_id, printClause(tmp_learnt).c_str(), tmp_btlevel, tmp_lbd);
 
+    // Track the spread of backtrack levels across the conflicts analyzed this
+    // round, so we can measure whether multiple conflicts ever disagree (and
+    // thus whether selecting among them can change the backtrack target).
+    if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
+
+    // Keep the single best candidate: lowest backtrack level, then smallest
+    // clause. Ties keep whichever candidate was selected first.
     if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level
         && tmp_learnt.size() < learnt_clause.size())) {
         bt_level = tmp_btlevel;
@@ -2842,7 +2872,7 @@ void SATSolver::speculativePropagate() {
     uint64_t& cache_lines_read = spec_prop_cache_lines.back();
 
     uint spec_qhead = 0;
-    while (spec_qhead < spec_trail.size() && spec_conflicts < MAX_CONFL) {
+    while (spec_qhead < spec_trail.size() && (max_confl < 0 || spec_conflicts < max_confl)) {
         Lit p = spec_trail[spec_qhead];
         Lit not_p = ~p;
         int watch_idx = toWatchIndex(p);
@@ -3013,7 +3043,7 @@ void SATSolver::speculativePropagate() {
             // }
 
             // Stop if too many conflicts
-            if (spec_conflicts >= MAX_CONFL) break;
+            if (max_confl >= 0 && spec_conflicts >= max_confl) break;
 
             // Move to next block
             curr_addr = curr_block.getNextBlock();

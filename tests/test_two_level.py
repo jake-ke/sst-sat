@@ -83,6 +83,8 @@ def parse_args():
                         help='Use classic heap implementation instead of pipelined heap')
     parser.add_argument('--timeout-cycles', dest='timeout_cycles', type=int, default=0,
                         help='Maximum solver cycles before timing out (0 = unlimited)')
+    parser.add_argument('--max-confl', dest='max_confl', type=int, default=8,
+                        help='Max conflicts collected/analyzed per conflict round, in batches of LEARNERS (-1 = no limit)')
     parser.add_argument('--glucose-restart', dest='glucose_restart',
                         action='store_true', default=False,
                         help='Use glucose-style LBD-based restarts instead of Luby')
@@ -249,6 +251,7 @@ params = {
     "prefetch_enabled": str(args.enable_prefetch),
     "enable_speculative": str(args.enable_speculative),
     "timeout_cycles": str(args.timeout_cycles),
+    "max_confl": str(args.max_confl),
     "glucose_restart": str(args.glucose_restart),
     "profile_2wl": str(args.profile_2wl),
     "profile_prop_timing": str(args.profile_prop_timing),
@@ -431,6 +434,8 @@ solver_stats = [
     "learnt_lbd",
     "bt_level",
     "bt_distance",
+    "multi_confl_rounds",
+    "bt_level_diff",
 ]
 if args.enable_speculative:
     solver_stats += ["spec_started", "spec_finished"]
