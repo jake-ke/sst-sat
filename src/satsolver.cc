@@ -1217,11 +1217,14 @@ void SATSolver::execAnalyze() {
     coro_t::push_type* parent_yield_ptr = yield_ptr;
     int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
+    selected_lbd = std::numeric_limits<int>::max();
     round_max_bt = -1;
+    round_min_bt = std::numeric_limits<int>::max();
 
     // Analyze all collected conflicts in batches of LEARNERS hardware lanes.
-    // bt_level (min) and round_max_bt (max) persist across batches so the single
-    // best learnt clause is kept and the bt-level spread can be measured.
+    // selected_lbd tracks the best (lowest) LBD seen; round_min_bt/round_max_bt
+    // capture the bt-level spread for the disagreement statistic. bt_level is
+    // set to the bt of the LBD-selected clause and is what the backjump uses.
     for (int batch_start = 0; batch_start < total_confl; batch_start += LEARNERS) {
         int workers = std::min(LEARNERS, total_confl - batch_start);
         active_workers.assign(workers, false);
@@ -1273,10 +1276,9 @@ void SATSolver::execAnalyze() {
     // Measure the opportunity for multi-conflict learning: how often a round
     // collects >1 conflict, and how often those conflicts disagree on the
     // backtrack level (so selecting among them can actually change behavior).
-    // round_max_bt is the max bt level seen; bt_level is the min (selected).
     if (total_confl > 1) {
         stat_multi_confl_rounds->addData(1);
-        if (round_max_bt > bt_level) stat_bt_level_diff->addData(1);
+        if (round_max_bt > round_min_bt) stat_bt_level_diff->addData(1);
     }
 
     for (const Var& v : v_to_bump) {
@@ -2264,11 +2266,14 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // round, so we can measure whether multiple conflicts ever disagree (and
     // thus whether selecting among them can change the backtrack target).
     if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
+    if (tmp_btlevel < round_min_bt) round_min_bt = tmp_btlevel;
 
-    // Keep the single best candidate: lowest backtrack level, then smallest
-    // clause. Ties keep whichever candidate was selected first.
-    if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level
+    // Keep the single best candidate: lowest LBD, then smallest clause.
+    // bt_level follows the selected clause (used for the backjump).
+    // Ties keep whichever candidate was selected first.
+    if (tmp_lbd < selected_lbd || (tmp_lbd == selected_lbd
         && tmp_learnt.size() < learnt_clause.size())) {
+        selected_lbd = tmp_lbd;
         bt_level = tmp_btlevel;
         learnt_lbd = tmp_lbd;
         learnt_clause = std::move(tmp_learnt);

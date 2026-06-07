@@ -252,7 +252,9 @@ private:
     std::vector<Lit> learnt_clause;             // Learnt clause from conflict analysis
     int bt_level;                               // Backtrack level from conflict analysis
     int learnt_lbd;                             // LBD of learnt clause from conflict analysis
+    int selected_lbd;                           // LBD of currently selected best candidate (multi-confl LBD-min selection)
     int round_max_bt;                           // Max backtrack level among conflicts analyzed this round (-1 = none yet)
+    int round_min_bt;                           // Min backtrack level among conflicts analyzed this round (INT_MAX = none yet)
     std::vector<char> seen;                     // Temporary array for conflict analysis
     std::vector<Cref> c_to_bump;
     std::vector<Var> v_to_bump;
