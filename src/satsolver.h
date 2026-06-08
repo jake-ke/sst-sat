@@ -79,7 +79,7 @@ public:
         {"enable_speculative", "Enable speculative propagation", "false"},
         {"timeout_cycles", "Maximum solver cycles before timing out (0 = no timeout)", "0"},
         {"max_confl", "Maximum number of conflicts collected per propagation and analyzed (in batches of LEARNERS) per conflict round; -1 = no limit", "8"},
-        {"adaptive_warmup_confl", "Cumulative conflicts before multi-confl is enabled (mc-adaptive). Below this, effective max_confl = 1.", "1000"},
+        {"adaptive_warmup_confl", "Cumulative conflicts before multi-confl is enabled (mc-adaptive). Below this, effective max_confl = 1.", "2000"},
         {"adaptive_min_trail", "Minimum trail size before multi-confl is enabled (mc-adaptive). Below this, effective max_confl = 1.", "64"},
         {"profile_2wl", "Enable 2WL clause-access reduction profiling (host-side; counts only original clauses)", "false"},
         {"profile_prop_timing", "Enable per-propagation timing breakdown (cycles_read_headptr/blocks/clauses/insert/polling and spec/normal metrics). Auto-enabled when enable_speculative=true.", "false"},

@@ -182,7 +182,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     enable_speculative = params.find<bool>("enable_speculative", false);
     timeout_cycles = params.find<uint64_t>("timeout_cycles", 0);
     max_confl = params.find<int>("max_confl", 8);
-    adaptive_warmup_confl = params.find<int>("adaptive_warmup_confl", 1000);
+    adaptive_warmup_confl = params.find<int>("adaptive_warmup_confl", 2000);
     adaptive_min_trail = params.find<int>("adaptive_min_trail", 64);
     output.output("MAX_CONFL           : %d\n", max_confl);
     output.output("ADAPT_WARMUP_CONFL  : %d\n", adaptive_warmup_confl);
