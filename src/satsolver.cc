@@ -1217,6 +1217,7 @@ void SATSolver::execAnalyze() {
     coro_t::push_type* parent_yield_ptr = yield_ptr;
     int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
+    learnt_lbd = std::numeric_limits<int>::max();  // mc-lex: initial sentinel for lex compare
     round_max_bt = -1;
 
     // Analyze all collected conflicts in batches of LEARNERS hardware lanes.
@@ -2265,10 +2266,13 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // thus whether selecting among them can change the backtrack target).
     if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
 
-    // Keep the single best candidate: lowest backtrack level, then smallest
-    // clause. Ties keep whichever candidate was selected first.
-    if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level
-        && tmp_learnt.size() < learnt_clause.size())) {
+    // Lexicographic selection (mc-lex): (bt_level, lbd, length). Ties on all
+    // three keep whichever candidate was selected first.
+    bool better = (tmp_btlevel < bt_level)
+        || (tmp_btlevel == bt_level && tmp_lbd < learnt_lbd)
+        || (tmp_btlevel == bt_level && tmp_lbd == learnt_lbd
+            && tmp_learnt.size() < learnt_clause.size());
+    if (better) {
         bt_level = tmp_btlevel;
         learnt_lbd = tmp_lbd;
         learnt_clause = std::move(tmp_learnt);
