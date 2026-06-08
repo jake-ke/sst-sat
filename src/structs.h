@@ -20,9 +20,9 @@ using coro_t = boost::coroutines2::coroutine<void>;
 
 const int PARA_LITS = 8;  // Number of parallel literals to propagate
 const int PROPAGATORS = 7;  // Number of watchers to propagate
-const int LEARNERS = 8;  // Number of learners for clause learning
+const int LEARNERS = 1;  // Number of learners for clause learning
 const int HEAPLANES = 8;  // Number of heap lanes for parallel execution
-const int MINIMIZERS = 4;  // Number of minimizers
+const int MINIMIZERS = 1;  // Number of minimizers
 const bool OVERLAP_HEAP_INSERT = true;  // overlaps heap insertions (backtracking) with propagation
 const bool OVERLAP_HEAP_BUMP = true;  // overlaps heap bumping with clause minimization and find bt level
 const bool WRITE_BUFFER = true;  // enables write request buffering for improved performance
