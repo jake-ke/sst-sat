@@ -49,8 +49,8 @@ public:
     // SST ELI Registrations
     SST_ELI_REGISTER_COMPONENT(
         SATSolver,
-        "satsolver-opt-final",
-        "SATSolver-opt-final",
+        "satsolver-mc-instr",
+        "SATSolver-mc-instr",
         SST_ELI_ELEMENT_VERSION(1,0,0),
         "SAT Solver Component",
         COMPONENT_CATEGORY_PROCESSOR
@@ -110,6 +110,10 @@ public:
         {"bt_level", "Total backtrack level", "count", 1},
         {"multi_confl_rounds", "Number of conflict rounds that collected more than one conflict", "count", 1},
         {"bt_level_diff", "Number of multi-conflict rounds whose conflicts disagree on the backtrack level (min < max)", "count", 1},
+        {"learnt_subsumed_pairs", "Per round, # of clause pairs (A,B) where A subsumes B but A != B (strict subsumption)", "count", 1},
+        {"learnt_equal_pairs", "Per round, # of clause pairs (A,B) where A and B have identical literal sets", "count", 1},
+        {"lbd_diff_rounds", "Number of multi-conflict rounds where max(lbd) - min(lbd) >= 2", "count", 1},
+        {"selection_agree_rounds", "Number of multi-conflict rounds where the bt-min and lbd-min selectors would pick the same clause", "count", 1},
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -253,6 +257,12 @@ private:
     int bt_level;                               // Backtrack level from conflict analysis
     int learnt_lbd;                             // LBD of learnt clause from conflict analysis
     int round_max_bt;                           // Max backtrack level among conflicts analyzed this round (-1 = none yet)
+
+    // Instrumentation: capture every learnt clause produced in a round so we
+    // can quantify redundancy and selector agreement (Phase 0 diagnostics).
+    std::vector<std::vector<Lit>> round_learnts; // One per worker per batch; sorted for subsumption check
+    std::vector<int> round_lbds;
+    std::vector<int> round_bts;
     std::vector<char> seen;                     // Temporary array for conflict analysis
     std::vector<Cref> c_to_bump;
     std::vector<Var> v_to_bump;
@@ -362,6 +372,10 @@ private:
     Statistic<uint64_t>* stat_bt_level;           // Accumulator: total backtrack level
     Statistic<uint64_t>* stat_multi_confl_rounds; // Count of rounds that collected >1 conflict
     Statistic<uint64_t>* stat_bt_level_diff;      // Count of multi-conflict rounds whose conflicts disagree on bt level
+    Statistic<uint64_t>* stat_learnt_subsumed_pairs;
+    Statistic<uint64_t>* stat_learnt_equal_pairs;
+    Statistic<uint64_t>* stat_lbd_diff_rounds;
+    Statistic<uint64_t>* stat_selection_agree_rounds;
 
     std::vector<uint32_t> lit_occ_count;          // Precomputed occurrence count per literal index
 

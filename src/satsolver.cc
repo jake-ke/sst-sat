@@ -233,6 +233,10 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_bt_level = registerStatistic<uint64_t>("bt_level");
     stat_multi_confl_rounds = registerStatistic<uint64_t>("multi_confl_rounds");
     stat_bt_level_diff = registerStatistic<uint64_t>("bt_level_diff");
+    stat_learnt_subsumed_pairs = registerStatistic<uint64_t>("learnt_subsumed_pairs");
+    stat_learnt_equal_pairs = registerStatistic<uint64_t>("learnt_equal_pairs");
+    stat_lbd_diff_rounds = registerStatistic<uint64_t>("lbd_diff_rounds");
+    stat_selection_agree_rounds = registerStatistic<uint64_t>("selection_agree_rounds");
 
     // Binary memory-access trace writer (opt-in).
     std::string trace_file = params.find<std::string>("trace_file", "");
@@ -372,6 +376,10 @@ void SATSolver::finish() {
     output.output("Restarts     : %lu\n", getStatCount(stat_restarts));
     output.output("MultiConfl   : %lu\n", getStatCount(stat_multi_confl_rounds));
     output.output("BtLevelDiff  : %lu\n", getStatCount(stat_bt_level_diff));
+    output.output("SubsumedPairs: %lu\n", getStatCount(stat_learnt_subsumed_pairs));
+    output.output("EqualPairs   : %lu\n", getStatCount(stat_learnt_equal_pairs));
+    output.output("LbdDiffRnds  : %lu\n", getStatCount(stat_lbd_diff_rounds));
+    output.output("SelAgreeRnds : %lu\n", getStatCount(stat_selection_agree_rounds));
     // Speculative propagation statistics
     output.output("Spec Started : %lu\n", getStatCount(stat_spec_started));
     output.output("Spec Finished: %lu\n", getStatCount(stat_spec_finished));
@@ -1218,6 +1226,9 @@ void SATSolver::execAnalyze() {
     int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
     round_max_bt = -1;
+    round_learnts.clear();
+    round_lbds.clear();
+    round_bts.clear();
 
     // Analyze all collected conflicts in batches of LEARNERS hardware lanes.
     // bt_level (min) and round_max_bt (max) persist across batches so the single
@@ -1277,6 +1288,41 @@ void SATSolver::execAnalyze() {
     if (total_confl > 1) {
         stat_multi_confl_rounds->addData(1);
         if (round_max_bt > bt_level) stat_bt_level_diff->addData(1);
+
+        // Phase 0 diagnostics: pairwise subsumption / equality among learnts
+        // and selector agreement (bt-min vs lbd-min would pick the same?).
+        const size_t k = round_learnts.size();
+        if (k >= 2) {
+            int subsumed = 0, equal = 0;
+            int min_lbd = round_lbds[0], max_lbd = round_lbds[0];
+            int bt_min_idx = 0, lbd_min_idx = 0;
+            for (size_t i = 0; i < k; i++) {
+                if (round_lbds[i] < min_lbd) min_lbd = round_lbds[i];
+                if (round_lbds[i] > max_lbd) max_lbd = round_lbds[i];
+                if (round_bts[i] < round_bts[bt_min_idx]
+                    || (round_bts[i] == round_bts[bt_min_idx]
+                        && round_learnts[i].size() < round_learnts[bt_min_idx].size()))
+                    bt_min_idx = i;
+                if (round_lbds[i] < round_lbds[lbd_min_idx]
+                    || (round_lbds[i] == round_lbds[lbd_min_idx]
+                        && round_learnts[i].size() < round_learnts[lbd_min_idx].size()))
+                    lbd_min_idx = i;
+            }
+            for (size_t i = 0; i + 1 < k; i++) {
+                for (size_t j = i + 1; j < k; j++) {
+                    const auto& A = round_learnts[i];
+                    const auto& B = round_learnts[j];
+                    bool a_in_b = std::includes(B.begin(), B.end(), A.begin(), A.end());
+                    bool b_in_a = std::includes(A.begin(), A.end(), B.begin(), B.end());
+                    if (a_in_b && b_in_a) equal++;
+                    else if (a_in_b || b_in_a) subsumed++;
+                }
+            }
+            if (subsumed) stat_learnt_subsumed_pairs->addData(subsumed);
+            if (equal) stat_learnt_equal_pairs->addData(equal);
+            if (max_lbd - min_lbd >= 2) stat_lbd_diff_rounds->addData(1);
+            if (bt_min_idx == lbd_min_idx) stat_selection_agree_rounds->addData(1);
+        }
     }
 
     for (const Var& v : v_to_bump) {
@@ -2264,6 +2310,16 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // round, so we can measure whether multiple conflicts ever disagree (and
     // thus whether selecting among them can change the backtrack target).
     if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
+
+    // Diagnostic capture (Phase 0): snapshot every worker's learnt clause
+    // (sorted literals for fast pairwise subsumption later), LBD and bt.
+    {
+        std::vector<Lit> sorted_lits = tmp_learnt;
+        std::sort(sorted_lits.begin(), sorted_lits.end());
+        round_learnts.push_back(std::move(sorted_lits));
+        round_lbds.push_back(tmp_lbd);
+        round_bts.push_back(tmp_btlevel);
+    }
 
     // Keep the single best candidate: lowest backtrack level, then smallest
     // clause. Ties keep whichever candidate was selected first.
