@@ -1218,6 +1218,10 @@ void SATSolver::execAnalyze() {
     int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
     round_max_bt = -1;
+    // mc-bumpall: accumulate VSIDS bumps from every conflict analyzed this
+    // round (not just the selected one). Clear before accumulation.
+    v_to_bump.clear();
+    c_to_bump.clear();
 
     // Analyze all collected conflicts in batches of LEARNERS hardware lanes.
     // bt_level (min) and round_max_bt (max) persist across batches so the single
@@ -2265,16 +2269,20 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // thus whether selecting among them can change the backtrack target).
     if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
 
-    // Keep the single best candidate: lowest backtrack level, then smallest
-    // clause. Ties keep whichever candidate was selected first.
+    // mc-bumpall: always accumulate bumps from every analyzed conflict.
+    // Variables and clauses to bump are unioned (duplicates OK — VSIDS bump
+    // is idempotent enough; each duplicate is a small extra increment).
+    v_to_bump.insert(v_to_bump.end(), tmp_v_to_bump.begin(), tmp_v_to_bump.end());
+    c_to_bump.insert(c_to_bump.end(), tmp_c_to_bump.begin(), tmp_c_to_bump.end());
+
+    // Single clause is still committed (bt-min, size tiebreak); other clauses
+    // discarded. Bumps from non-selected workers persist via the union above.
     if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level
         && tmp_learnt.size() < learnt_clause.size())) {
         bt_level = tmp_btlevel;
         learnt_lbd = tmp_lbd;
         learnt_clause = std::move(tmp_learnt);
         seen = std::move(tmp_seen);
-        c_to_bump = std::move(tmp_c_to_bump);
-        v_to_bump = std::move(tmp_v_to_bump);
     }
     // order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::DEBUG_HEAP, 0));
 }
