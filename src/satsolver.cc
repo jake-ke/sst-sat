@@ -1218,6 +1218,13 @@ void SATSolver::execAnalyze() {
     int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
     round_max_bt = -1;
+    round_learnts_raw.clear();
+    round_learnts_sorted.clear();
+    round_lbds.clear();
+    round_bts.clear();
+    round_seens.clear();
+    round_c_to_bumps.clear();
+    round_v_to_bumps.clear();
 
     // Analyze all collected conflicts in batches of LEARNERS hardware lanes.
     // bt_level (min) and round_max_bt (max) persist across batches so the single
@@ -1269,6 +1276,60 @@ void SATSolver::execAnalyze() {
     // finished all sub-coroutines
     active_workers.clear();
     yield_ptr = parent_yield_ptr;
+
+    // mc-subsume: drop strict subsumees among the k candidates, then bt-min
+    // select from survivors (smallest size tiebreak). Bumps come from the
+    // selected analysis only (single-bump baseline; combine with bumpall in
+    // Phase 2 if both branches advance).
+    const size_t k = round_learnts_sorted.size();
+    if (k == 0) {
+        // No analysis ran (e.g., total_confl == 0); should not happen here.
+    } else {
+        std::vector<bool> kept(k, true);
+        if (k > 1) {
+            for (size_t i = 0; i < k; i++) {
+                if (!kept[i]) continue;
+                for (size_t j = 0; j < k; j++) {
+                    if (i == j || !kept[j]) continue;
+                    // Strict subsumption: round_learnts_sorted[j] ⊆ round_learnts_sorted[i]
+                    // AND |j| < |i|.  (Equal-size subsumes are clause-set
+                    // equality; keep the first by index.)
+                    const auto& A = round_learnts_sorted[i];
+                    const auto& B = round_learnts_sorted[j];
+                    if (B.size() < A.size()
+                        && std::includes(A.begin(), A.end(), B.begin(), B.end())) {
+                        kept[i] = false;
+                        break;
+                    }
+                    if (B.size() == A.size() && j < i
+                        && std::includes(A.begin(), A.end(), B.begin(), B.end())) {
+                        kept[i] = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // bt-min selection (with size tiebreak) over kept candidates.
+        ssize_t winner = -1;
+        for (size_t i = 0; i < k; i++) {
+            if (!kept[i]) continue;
+            if (winner < 0
+                || round_bts[i] < round_bts[winner]
+                || (round_bts[i] == round_bts[winner]
+                    && round_learnts_raw[i].size() < round_learnts_raw[winner].size())) {
+                winner = (ssize_t)i;
+            }
+        }
+        if (winner >= 0) {
+            bt_level = round_bts[winner];
+            learnt_lbd = round_lbds[winner];
+            learnt_clause = std::move(round_learnts_raw[winner]);
+            seen = std::move(round_seens[winner]);
+            c_to_bump = std::move(round_c_to_bumps[winner]);
+            v_to_bump = std::move(round_v_to_bumps[winner]);
+        }
+    }
 
     // Measure the opportunity for multi-conflict learning: how often a round
     // collects >1 conflict, and how often those conflicts disagree on the
@@ -2265,17 +2326,18 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // thus whether selecting among them can change the backtrack target).
     if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
 
-    // Keep the single best candidate: lowest backtrack level, then smallest
-    // clause. Ties keep whichever candidate was selected first.
-    if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level
-        && tmp_learnt.size() < learnt_clause.size())) {
-        bt_level = tmp_btlevel;
-        learnt_lbd = tmp_lbd;
-        learnt_clause = std::move(tmp_learnt);
-        seen = std::move(tmp_seen);
-        c_to_bump = std::move(tmp_c_to_bump);
-        v_to_bump = std::move(tmp_v_to_bump);
-    }
+    // mc-subsume: capture every candidate (clauses + bumps + seen). Selection
+    // is deferred to execAnalyze() after all workers complete so we can drop
+    // strict-subsumees among the k learnt clauses before bt-min selection.
+    std::vector<Lit> sorted_lits = tmp_learnt;
+    std::sort(sorted_lits.begin(), sorted_lits.end());
+    round_learnts_raw.push_back(std::move(tmp_learnt));
+    round_learnts_sorted.push_back(std::move(sorted_lits));
+    round_lbds.push_back(tmp_lbd);
+    round_bts.push_back(tmp_btlevel);
+    round_seens.push_back(std::move(tmp_seen));
+    round_c_to_bumps.push_back(std::move(tmp_c_to_bump));
+    round_v_to_bumps.push_back(std::move(tmp_v_to_bump));
     // order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::DEBUG_HEAP, 0));
 }
 

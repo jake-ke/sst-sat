@@ -49,8 +49,8 @@ public:
     // SST ELI Registrations
     SST_ELI_REGISTER_COMPONENT(
         SATSolver,
-        "satsolver-opt-final",
-        "SATSolver-opt-final",
+        "satsolver-mc-subsume",
+        "SATSolver-mc-subsume",
         SST_ELI_ELEMENT_VERSION(1,0,0),
         "SAT Solver Component",
         COMPONENT_CATEGORY_PROCESSOR
@@ -256,6 +256,16 @@ private:
     std::vector<char> seen;                     // Temporary array for conflict analysis
     std::vector<Cref> c_to_bump;
     std::vector<Var> v_to_bump;
+
+    // mc-subsume: per-round capture so we can drop subsumed candidates
+    // before committing the final learnt clause.
+    std::vector<std::vector<Lit>> round_learnts_raw;   // original (insertion-order) literals per worker
+    std::vector<std::vector<Lit>> round_learnts_sorted; // sorted copies for std::includes
+    std::vector<int> round_lbds;
+    std::vector<int> round_bts;
+    std::vector<std::vector<char>> round_seens;
+    std::vector<std::vector<Cref>> round_c_to_bumps;
+    std::vector<std::vector<Var>> round_v_to_bumps;
 
     // Clause minimization
     int ccmin_mode;                             // Conflict clause minimization mode
