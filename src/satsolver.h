@@ -49,8 +49,8 @@ public:
     // SST ELI Registrations
     SST_ELI_REGISTER_COMPONENT(
         SATSolver,
-        "satsolver-opt-final",
-        "SATSolver-opt-final",
+        "satsolver-mc-adaptive",
+        "SATSolver-mc-adaptive",
         SST_ELI_ELEMENT_VERSION(1,0,0),
         "SAT Solver Component",
         COMPONENT_CATEGORY_PROCESSOR
@@ -79,6 +79,8 @@ public:
         {"enable_speculative", "Enable speculative propagation", "false"},
         {"timeout_cycles", "Maximum solver cycles before timing out (0 = no timeout)", "0"},
         {"max_confl", "Maximum number of conflicts collected per propagation and analyzed (in batches of LEARNERS) per conflict round; -1 = no limit", "8"},
+        {"adaptive_warmup_confl", "Cumulative conflicts before multi-confl is enabled (mc-adaptive). Below this, effective max_confl = 1.", "1000"},
+        {"adaptive_min_trail", "Minimum trail size before multi-confl is enabled (mc-adaptive). Below this, effective max_confl = 1.", "64"},
         {"profile_2wl", "Enable 2WL clause-access reduction profiling (host-side; counts only original clauses)", "false"},
         {"profile_prop_timing", "Enable per-propagation timing breakdown (cycles_read_headptr/blocks/clauses/insert/polling and spec/normal metrics). Auto-enabled when enable_speculative=true.", "false"},
         {"trace_file", "Path to binary memory-access trace. Empty disables tracing.", ""},
@@ -305,6 +307,17 @@ private:
     double learntsize_inc;
     double max_learnts;
     int max_confl;                              // Max conflicts collected/analyzed per round (-1 = no limit)
+    int adaptive_warmup_confl;                  // mc-adaptive: # cumulative conflicts before multi-confl is enabled
+    int adaptive_min_trail;                     // mc-adaptive: min trail size before multi-confl is enabled
+
+    // Adaptive predicate: when cumulative conflicts are below warmup or
+    // trail is shallow, fall back to k=1 (collect a single conflict).
+    int effMaxConfl() {
+        if (max_confl < 0) return max_confl;  // no limit configured
+        if ((int)getStatCount(stat_conflicts) < adaptive_warmup_confl) return 1;
+        if ((int)trail.size() < adaptive_min_trail) return 1;
+        return max_confl;
+    }
     int learnt_adjust_start_confl;
     double learnt_adjust_inc;
     double learnt_adjust_confl;

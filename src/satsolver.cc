@@ -182,7 +182,11 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     enable_speculative = params.find<bool>("enable_speculative", false);
     timeout_cycles = params.find<uint64_t>("timeout_cycles", 0);
     max_confl = params.find<int>("max_confl", 8);
+    adaptive_warmup_confl = params.find<int>("adaptive_warmup_confl", 1000);
+    adaptive_min_trail = params.find<int>("adaptive_min_trail", 64);
     output.output("MAX_CONFL           : %d\n", max_confl);
+    output.output("ADAPT_WARMUP_CONFL  : %d\n", adaptive_warmup_confl);
+    output.output("ADAPT_MIN_TRAIL     : %d\n", adaptive_min_trail);
     profile_2wl = params.find<bool>("profile_2wl", false);
     profile_prop_timing = params.find<bool>("profile_prop_timing", false);
     // Speculative profiling depends on the same per-literal cycle data, so
@@ -1699,8 +1703,8 @@ void SATSolver::unitPropagate() {
                     if (*coroutines[j])
                         lit_done = false;
 
-                if (lit_done && qhead < trail.size() 
-                    && !(max_confl >= 0 && (int)conflicts.size() >= max_confl)) {
+                if (lit_done && qhead < trail.size()
+                    && !(effMaxConfl() >= 0 && (int)conflicts.size() >= effMaxConfl())) {
                     // printf("Prop %lu, Cycle %lu\n", getStatCount(stat_propagations), getCurrentSimCycle()/1000);
                     // track max literal parallelism
                     if (qhead == batch_end) {
@@ -1770,8 +1774,8 @@ void SATSolver::unitPropagate() {
             cycles_polling += lit_polling[last_worker];
         }
 
-        // Stop if we've reached max_confl conflicts (unless max_confl is -1, meaning no limit)
-        if (max_confl >= 0 && (int)conflicts.size() >= max_confl) {
+        // Stop if we've reached effMaxConfl() conflicts (unless effMaxConfl() is -1)
+        if (effMaxConfl() >= 0 && (int)conflicts.size() >= effMaxConfl()) {
             output.verbose(CALL_INFO, 3, 0, "PROPAGATE: max_confl reached, stop\n");
             qhead = trail.size();
         }
@@ -1975,7 +1979,7 @@ void SATSolver::propagateLiteral(
             else watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block, wmd);
         }
 
-        if (max_confl >= 0 && (int)conflicts.size() >= max_confl) break;
+        if (effMaxConfl() >= 0 && (int)conflicts.size() >= effMaxConfl()) break;
 
         // the current block is deleted if it has no valid nodes left
         if (curr_block.countValidNodes() != 0 && !do_prewatch) {
@@ -2137,7 +2141,7 @@ void SATSolver::propagateWatchers(
     if (var_assigned[var(first)] && value(first) == false) {
         // Conflict detected
         if (std::find(conflicts.begin(), conflicts.end(), clause_addr) == conflicts.end()
-            && (max_confl < 0 || (int)conflicts.size() < max_confl)) {
+            && (effMaxConfl() < 0 || (int)conflicts.size() < effMaxConfl())) {
             conflicts.push_back(clause_addr);
             if (tracer_) tracer_->emitConflict((int)clause_addr);
             output.verbose(CALL_INFO, 3, 0,
