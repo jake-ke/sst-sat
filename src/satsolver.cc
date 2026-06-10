@@ -1218,6 +1218,13 @@ void SATSolver::execAnalyze() {
     int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
     round_max_bt = -1;
+    // mc-multicommit: capture every worker's learnt clause; winner_idx is the
+    // bt-min selection, used both for backjump (winner is asserting) and to
+    // skip the winner when adding extras in execBacktrack().
+    round_learnts_raw.clear();
+    round_bts.clear();
+    round_lbds.clear();
+    winner_idx = -1;
 
     // Analyze all collected conflicts in batches of LEARNERS hardware lanes.
     // bt_level (min) and round_max_bt (max) persist across batches so the single
@@ -1432,6 +1439,21 @@ void SATSolver::execBacktrack() {
         if (tracer_) tracer_->emitLearn(learnt_lbd, (int)learnt_clause.size(), bt_level, (int)addr);
         attachClause(addr, new_clause);
         trailEnqueue(learnt_clause[0], addr);
+        stat_learned->addData(1);
+    }
+
+    // mc-multicommit: also add every other worker's learnt clause to the DB.
+    // These are not asserting at the backjump level (their UIP was at a deeper
+    // level), so they just sit as ordinary learnts that may propagate later.
+    // Skip unit clauses (size < 2) to avoid edge cases — unit learning under
+    // multi-confl is rare and asymmetric with backjump targets.
+    for (size_t i = 0; i < round_learnts_raw.size(); i++) {
+        if ((int)i == winner_idx) continue;
+        const auto& extra = round_learnts_raw[i];
+        if (extra.size() < 2) continue;
+        Clause extra_clause(extra, cla_inc);
+        Cref extra_addr = clauses.addClause(extra_clause);
+        attachClause(extra_addr, extra_clause);
         stat_learned->addData(1);
     }
 
@@ -2265,12 +2287,20 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // thus whether selecting among them can change the backtrack target).
     if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
 
-    // Keep the single best candidate: lowest backtrack level, then smallest
-    // clause. Ties keep whichever candidate was selected first.
+    // mc-multicommit: snapshot every worker's learnt clause (for adding to DB
+    // post-backjump) before the existing bt-min selection decides which one
+    // becomes the asserting clause.
+    int this_idx = (int)round_learnts_raw.size();
+    round_learnts_raw.push_back(tmp_learnt);
+    round_bts.push_back(tmp_btlevel);
+    round_lbds.push_back(tmp_lbd);
+
+    // bt-min selection with size tiebreak (unchanged from existing heuristic).
     if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level
         && tmp_learnt.size() < learnt_clause.size())) {
         bt_level = tmp_btlevel;
         learnt_lbd = tmp_lbd;
+        winner_idx = this_idx;
         learnt_clause = std::move(tmp_learnt);
         seen = std::move(tmp_seen);
         c_to_bump = std::move(tmp_c_to_bump);
