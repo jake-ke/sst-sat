@@ -435,6 +435,10 @@ solver_stats = [
     "bt_level",
     "multi_confl_rounds",
     "bt_level_diff",
+    "learnt_subsumed_pairs",
+    "learnt_equal_pairs",
+    "lbd_diff_rounds",
+    "selection_agree_rounds",
 ]
 if args.enable_speculative:
     solver_stats += ["spec_started", "spec_finished"]
