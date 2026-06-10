@@ -182,7 +182,11 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     enable_speculative = params.find<bool>("enable_speculative", false);
     timeout_cycles = params.find<uint64_t>("timeout_cycles", 0);
     max_confl = params.find<int>("max_confl", 8);
+    adaptive_warmup_confl = params.find<int>("adaptive_warmup_confl", 2000);
+    adaptive_min_trail = params.find<int>("adaptive_min_trail", 64);
     output.output("MAX_CONFL           : %d\n", max_confl);
+    output.output("ADAPT_WARMUP_CONFL  : %d\n", adaptive_warmup_confl);
+    output.output("ADAPT_MIN_TRAIL     : %d\n", adaptive_min_trail);
     profile_2wl = params.find<bool>("profile_2wl", false);
     profile_prop_timing = params.find<bool>("profile_prop_timing", false);
     // Speculative profiling depends on the same per-literal cycle data, so
@@ -1218,6 +1222,13 @@ void SATSolver::execAnalyze() {
     int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
     round_max_bt = -1;
+    // mc-bma: bumpall + multi-commit (under the adaptive gate).
+    v_to_bump.clear();
+    c_to_bump.clear();
+    round_learnts_raw.clear();
+    round_bts.clear();
+    round_lbds.clear();
+    winner_idx = -1;
 
     // Analyze all collected conflicts in batches of LEARNERS hardware lanes.
     // bt_level (min) and round_max_bt (max) persist across batches so the single
@@ -1432,6 +1443,18 @@ void SATSolver::execBacktrack() {
         if (tracer_) tracer_->emitLearn(learnt_lbd, (int)learnt_clause.size(), bt_level, (int)addr);
         attachClause(addr, new_clause);
         trailEnqueue(learnt_clause[0], addr);
+        stat_learned->addData(1);
+    }
+
+    // mc-bma: multi-commit add of non-winner clauses (no-op when k=1 because
+    // the gate is on — only one clause in round_learnts_raw).
+    for (size_t i = 0; i < round_learnts_raw.size(); i++) {
+        if ((int)i == winner_idx) continue;
+        const auto& extra = round_learnts_raw[i];
+        if (extra.size() < 2) continue;
+        Clause extra_clause(extra, cla_inc);
+        Cref extra_addr = clauses.addClause(extra_clause);
+        attachClause(extra_addr, extra_clause);
         stat_learned->addData(1);
     }
 
@@ -1700,7 +1723,7 @@ void SATSolver::unitPropagate() {
                         lit_done = false;
 
                 if (lit_done && qhead < trail.size() 
-                    && !(max_confl >= 0 && (int)conflicts.size() >= max_confl)) {
+                    && !(effMaxConfl() >= 0 && (int)conflicts.size() >= effMaxConfl())) {
                     // printf("Prop %lu, Cycle %lu\n", getStatCount(stat_propagations), getCurrentSimCycle()/1000);
                     // track max literal parallelism
                     if (qhead == batch_end) {
@@ -1770,8 +1793,8 @@ void SATSolver::unitPropagate() {
             cycles_polling += lit_polling[last_worker];
         }
 
-        // Stop if we've reached max_confl conflicts (unless max_confl is -1, meaning no limit)
-        if (max_confl >= 0 && (int)conflicts.size() >= max_confl) {
+        // Stop if we've reached effMaxConfl() conflicts.
+        if (effMaxConfl() >= 0 && (int)conflicts.size() >= effMaxConfl()) {
             output.verbose(CALL_INFO, 3, 0, "PROPAGATE: max_confl reached, stop\n");
             qhead = trail.size();
         }
@@ -1975,7 +1998,7 @@ void SATSolver::propagateLiteral(
             else watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block, wmd);
         }
 
-        if (max_confl >= 0 && (int)conflicts.size() >= max_confl) break;
+        if (effMaxConfl() >= 0 && (int)conflicts.size() >= effMaxConfl()) break;
 
         // the current block is deleted if it has no valid nodes left
         if (curr_block.countValidNodes() != 0 && !do_prewatch) {
@@ -2137,7 +2160,7 @@ void SATSolver::propagateWatchers(
     if (var_assigned[var(first)] && value(first) == false) {
         // Conflict detected
         if (std::find(conflicts.begin(), conflicts.end(), clause_addr) == conflicts.end()
-            && (max_confl < 0 || (int)conflicts.size() < max_confl)) {
+            && (effMaxConfl() < 0 || (int)conflicts.size() < effMaxConfl())) {
             conflicts.push_back(clause_addr);
             if (tracer_) tracer_->emitConflict((int)clause_addr);
             output.verbose(CALL_INFO, 3, 0,
@@ -2265,16 +2288,23 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // thus whether selecting among them can change the backtrack target).
     if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
 
-    // Keep the single best candidate: lowest backtrack level, then smallest
-    // clause. Ties keep whichever candidate was selected first.
+    // mc-bma: bumpall + multi-commit (gated by effMaxConfl elsewhere).
+    v_to_bump.insert(v_to_bump.end(), tmp_v_to_bump.begin(), tmp_v_to_bump.end());
+    c_to_bump.insert(c_to_bump.end(), tmp_c_to_bump.begin(), tmp_c_to_bump.end());
+
+    int this_idx = (int)round_learnts_raw.size();
+    round_learnts_raw.push_back(tmp_learnt);
+    round_bts.push_back(tmp_btlevel);
+    round_lbds.push_back(tmp_lbd);
+
+    // bt-min selection (unchanged).
     if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level
         && tmp_learnt.size() < learnt_clause.size())) {
         bt_level = tmp_btlevel;
         learnt_lbd = tmp_lbd;
+        winner_idx = this_idx;
         learnt_clause = std::move(tmp_learnt);
         seen = std::move(tmp_seen);
-        c_to_bump = std::move(tmp_c_to_bump);
-        v_to_bump = std::move(tmp_v_to_bump);
     }
     // order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::DEBUG_HEAP, 0));
 }
