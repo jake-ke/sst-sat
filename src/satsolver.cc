@@ -1217,7 +1217,15 @@ void SATSolver::execAnalyze() {
     coro_t::push_type* parent_yield_ptr = yield_ptr;
     int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
+    learnt_lbd = std::numeric_limits<int>::max();  // mc-bml: sentinel for lex tiebreak
     round_max_bt = -1;
+    // mc-bml: bumpall + multi-commit + lex selection (bt, lbd, len).
+    v_to_bump.clear();
+    c_to_bump.clear();
+    round_learnts_raw.clear();
+    round_bts.clear();
+    round_lbds.clear();
+    winner_idx = -1;
 
     // Analyze all collected conflicts in batches of LEARNERS hardware lanes.
     // bt_level (min) and round_max_bt (max) persist across batches so the single
@@ -1432,6 +1440,17 @@ void SATSolver::execBacktrack() {
         if (tracer_) tracer_->emitLearn(learnt_lbd, (int)learnt_clause.size(), bt_level, (int)addr);
         attachClause(addr, new_clause);
         trailEnqueue(learnt_clause[0], addr);
+        stat_learned->addData(1);
+    }
+
+    // mc-bml: multi-commit add of non-winner clauses.
+    for (size_t i = 0; i < round_learnts_raw.size(); i++) {
+        if ((int)i == winner_idx) continue;
+        const auto& extra = round_learnts_raw[i];
+        if (extra.size() < 2) continue;
+        Clause extra_clause(extra, cla_inc);
+        Cref extra_addr = clauses.addClause(extra_clause);
+        attachClause(extra_addr, extra_clause);
         stat_learned->addData(1);
     }
 
@@ -2265,16 +2284,26 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // thus whether selecting among them can change the backtrack target).
     if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
 
-    // Keep the single best candidate: lowest backtrack level, then smallest
-    // clause. Ties keep whichever candidate was selected first.
-    if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level
-        && tmp_learnt.size() < learnt_clause.size())) {
+    // mc-bml: bumpall + multi-commit + lex selection (bt, lbd, len).
+    v_to_bump.insert(v_to_bump.end(), tmp_v_to_bump.begin(), tmp_v_to_bump.end());
+    c_to_bump.insert(c_to_bump.end(), tmp_c_to_bump.begin(), tmp_c_to_bump.end());
+
+    int this_idx = (int)round_learnts_raw.size();
+    round_learnts_raw.push_back(tmp_learnt);
+    round_bts.push_back(tmp_btlevel);
+    round_lbds.push_back(tmp_lbd);
+
+    // Lex selection: min bt, then min lbd, then min length.
+    bool better = (tmp_btlevel < bt_level)
+        || (tmp_btlevel == bt_level && tmp_lbd < learnt_lbd)
+        || (tmp_btlevel == bt_level && tmp_lbd == learnt_lbd
+            && tmp_learnt.size() < learnt_clause.size());
+    if (better) {
         bt_level = tmp_btlevel;
         learnt_lbd = tmp_lbd;
+        winner_idx = this_idx;
         learnt_clause = std::move(tmp_learnt);
         seen = std::move(tmp_seen);
-        c_to_bump = std::move(tmp_c_to_bump);
-        v_to_bump = std::move(tmp_v_to_bump);
     }
     // order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::DEBUG_HEAP, 0));
 }
