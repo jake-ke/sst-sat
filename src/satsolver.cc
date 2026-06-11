@@ -1222,7 +1222,7 @@ void SATSolver::execAnalyze() {
     int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
     round_max_bt = -1;
-    // mc-bma: bumpall + multi-commit (under the adaptive gate).
+    // mc-ba: bumpall + multi-commit (under the adaptive gate).
     v_to_bump.clear();
     c_to_bump.clear();
     round_learnts_raw.clear();
@@ -1446,17 +1446,8 @@ void SATSolver::execBacktrack() {
         stat_learned->addData(1);
     }
 
-    // mc-bma: multi-commit add of non-winner clauses (no-op when k=1 because
-    // the gate is on — only one clause in round_learnts_raw).
-    for (size_t i = 0; i < round_learnts_raw.size(); i++) {
-        if ((int)i == winner_idx) continue;
-        const auto& extra = round_learnts_raw[i];
-        if (extra.size() < 2) continue;
-        Clause extra_clause(extra, cla_inc);
-        Cref extra_addr = clauses.addClause(extra_clause);
-        attachClause(extra_addr, extra_clause);
-        stat_learned->addData(1);
-    }
+    // mc-ba: no multi-commit — only the winner clause is committed; bumpall
+    // and the warmup gate are kept from mc-bma.
 
     // terminate speculative propagation if conflict after backtracking
     if (spec_literal != lit_Undef
@@ -2288,7 +2279,7 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // thus whether selecting among them can change the backtrack target).
     if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
 
-    // mc-bma: bumpall + multi-commit (gated by effMaxConfl elsewhere).
+    // mc-ba: bumpall + multi-commit (gated by effMaxConfl elsewhere).
     v_to_bump.insert(v_to_bump.end(), tmp_v_to_bump.begin(), tmp_v_to_bump.end());
     c_to_bump.insert(c_to_bump.end(), tmp_c_to_bump.begin(), tmp_c_to_bump.end());
 

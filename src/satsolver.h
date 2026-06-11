@@ -49,8 +49,8 @@ public:
     // SST ELI Registrations
     SST_ELI_REGISTER_COMPONENT(
         SATSolver,
-        "satsolver-mc-bma",
-        "SATSolver-mc-bma",
+        "satsolver-mc-ba",
+        "SATSolver-mc-ba",
         SST_ELI_ELEMENT_VERSION(1,0,0),
         "SAT Solver Component",
         COMPONENT_CATEGORY_PROCESSOR
@@ -79,8 +79,8 @@ public:
         {"enable_speculative", "Enable speculative propagation", "false"},
         {"timeout_cycles", "Maximum solver cycles before timing out (0 = no timeout)", "0"},
         {"max_confl", "Maximum number of conflicts collected per propagation and analyzed (in batches of LEARNERS) per conflict round; -1 = no limit", "8"},
-        {"adaptive_warmup_confl", "Cumulative conflicts before multi-confl is enabled (mc-bma). Below this, effective max_confl = 1.", "2000"},
-        {"adaptive_min_trail", "Minimum trail size before multi-confl is enabled (mc-bma). Below this, effective max_confl = 1.", "64"},
+        {"adaptive_warmup_confl", "Cumulative conflicts before multi-confl is enabled (mc-ba). Below this, effective max_confl = 1.", "2000"},
+        {"adaptive_min_trail", "Minimum trail size before multi-confl is enabled (mc-ba). Below this, effective max_confl = 1.", "64"},
         {"profile_2wl", "Enable 2WL clause-access reduction profiling (host-side; counts only original clauses)", "false"},
         {"profile_prop_timing", "Enable per-propagation timing breakdown (cycles_read_headptr/blocks/clauses/insert/polling and spec/normal metrics). Auto-enabled when enable_speculative=true.", "false"},
         {"trace_file", "Path to binary memory-access trace. Empty disables tracing.", ""},
@@ -256,7 +256,7 @@ private:
     int learnt_lbd;                             // LBD of learnt clause from conflict analysis
     int round_max_bt;                           // Max backtrack level among conflicts analyzed this round (-1 = none yet)
 
-    // mc-bma: bumpall + multi-commit + adaptive gate.
+    // mc-ba: bumpall + multi-commit + adaptive gate.
     std::vector<std::vector<Lit>> round_learnts_raw;
     std::vector<int> round_bts;
     std::vector<int> round_lbds;
@@ -313,8 +313,8 @@ private:
     double learntsize_inc;
     double max_learnts;
     int max_confl;                              // Max conflicts collected/analyzed per round (-1 = no limit)
-    int adaptive_warmup_confl;                  // mc-bma: # cumulative conflicts before multi-confl is enabled
-    int adaptive_min_trail;                     // mc-bma: min trail size before multi-confl is enabled
+    int adaptive_warmup_confl;                  // mc-ba: # cumulative conflicts before multi-confl is enabled
+    int adaptive_min_trail;                     // mc-ba: min trail size before multi-confl is enabled
 
     // Gate: when cumulative conflicts are below warmup or trail is shallow,
     // fall back to k=1. Above thresholds, full multi-confl + bumpall + multi-commit.
