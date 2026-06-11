@@ -1218,9 +1218,11 @@ void SATSolver::execAnalyze() {
     int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
     round_max_bt = -1;
-    // mc-bm: bumpall (union v_to_bump/c_to_bump from all workers) + multi-commit.
+    // mc-gbm: bumpall (union v_to_bump/c_to_bump from all workers) + multi-commit.
     v_to_bump.clear();
     c_to_bump.clear();
+    v_to_bump_sel.clear();
+    c_to_bump_sel.clear();
     round_learnts_raw.clear();
     round_bts.clear();
     round_lbds.clear();
@@ -1286,13 +1288,18 @@ void SATSolver::execAnalyze() {
         if (round_max_bt > bt_level) stat_bt_level_diff->addData(1);
     }
 
-    for (const Var& v : v_to_bump) {
+    // mc-gbm: bt-gated bumpall — union bumps only on disagree-rounds, the
+    // winner's own bumps otherwise (identical to SATBlast in agree-rounds).
+    const bool bump_all = (round_max_bt > bt_level);
+    const std::vector<Var>& vb = bump_all ? v_to_bump : v_to_bump_sel;
+    const std::vector<Cref>& cb = bump_all ? c_to_bump : c_to_bump_sel;
+    for (const Var& v : vb) {
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::BUMP, v));
 #ifdef USE_CLASSIC_HEAP
         heap_resp_cnt++;
 #endif
     }
-    for (const Cref& c : c_to_bump) {
+    for (const Cref& c : cb) {
         const Clause& cdata = clauses.readClause(c);
         claBumpActivity(c, cdata.act());
     }
@@ -1442,15 +1449,19 @@ void SATSolver::execBacktrack() {
         stat_learned->addData(1);
     }
 
-    // mc-bm: also add every other worker's learnt clause to the DB (multi-commit).
-    for (size_t i = 0; i < round_learnts_raw.size(); i++) {
-        if ((int)i == winner_idx) continue;
-        const auto& extra = round_learnts_raw[i];
-        if (extra.size() < 2) continue;
-        Clause extra_clause(extra, cla_inc);
-        Cref extra_addr = clauses.addClause(extra_clause);
-        attachClause(extra_addr, extra_clause);
-        stat_learned->addData(1);
+    // mc-gbm: bt-gated multi-commit — extras added only when the round's
+    // conflicts disagreed on backtrack level; agree-rounds stay byte-identical
+    // to SATBlast (trajectory/jackpot preservation).
+    if (round_max_bt > bt_level) {
+        for (size_t i = 0; i < round_learnts_raw.size(); i++) {
+            if ((int)i == winner_idx) continue;
+            const auto& extra = round_learnts_raw[i];
+            if (extra.size() < 2) continue;
+            Clause extra_clause(extra, cla_inc);
+            Cref extra_addr = clauses.addClause(extra_clause);
+            attachClause(extra_addr, extra_clause);
+            stat_learned->addData(1);
+        }
     }
 
     // terminate speculative propagation if conflict after backtracking
@@ -2283,7 +2294,7 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // thus whether selecting among them can change the backtrack target).
     if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
 
-    // mc-bm: bumpall + multi-commit. Bumps accumulate from every worker;
+    // mc-gbm: bumpall + multi-commit. Bumps accumulate from every worker;
     // round_learnts_raw captures every clause for post-backjump add.
     v_to_bump.insert(v_to_bump.end(), tmp_v_to_bump.begin(), tmp_v_to_bump.end());
     c_to_bump.insert(c_to_bump.end(), tmp_c_to_bump.begin(), tmp_c_to_bump.end());
@@ -2301,6 +2312,9 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
         winner_idx = this_idx;
         learnt_clause = std::move(tmp_learnt);
         seen = std::move(tmp_seen);
+        // mc-gbm: remember the winner's bumps (union above already copied them)
+        v_to_bump_sel = std::move(tmp_v_to_bump);
+        c_to_bump_sel = std::move(tmp_c_to_bump);
     }
     // order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::DEBUG_HEAP, 0));
 }

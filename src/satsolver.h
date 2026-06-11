@@ -49,8 +49,8 @@ public:
     // SST ELI Registrations
     SST_ELI_REGISTER_COMPONENT(
         SATSolver,
-        "satsolver-mc-bm",
-        "SATSolver-mc-bm",
+        "satsolver-mc-gbm",
+        "SATSolver-mc-gbm",
         SST_ELI_ELEMENT_VERSION(1,0,0),
         "SAT Solver Component",
         COMPONENT_CATEGORY_PROCESSOR
@@ -254,7 +254,7 @@ private:
     int learnt_lbd;                             // LBD of learnt clause from conflict analysis
     int round_max_bt;                           // Max backtrack level among conflicts analyzed this round (-1 = none yet)
 
-    // mc-bm: bumpall + multi-commit + bt-min selection.
+    // mc-gbm: bumpall + multi-commit + bt-min selection.
     std::vector<std::vector<Lit>> round_learnts_raw;
     std::vector<int> round_bts;
     std::vector<int> round_lbds;
@@ -262,6 +262,9 @@ private:
     std::vector<char> seen;                     // Temporary array for conflict analysis
     std::vector<Cref> c_to_bump;
     std::vector<Var> v_to_bump;
+    // mc-gbm: winner-only bumps, applied when the round's bt-levels all agree
+    std::vector<Cref> c_to_bump_sel;
+    std::vector<Var> v_to_bump_sel;
 
     // Clause minimization
     int ccmin_mode;                             // Conflict clause minimization mode
