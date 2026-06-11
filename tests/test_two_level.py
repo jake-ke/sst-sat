@@ -257,6 +257,9 @@ params = {
     "profile_prop_timing": str(args.profile_prop_timing),
     "trace_file": args.trace_file,
     "trace_buffer_bytes": str(args.trace_buffer_bytes),
+    # mc-warmup: warmup-only gate — disable the min-trail condition so the
+    # solver is identical to SATBlast after adaptive_warmup_confl conflicts
+    "adaptive_min_trail": "0",
 }
 if args.decision_path:
     params["decision_file"] = args.decision_path
