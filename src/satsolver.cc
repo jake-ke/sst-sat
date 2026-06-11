@@ -1218,10 +1218,12 @@ void SATSolver::execAnalyze() {
     int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
     round_max_bt = -1;
-    // mc-bumpall: accumulate VSIDS bumps from every conflict analyzed this
+    // mc-gba: accumulate VSIDS bumps from every conflict analyzed this
     // round (not just the selected one). Clear before accumulation.
     v_to_bump.clear();
     c_to_bump.clear();
+    v_to_bump_sel.clear();
+    c_to_bump_sel.clear();
 
     // Analyze all collected conflicts in batches of LEARNERS hardware lanes.
     // bt_level (min) and round_max_bt (max) persist across batches so the single
@@ -1283,13 +1285,20 @@ void SATSolver::execAnalyze() {
         if (round_max_bt > bt_level) stat_bt_level_diff->addData(1);
     }
 
-    for (const Var& v : v_to_bump) {
+    // mc-gba: bt-gated bumpall. The cross-worker bump union is applied ONLY
+    // when the round's conflicts disagreed on backtrack level; in agree-rounds
+    // only the winner's bumps are applied, keeping the solver byte-identical
+    // to SATBlast there (trajectory/jackpot preservation).
+    const bool bump_all = (round_max_bt > bt_level);
+    const std::vector<Var>& vb = bump_all ? v_to_bump : v_to_bump_sel;
+    const std::vector<Cref>& cb = bump_all ? c_to_bump : c_to_bump_sel;
+    for (const Var& v : vb) {
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::BUMP, v));
 #ifdef USE_CLASSIC_HEAP
         heap_resp_cnt++;
 #endif
     }
-    for (const Cref& c : c_to_bump) {
+    for (const Cref& c : cb) {
         const Clause& cdata = clauses.readClause(c);
         claBumpActivity(c, cdata.act());
     }
@@ -2269,7 +2278,7 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // thus whether selecting among them can change the backtrack target).
     if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
 
-    // mc-bumpall: always accumulate bumps from every analyzed conflict.
+    // mc-gba: always accumulate bumps from every analyzed conflict.
     // Variables and clauses to bump are unioned (duplicates OK — VSIDS bump
     // is idempotent enough; each duplicate is a small extra increment).
     v_to_bump.insert(v_to_bump.end(), tmp_v_to_bump.begin(), tmp_v_to_bump.end());
@@ -2283,6 +2292,9 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
         learnt_lbd = tmp_lbd;
         learnt_clause = std::move(tmp_learnt);
         seen = std::move(tmp_seen);
+        // mc-gba: remember the winner's bumps (union above already copied them)
+        v_to_bump_sel = std::move(tmp_v_to_bump);
+        c_to_bump_sel = std::move(tmp_c_to_bump);
     }
     // order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::DEBUG_HEAP, 0));
 }

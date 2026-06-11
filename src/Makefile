@@ -32,7 +32,7 @@ endif
 # Source files
 SOURCES = memory_allocator.cc cache_profiler.cc async_base.cc async_heap.cc async_watches.cc async_clauses.cc async_activity.cc async_var_activity.cc satsolver.cc directedprefetch.cc pipelined_heap.cc pipelined_heap_test.cc trace_writer.cc
 OBJECTS = $(SOURCES:%.cc=$(BUILD_DIR)/%.o)
-TARGET = $(BUILD_DIR)/libsatsolver-mc-bumpall.so
+TARGET = $(BUILD_DIR)/libsatsolver-mc-gba.so
 
 # Build library
 all: $(TARGET)
@@ -48,9 +48,9 @@ $(BUILD_DIR)/%.o: %.cc | $(BUILD_DIR)
 
 # Install
 install: $(TARGET)
-	sst-register satsolver-mc-bumpall satsolver-mc-bumpall_LIBDIR=$(abspath $(BUILD_DIR))
-	sst-register SST_ELEMENT_SOURCE satsolver-mc-bumpall=$(CURDIR)
-	sst-register SST_ELEMENT_TESTS satsolver-mc-bumpall=$(abspath ../tests)
+	sst-register satsolver-mc-gba satsolver-mc-gba_LIBDIR=$(abspath $(BUILD_DIR))
+	sst-register SST_ELEMENT_SOURCE satsolver-mc-gba=$(CURDIR)
+	sst-register SST_ELEMENT_TESTS satsolver-mc-gba=$(abspath ../tests)
 
 # Clean
 clean:

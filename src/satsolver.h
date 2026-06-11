@@ -49,8 +49,8 @@ public:
     // SST ELI Registrations
     SST_ELI_REGISTER_COMPONENT(
         SATSolver,
-        "satsolver-mc-bumpall",
-        "SATSolver-mc-bumpall",
+        "satsolver-mc-gba",
+        "SATSolver-mc-gba",
         SST_ELI_ELEMENT_VERSION(1,0,0),
         "SAT Solver Component",
         COMPONENT_CATEGORY_PROCESSOR
@@ -256,6 +256,9 @@ private:
     std::vector<char> seen;                     // Temporary array for conflict analysis
     std::vector<Cref> c_to_bump;
     std::vector<Var> v_to_bump;
+    // mc-gba: winner-only bumps, applied when the round's bt-levels all agree
+    std::vector<Cref> c_to_bump_sel;
+    std::vector<Var> v_to_bump_sel;
 
     // Clause minimization
     int ccmin_mode;                             // Conflict clause minimization mode
