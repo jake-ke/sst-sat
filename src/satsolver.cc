@@ -1218,7 +1218,7 @@ void SATSolver::execAnalyze() {
     int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
     round_max_bt = -1;
-    // mc-gmc: capture every worker's learnt clause; winner_idx is the
+    // mc-gmc0: capture every worker's learnt clause; winner_idx is the
     // bt-min selection, used both for backjump (winner is asserting) and to
     // skip the winner when adding extras in execBacktrack().
     round_learnts_raw.clear();
@@ -1442,16 +1442,19 @@ void SATSolver::execBacktrack() {
         stat_learned->addData(1);
     }
 
-    // mc-gmc: bt-gated multi-commit. Extras are added ONLY when the round's
+    // mc-gmc0: bt-gated multi-commit. Extras are added ONLY when the round's
     // conflicts disagreed on backtrack level (round_max_bt > bt_level, ~9% of
     // rounds). In agree-rounds the solver is byte-identical to SATBlast, so
     // its trajectory — including the jackpot instances — is preserved.
+    // mc-gmc0: extras enter with ZERO activity — evict-first. Unused extras
+    // die in the next reduceDB; useful ones earn their keep via conflict
+    // participation bumps. Targets the measured DB-pressure harm channel.
     if (round_max_bt > bt_level) {
         for (size_t i = 0; i < round_learnts_raw.size(); i++) {
             if ((int)i == winner_idx) continue;
             const auto& extra = round_learnts_raw[i];
             if (extra.size() < 2) continue;
-            Clause extra_clause(extra, cla_inc);
+            Clause extra_clause(extra, 0.0f);
             Cref extra_addr = clauses.addClause(extra_clause);
             attachClause(extra_addr, extra_clause);
             stat_learned->addData(1);
@@ -2288,7 +2291,7 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // thus whether selecting among them can change the backtrack target).
     if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
 
-    // mc-gmc: snapshot every worker's learnt clause (for adding to DB
+    // mc-gmc0: snapshot every worker's learnt clause (for adding to DB
     // post-backjump) before the existing bt-min selection decides which one
     // becomes the asserting clause.
     int this_idx = (int)round_learnts_raw.size();
