@@ -49,8 +49,8 @@ public:
     // SST ELI Registrations
     SST_ELI_REGISTER_COMPONENT(
         SATSolver,
-        "satsolver-mc-gmc1",
-        "SATSolver-mc-gmc1",
+        "satsolver-mc-gmc1l",
+        "SATSolver-mc-gmc1l",
         SST_ELI_ELEMENT_VERSION(1,0,0),
         "SAT Solver Component",
         COMPONENT_CATEGORY_PROCESSOR
