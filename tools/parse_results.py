@@ -70,10 +70,21 @@ def write_csv_report(results, output_file, *, par2_score_seconds=None, solved_co
         'watcher_blocks_visited_gt3_pct',
     ]
 
+    # Propagation synchronization-sizing stats (from the SST stats CSV):
+    # conflict episode counts + per-lock occupancy summaries (high-water mark,
+    # mean) + blocked-worker busy fraction.
+    sync_fields = [
+        'clause_conflicts', 'wl_insert_conflicts', 'wl_process_conflicts',
+        'clause_lock_occ_hwm', 'clause_lock_occ_mean',
+        'busy_occ_hwm', 'busy_occ_mean',
+        'wl_q_occ_hwm', 'wl_q_occ_mean',
+        'blocked_workers_hwm', 'blocked_workers_mean', 'blocked_workers_busy_frac',
+    ]
+
     # Dynamic propagation detail fields (union across results)
     prop_fields = sorted({k for r in results for k in r.keys() if k.startswith('prop_')})
 
-    fieldnames = base_fields + extra_fixed + wbv_fields + prop_fields
+    fieldnames = base_fields + extra_fixed + wbv_fields + sync_fields + prop_fields
 
     with open(output_file, 'w', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -261,7 +272,12 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600, du
         'propagate_cycles', 'analyze_cycles', 'minimize_cycles', 'backtrack_cycles',
         'decision_cycles', 'reduce_db_cycles', 'heap_insert_cycles', 'heap_bump_cycles', 'restart_cycles', 'total_counted_cycles',
         'prefetches_issued', 'prefetches_used', 'prefetches_unused', 'prefetch_accuracy',
-        'l1_prefetch_requests', 'l1_prefetch_drops'
+        'l1_prefetch_requests', 'l1_prefetch_drops',
+        # Synchronization-sizing stats (HWMs are mean-of-max across seeds)
+        'clause_conflicts', 'wl_insert_conflicts', 'wl_process_conflicts',
+        'clause_lock_occ_hwm', 'clause_lock_occ_mean',
+        'busy_occ_hwm', 'busy_occ_mean', 'wl_q_occ_hwm', 'wl_q_occ_mean',
+        'blocked_workers_hwm', 'blocked_workers_mean', 'blocked_workers_busy_frac'
     ]
 
     # If seeds exist and contain logs, parse each seed and aggregate
@@ -342,7 +358,11 @@ def parse_results_folder(folder_path, output_file=None, timeout_seconds=3600, du
                 'propagate_cycles', 'analyze_cycles', 'minimize_cycles', 'backtrack_cycles',
                 'decision_cycles', 'reduce_db_cycles', 'heap_insert_cycles', 'heap_bump_cycles', 'restart_cycles', 'total_counted_cycles',
                 'prefetches_issued', 'prefetches_used', 'prefetches_unused', 'prefetch_accuracy',
-                'l1_prefetch_requests', 'l1_prefetch_drops'
+                'l1_prefetch_requests', 'l1_prefetch_drops',
+                'clause_conflicts', 'wl_insert_conflicts', 'wl_process_conflicts',
+                'clause_lock_occ_hwm', 'clause_lock_occ_mean',
+                'busy_occ_hwm', 'busy_occ_mean', 'wl_q_occ_hwm', 'wl_q_occ_mean',
+                'blocked_workers_hwm', 'blocked_workers_mean', 'blocked_workers_busy_frac'
             ]
             for case in sorted(all_cases):
                 entries = [m[case] for m in seed_maps if case in m]

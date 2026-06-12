@@ -110,6 +110,14 @@ public:
         {"bt_level", "Total backtrack level", "count", 1},
         {"multi_confl_rounds", "Number of conflict rounds that collected more than one conflict", "count", 1},
         {"bt_level_diff", "Number of multi-conflict rounds whose conflicts disagree on the backtrack level (min < max)", "count", 1},
+        {"clause_lock_occ", "Clause-lock table occupancy sampled at each acquire (concurrent locked clauses)", "count", 1},
+        {"busy_occ", "Watchlist write-lock occupancy sampled at each insert (concurrent watchlist insertions)", "count", 1},
+        {"wl_q_occ", "Total pending watchlist insertions in flight, sampled at each enqueue", "count", 1},
+        {"blocked_workers", "Workers simultaneously blocked on a propagation lock, sampled per scheduler round", "count", 1},
+        {"clause_conflicts", "Number of stall episodes on a locked clause", "count", 1},
+        {"wl_insert_conflicts", "Number of stall episodes on a busy watchlist (insertion)", "count", 1},
+        {"wl_process_conflicts", "Number of stall episodes on pending watchlist insertions (processing)", "count", 1},
+        {"stalled_per_cycle", "Time-weighted blocked workers (accumulator: Sum=blocked-worker-cycles, Count=cycles; Mean=avg stalled workers per cycle)", "count", 1},
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -363,6 +371,19 @@ private:
     Statistic<uint64_t>* stat_multi_confl_rounds; // Count of rounds that collected >1 conflict
     Statistic<uint64_t>* stat_bt_level_diff;      // Count of multi-conflict rounds whose conflicts disagree on bt level
 
+    // Propagation synchronization-sizing statistics
+    Statistic<uint64_t>* stat_clause_lock_occ;      // Histogram: clause-lock table occupancy at acquire
+    Statistic<uint64_t>* stat_busy_occ;             // Histogram: watchlist write-lock occupancy at insert
+    Statistic<uint64_t>* stat_wl_q_occ;             // Histogram: total pending watchlist insertions
+    Statistic<uint64_t>* stat_blocked_workers;      // Histogram: workers blocked on a lock per scheduler round
+    Statistic<uint64_t>* stat_clause_conflicts;     // Accumulator: clause-lock stall episodes
+    Statistic<uint64_t>* stat_wl_insert_conflicts;  // Accumulator: watchlist-insert stall episodes
+    Statistic<uint64_t>* stat_wl_process_conflicts; // Accumulator: watchlist-process stall episodes
+    Statistic<uint64_t>* stat_stalled_per_cycle;    // Accumulator: time-weighted blocked workers (Mean = avg stalled/cycle)
+    bool track_stalls = false;                      // True when blocked_workers/stalled_per_cycle is enabled (gates per-round sum)
+    uint64_t last_round_cycle = 0;                  // sim cycle at last blocked-worker sample
+    uint64_t last_blocked = 0;                      // blocked-worker count at last sample
+
     std::vector<uint32_t> lit_occ_count;          // Precomputed occurrence count per literal index
 
     // User-defined decision sequence
@@ -425,6 +446,7 @@ private:
     uint64_t cycles_read_clauses;        // Time spent reading clauses in subPropagate
     uint64_t cycles_insert_watchers;     // Time spent inserting watchers
     uint64_t cycles_polling;             // Time spent polling for busy watchers
+    uint64_t inserts_in_flight;          // Concurrent insertWatcher calls (mirrors Watches::busy occupancy)
 
     // Structure for tracking propagation metrics
     struct PropagationMetrics {
