@@ -216,7 +216,7 @@ if args.trace_file:
     print(f"Binary trace enabled: {args.trace_file} (buffer={args.trace_buffer_bytes} B)")
 
 # Create the SAT solver component
-solver = sst.Component("solver", "satsolver-mc-gmclbd.SATSolver-mc-gmclbd")
+solver = sst.Component("solver", "satsolver-mc-gmcdl.SATSolver-mc-gmcdl")
 
 # Define memory addresses for global memory operations
 heap_base_addr          = 0x00000000
@@ -268,10 +268,10 @@ solver.addParams(params)
 # Create the external heap subcomponent
 if args.classic_heap:
     print("Using classic heap implementation")
-    heap = solver.setSubComponent("order_heap", "satsolver-mc-gmclbd.Heap")
+    heap = solver.setSubComponent("order_heap", "satsolver-mc-gmcdl.Heap")
 else:
     print("Using pipelined heap implementation")
-    heap = solver.setSubComponent("order_heap", "satsolver-mc-gmclbd.PipelinedHeap")
+    heap = solver.setSubComponent("order_heap", "satsolver-mc-gmcdl.PipelinedHeap")
 heap.addParams({
     "verbose" : str(args.verbose),
 })
