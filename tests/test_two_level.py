@@ -436,6 +436,9 @@ solver_stats = [
     "bt_distance",
     "multi_confl_rounds",
     "bt_level_diff",
+    "clause_conflicts",
+    "wl_insert_conflicts",
+    "wl_process_conflicts",
 ]
 if args.enable_speculative:
     solver_stats += ["spec_started", "spec_finished"]
@@ -462,6 +465,22 @@ if args.enable_histograms:
     sst.enableStatisticsForComponentName("solver", ["watcher_blocks"], histogram_params)
     sst.enableStatisticsForComponentName("solver", ["para_watchers"], histogram_params)
     sst.enableStatisticsForComponentName("solver", ["para_vars"], histogram_params)
+
+    # Synchronization-resource occupancy histograms. Range is 0..PARA_LITS*PROPAGATORS
+    # (concurrent workers), so use enough bins to see the full high-water mark.
+    occupancy_histogram_params = dict(histogram_params)
+    occupancy_histogram_params["numbins"] = "64"
+    sst.enableStatisticsForComponentName("solver", ["clause_lock_occ"], occupancy_histogram_params)
+    sst.enableStatisticsForComponentName("solver", ["busy_occ"], occupancy_histogram_params)
+    sst.enableStatisticsForComponentName("solver", ["wl_q_occ"], occupancy_histogram_params)
+    sst.enableStatisticsForComponentName("solver", ["blocked_workers"], occupancy_histogram_params)
+
+    # Time-weighted average stalled workers per cycle: accumulator fed via
+    # addDataNTimes(Δcycles, blocked), so Mean = Sum/Count = avg stalled/cycle.
+    sst.enableStatisticsForComponentName("solver", ["stalled_per_cycle"], {
+        "type": "sst.AccumulatorStatistic",
+        "rate": "1s"
+    })
 
 # Enable cache statistics for the L1 cache
 sst.enableStatisticsForComponentType("memHierarchy.Cache", [

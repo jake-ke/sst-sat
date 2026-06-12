@@ -103,14 +103,17 @@ class WatchListQueue {
 private:
     // number of items waiting to be inserted into watchlist
     std::unordered_map<int, int> counts;
+    int total_pending = 0;  // sum of all per-item counts (queue occupancy)
 
 public:
-    void add(int item) { counts[item]++; }
+    void add(int item) { counts[item]++; total_pending++; }
 
     void remove(int item) {
-        if (counts.find(item) != counts.end()) {
-            counts[item]--;
-            if (counts[item] <= 0) counts.erase(item);
+        auto it = counts.find(item);
+        if (it != counts.end()) {
+            it->second--;
+            total_pending--;
+            if (it->second <= 0) counts.erase(it);
         }
     }
 
@@ -118,6 +121,9 @@ public:
         auto it = counts.find(item);
         return (it != counts.end()) ? it->second : 0;
     }
+
+    // Total pending insertions in flight across all watchlists.
+    int total() const { return total_pending; }
 };
 
 // Events for heap operations

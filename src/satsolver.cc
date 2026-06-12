@@ -66,6 +66,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     cycles_read_clauses(0),
     cycles_insert_watchers(0),
     cycles_polling(0),
+    inserts_in_flight(0),
     main_active(false),
     spec_literal(lit_Undef),
     spec_active(false),
@@ -234,6 +235,19 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_bt_distance = registerStatistic<uint64_t>("bt_distance");
     stat_multi_confl_rounds = registerStatistic<uint64_t>("multi_confl_rounds");
     stat_bt_level_diff = registerStatistic<uint64_t>("bt_level_diff");
+
+    // Propagation synchronization-sizing statistics
+    stat_clause_lock_occ = registerStatistic<uint64_t>("clause_lock_occ");
+    stat_busy_occ = registerStatistic<uint64_t>("busy_occ");
+    stat_wl_q_occ = registerStatistic<uint64_t>("wl_q_occ");
+    stat_blocked_workers = registerStatistic<uint64_t>("blocked_workers");
+    stat_clause_conflicts = registerStatistic<uint64_t>("clause_conflicts");
+    stat_wl_insert_conflicts = registerStatistic<uint64_t>("wl_insert_conflicts");
+    stat_wl_process_conflicts = registerStatistic<uint64_t>("wl_process_conflicts");
+    stat_stalled_per_cycle = registerStatistic<uint64_t>("stalled_per_cycle");
+    // Gate the per-scheduler-round blocked-worker sum so disabled runs pay nothing.
+    track_stalls = !stat_blocked_workers->isNullStatistic()
+                || !stat_stalled_per_cycle->isNullStatistic();
 
     // Binary memory-access trace writer (opt-in).
     std::string trace_file = params.find<std::string>("trace_file", "");
@@ -1681,6 +1695,23 @@ void SATSolver::unitPropagate() {
 
         // Process all coroutines until completion
         while (!done) {
+            // Sample how many workers are simultaneously blocked on a propagation
+            // lock this scheduler round. Low => parallelism hides the stalls;
+            // spikes toward PARA_LITS*PROPAGATORS => the locks are serializing.
+            // Also accumulate the time-weighted average: the interval since the
+            // last sample held 'last_blocked' workers blocked, so weight it by
+            // the elapsed cycles (addDataNTimes => Mean = avg stalled per cycle).
+            if (track_stalls) {
+                uint64_t now = getCurrentSimCycle() / 1000;
+                uint64_t delta = now - last_round_cycle;
+                if (delta > 0) stat_stalled_per_cycle->addDataNTimes(delta, last_blocked);
+                uint64_t blocked = 0;
+                for (size_t w = 0; w < polling.size(); w++) if (polling[w]) blocked++;
+                stat_blocked_workers->addData(blocked);
+                last_blocked = blocked;
+                last_round_cycle = now;
+            }
+
             // Check for active workers within each lit coroutine
             for (int j = 0; j < PARA_LITS; j++) {
                 for (int jj = 0; jj < PROPAGATORS; jj++) {
@@ -1795,6 +1826,16 @@ void SATSolver::unitPropagate() {
         }
     }
     
+    // Flush the final propagation interval, then zero the blocked count so the
+    // gap until the next propagation phase is time-weighted as 0 stalled.
+    if (track_stalls) {
+        uint64_t now = getCurrentSimCycle() / 1000;
+        uint64_t delta = now - last_round_cycle;
+        if (delta > 0) stat_stalled_per_cycle->addDataNTimes(delta, last_blocked);
+        last_blocked = 0;
+        last_round_cycle = now;
+    }
+
     output.verbose(CALL_INFO, 3, 0, "PROPAGATE: no more propagations\n");
     return;
 }
@@ -1827,6 +1868,7 @@ void SATSolver::propagateLiteral(
     int watch_idx = toWatchIndex(p);
 
     // Wait for any previous watchlist insertion
+    if (wl_q.count(watch_idx) > 0) stat_wl_process_conflicts->addData(1);
     while (wl_q.count(watch_idx) > 0) {
         polling[base_worker_id] = true;
         (*yield_ptr)();  // Yield to allow other workers to process
@@ -2051,6 +2093,7 @@ void SATSolver::propagateWatchers(
 
     // Check if the clause is already being processed by another worker
     SST::Cycle_t start_poll = profile_prop_timing ? (getCurrentSimCycle() / 1000) : 0;
+    if (clause_locks.count(clause_addr) > 0) stat_clause_conflicts->addData(1);
     while (clause_locks.count(clause_addr) > 0) {
         polling[global_worker_id] = true;
         (*yield_ptr)();  // Yield to allow other workers to process
@@ -2062,6 +2105,7 @@ void SATSolver::propagateWatchers(
 
     // Lock the clause
     clause_locks.insert(clause_addr);
+    stat_clause_lock_occ->addData(clause_locks.size());
 
     // Time the reading of clauses (gated)
     SST::Cycle_t start_read = profile_prop_timing ? (getCurrentSimCycle() / 1000) : 0;
@@ -2111,9 +2155,11 @@ void SATSolver::propagateWatchers(
                 "  Found new watch: literal %d at position %zu\n", toInt(c[1]), k);
 
             wl_q.add(toWatchIndex(~c[1]));
+            stat_wl_q_occ->addData(wl_q.total());
 
             // Time spent polling for busy watches (gated)
             SST::Cycle_t start_poll2 = profile_prop_timing ? (getCurrentSimCycle() / 1000) : 0;
+            if (watches.isBusy(toWatchIndex(~c[1]))) stat_wl_insert_conflicts->addData(1);
             while (watches.isBusy(toWatchIndex(~c[1]))) {
                 polling[global_worker_id] = true;
                 (*yield_ptr)();  // Yield to allow other workers to process
@@ -2126,6 +2172,12 @@ void SATSolver::propagateWatchers(
             output.verbose(CALL_INFO, 5, 0, "  [L%d-W%d]Start watchlist insertion\n",
                 lit_worker_id, worker_id);
 
+            // Occupancy of the watchlist write-lock table during this insert.
+            // inserts_in_flight mirrors Watches::busy.size() (one distinct
+            // watchlist per in-flight insertWatcher call).
+            inserts_in_flight++;
+            stat_busy_occ->addData(inserts_in_flight);
+
             // Time spent inserting watchers (gated)
             SST::Cycle_t start_insert = profile_prop_timing ? (getCurrentSimCycle() / 1000) : 0;
             int block_visits = watches.insertWatcher(toWatchIndex(~c[1]), clause_addr, first, global_worker_id);
@@ -2133,6 +2185,7 @@ void SATSolver::propagateWatchers(
                 SST::Cycle_t end_insert = getCurrentSimCycle() / 1000;
                 insert_watchers_cycles += (end_insert - start_insert);
             }
+            inserts_in_flight--;
 
             // Record block visits statistics
             stat_watcher_blocks->addData(block_visits);

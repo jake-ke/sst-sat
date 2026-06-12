@@ -719,6 +719,112 @@ def parse_stats_csv_for_prefetch(stats_csv_path: Path):
     return out
 
 
+# --- Propagation synchronization-sizing statistics --------------------------
+# Emitted by the SATSolver component to the SST stats CSV. Conflict counters are
+# Accumulators (Sum.u64); occupancy stats are Histograms (per-bin counts).
+SYNC_CONFLICT_STATS = ('clause_conflicts', 'wl_insert_conflicts', 'wl_process_conflicts')
+SYNC_OCC_STATS = ('clause_lock_occ', 'busy_occ', 'wl_q_occ', 'blocked_workers')
+
+
+def _parse_histogram_row(row):
+    """Parse one SST HistogramStatistic CSV row into a distribution.
+
+    Returns {'bins': {value: count}, 'items': int, 'overflow': int} where value
+    is the low edge of each non-empty bin (bin width is 1 for the sync
+    histograms, so value == occupancy). 'overflow' counts samples above the last
+    bin (should be 0 when numbins covers PARA_LITS*PROPAGATORS).
+    """
+    bins = {}
+    for key, val in row.items():
+        if not key or not key.startswith('Bin') or ':' not in key:
+            continue
+        try:
+            count = int(val or 0)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0:
+            continue
+        # Header looks like 'Bin5:5-5.u64' -> low edge of the bin is 5
+        low = key.split(':', 1)[1].split('-', 1)[0]
+        try:
+            value = int(low)
+        except ValueError:
+            continue
+        bins[value] = bins.get(value, 0) + count
+
+    def _int(field):
+        try:
+            return int(row.get(field) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return {'bins': bins, 'items': _int('NumItemsCollected.u64'),
+            'overflow': _int('NumOutOfBounds-MaxValue.u64')}
+
+
+def parse_sync_stats_full(stats_csv_path):
+    """Read full propagation-sync sizing stats from an SST stats CSV.
+
+    Returns {'conflicts': {name: int}, 'histograms': {name: {bins, items, overflow}}}.
+    Resilient: a missing file or absent stats yields empty sub-dicts.
+    """
+    out = {'conflicts': {}, 'histograms': {}}
+    try:
+        p = Path(stats_csv_path)
+        if not p.exists() or not p.is_file():
+            return out
+        with p.open('r', newline='') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get('ComponentName') != 'solver':
+                    continue
+                name = row.get('StatisticName', '')
+                if name in SYNC_CONFLICT_STATS:
+                    try:
+                        out['conflicts'][name] = int(row.get('Sum.u64') or 0)
+                    except (TypeError, ValueError):
+                        pass
+                elif name in SYNC_OCC_STATS:
+                    out['histograms'][name] = _parse_histogram_row(row)
+    except Exception:
+        return out
+    return out
+
+
+def hist_scalars(hist):
+    """Derive (hwm, mean, busy_frac) from a parsed histogram dict.
+
+    hwm       = highest occupancy value observed (sizes the structure)
+    mean      = mean occupancy over all samples
+    busy_frac = fraction of samples with occupancy >= 1
+    """
+    bins = hist.get('bins', {}) if hist else {}
+    total = sum(bins.values())
+    if total <= 0:
+        return 0, 0.0, 0.0
+    hwm = max(bins)
+    mean = sum(v * c for v, c in bins.items()) / total
+    busy = (total - bins.get(0, 0)) / total
+    return hwm, mean, busy
+
+
+def parse_stats_csv_for_sync(stats_csv_path):
+    """Flatten propagation-sync sizing stats into scalar columns for the wide CSV."""
+    out = {}
+    full = parse_sync_stats_full(stats_csv_path)
+    for name in SYNC_CONFLICT_STATS:
+        if name in full['conflicts']:
+            out[name] = full['conflicts'][name]
+    for name in SYNC_OCC_STATS:
+        if name in full['histograms']:
+            hwm, mean, busy = hist_scalars(full['histograms'][name])
+            out[f'{name}_hwm'] = hwm
+            out[f'{name}_mean'] = round(mean, 4)
+            if name == 'blocked_workers':
+                out['blocked_workers_busy_frac'] = round(busy, 4)
+    return out
+
+
 def parse_log_file(log_file_path):
     """
     Parse a single log file and extract all relevant information.
@@ -906,6 +1012,7 @@ def parse_satsolver_log(log_file_path, content):
         try:
             stats_csv_path = Path(log_file_path).parent / f"{result['test_case']}.stats.csv"
             result.update(parse_stats_csv_for_prefetch(stats_csv_path))
+            result.update(parse_stats_csv_for_sync(stats_csv_path))
         except Exception:
             pass
 
