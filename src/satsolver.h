@@ -110,6 +110,8 @@ public:
         {"bt_level", "Total backtrack level", "count", 1},
         {"multi_confl_rounds", "Number of conflict rounds that collected more than one conflict", "count", 1},
         {"bt_level_diff", "Number of multi-conflict rounds whose conflicts disagree on the backtrack level (min < max)", "count", 1},
+        {"gate_fired_rounds", "Rounds where the extras gate fired (mc-gmc family)", "count", 1},
+        {"extras_committed", "Extra (non-winner) learnt clauses committed to the DB (mc-gmc family)", "count", 1},
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -368,7 +370,9 @@ private:
     Statistic<uint64_t>* stat_learnt_lbd;         // Accumulator: total LBD of learnt clauses
     Statistic<uint64_t>* stat_bt_level;           // Accumulator: total backtrack level
     Statistic<uint64_t>* stat_multi_confl_rounds; // Count of rounds that collected >1 conflict
-    Statistic<uint64_t>* stat_bt_level_diff;      // Count of multi-conflict rounds whose conflicts disagree on bt level
+    Statistic<uint64_t>* stat_bt_level_diff;
+    Statistic<uint64_t>* stat_gate_fired_rounds;   // rounds where the extras gate fired
+    Statistic<uint64_t>* stat_extras_committed;    // extra learnt clauses committed      // Count of multi-conflict rounds whose conflicts disagree on bt level
 
     std::vector<uint32_t> lit_occ_count;          // Precomputed occurrence count per literal index
 

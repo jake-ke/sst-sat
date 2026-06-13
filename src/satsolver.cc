@@ -233,6 +233,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_bt_level = registerStatistic<uint64_t>("bt_level");
     stat_multi_confl_rounds = registerStatistic<uint64_t>("multi_confl_rounds");
     stat_bt_level_diff = registerStatistic<uint64_t>("bt_level_diff");
+    stat_gate_fired_rounds = registerStatistic<uint64_t>("gate_fired_rounds");
+    stat_extras_committed = registerStatistic<uint64_t>("extras_committed");
 
     // Binary memory-access trace writer (opt-in).
     std::string trace_file = params.find<std::string>("trace_file", "");
@@ -1449,6 +1451,7 @@ void SATSolver::execBacktrack() {
     // mc-gmc1: commit only the single best extra (min LBD, then min length)
     // — same gate, smallest possible latent-divergence surface and DB cost.
     if (round_max_bt > bt_level) {
+        stat_gate_fired_rounds->addData(1);
         int best = -1;
         for (size_t i = 0; i < round_learnts_raw.size(); i++) {
             if ((int)i == winner_idx) continue;
@@ -1463,6 +1466,7 @@ void SATSolver::execBacktrack() {
             const auto& extra = round_learnts_raw[best];
             Clause extra_clause(extra, cla_inc);
             Cref extra_addr = clauses.addClause(extra_clause);
+            stat_extras_committed->addData(1);
             attachClause(extra_addr, extra_clause);
             stat_learned->addData(1);
         }
