@@ -435,6 +435,8 @@ solver_stats = [
     "bt_level",
     "multi_confl_rounds",
     "bt_level_diff",
+    "gate_fired_rounds",
+    "extras_committed",
 ]
 if args.enable_speculative:
     solver_stats += ["spec_started", "spec_finished"]
