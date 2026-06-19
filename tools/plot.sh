@@ -46,7 +46,17 @@ cp results/no_timeouts/geomean_speedups.pdf ../sat-micro26/charts/no_timeout_gme
 
 
 # incr
-python3 tools/plot_comparison.py --output-dir results/incr/ ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/seed3  ../sat-isca26-data/incr3/opt2_l1_4_1_l2_8_32/ ../sat-isca26-data/incr3/opt3-new_l1_4_1_l2_8_32/ ../sat-isca26-data/incr3/opt4-new_l1_4_1_l2_8_32/ ../sat-isca26-data/incr3/opt5_l1_4_1_l2_8_32/ ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ --names "Baseline" "+Prop" "+Heap" "+Learn" "+WL" "+Prefetch/Min" --errors-as-timeout --line  --highlight-last "SATBlast"
+# python3 tools/plot_comparison.py --output-dir results/incr/ ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/seed3  ../sat-isca26-data/incr3/opt2_l1_4_1_l2_8_32/ ../sat-isca26-data/incr3/opt3-new_l1_4_1_l2_8_32/ ../sat-isca26-data/incr3/opt4-new_l1_4_1_l2_8_32/ ../sat-isca26-data/incr3/opt5_l1_4_1_l2_8_32/ ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ --names "Baseline" "+Prop" "+Heap" "+Learn" "+WL" "+Prefetch/Min" --errors-as-timeout --line  --highlight-last "SATBlast"
+python3 tools/plot_comparison.py --output-dir results/incr/ \
+  ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/seed3 \
+  ../sat-isca26-data/incr3/opt2_l1_4_1_l2_8_32/ \
+  ../sat-isca26-data/incr3/opt3_heap_nopref/ \
+  ../sat-isca26-data/incr3/opt4_prewatcher/ \
+  ../sat-isca26-data/incr3/opt4_wl/ \
+  ../sat-isca26-data/incr3/opt5_min/ \
+  ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ \
+  --names "Baseline" "+Prop" "+Heap" $"+Pre\n-watcher" $"+Free\n-List" "+Prefetch/Min" "+Learn" \
+  --errors-as-timeout --line --highlight-last "SATBlast"
 cp results/incr/geomean_speedups.pdf ../sat-micro26/charts/incr_gmean.pdf
 
 # lits
@@ -134,7 +144,26 @@ cp results/ablation/ablation_combined.pdf ../sat-micro26/charts/
 
 
 # combined overall perf
-python3 tools/plot_overall_perf.py --output-dir results/ ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/seed3 ~/openhw-2025-SAT-FPGA/results.txt ../sat-isca26-data/stereo_minisat_logs/ ../sat-isca26-data/stereo_kissat_logs/ ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ ~/scratch/lbd-coproc.154831/sst-sat/runs/lbd-opt-final_l1_4_1_l2_8_32/seed3/ --names "Baseline" "SAT-Accel" "MiniSAT" "Kissat" "SATBlast" "SATBlast+LBD" --normalize-sataccel
+python3 tools/plot_overall_perf.py --output-dir results/ ../sat-isca26-data/base_128KB/base_l1_4_1_l2_8_32/seed3 ~/openhw-2025-SAT-FPGA/results.txt ../sat-isca26-data/stereo_minisat_logs/ ../sat-isca26-data/stereo_kissat_logs/ ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ --names "Baseline" "SAT-Accel" "MiniSAT" "Kissat" "SATBlast" --normalize-sataccel
 cp results/overall_perf.pdf ../sat-micro26/charts/perf_comb.pdf
 cp results/overall_perf_no_timeouts.pdf ../sat-micro26/charts/perf_comb_no_timeouts.pdf
+cp results/overall_perf_cycle.pdf ../sat-micro26/charts/perf_cycle.pdf
+
+# plot preprocess
+# need to exclude "25a654a029421baed232de5e6e19c72e-mp1-qpr-bmp280-driver-14.cnf" in plot_comparison.py
+python3 tools/plot_preprocess.py --output-dir results/preprocess \
+  --minisat ../sat-isca26-data/stereo_minisat_logs/ \
+  --kissat  ../sat-isca26-data/stereo_kissat_logs/ \
+  --satblast ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ \
+  --minisat-preprocess ../sat-isca26-data/opt-final_minisat_preprocess/seed3/ \
+  --kissat-preprocess  ../sat-isca26-data/opt-final_kissat_preprocess/seed3/
+cp results/preprocess/preprocess_geomean.pdf ../sat-micro26/charts/preproc.pdf
+
+# l2 sweep
+python3 tools/plot_comparison.py --output-dir results/l2_sweep ~/openhw-2025-SAT-FPGA/results.txt ../sat-isca26-data/stereo_minisat_logs/ ../sat-isca26-data/stereo_kissat_logs/ ../sat-isca26-data/opt_final_l2/opt-final_l2_2MB/ ../sat-isca26-data/opt_final_l2/opt-final_l2_4MB/ ../sat-isca26-data/opt_final_l2/opt-final_l2_8MB/ ../sat-isca26-data/opt_final_l2/opt-final_l2_16MB/ ../sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3/ --names "SAT-Accel" "MiniSAT" "Kissat" "2MB" "4MB" "8MB" "16MB" "24MB" --large-fonts --normalize-sataccel --errors-as-timeout
+cp results/l2_sweep/comparison_charts.pdf ../sat-micro26/charts/l2_sweep.pdf
+
+
+# generate satlib latex comparing to SATHard and VeriSAT
+python3 tools/compare_satlib.py ../sat-isca26-data/opt-final_satlib/ --latex
 

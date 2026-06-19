@@ -28,6 +28,17 @@ from unified_parser import parse_log_directory
 
 CACHE_LINE_SIZE = 64  # bytes
 
+# Uniform shrink factor for the single-column bar charts (req_per_prop,
+# bandwidth_comparison). Scales figsize, fonts, and linewidths by the same
+# amount so the figure looks identical — just smaller physically, so it needs
+# less downscaling when dropped into a one-column conference layout.
+ONE_COLUMN_SCALE = 0.5
+
+
+def scale_fonts(fonts, s):
+    """Return a copy of the font-size dict with all numeric sizes scaled by s."""
+    return {k: (v * s if isinstance(v, (int, float)) else v) for k, v in fonts.items()}
+
 # Manual exclusion list (same as plot_comparison.py)
 MANUAL_EXCLUSIONS = set([
     "080896c437245ac25eb6d3ad6df12c4f-bv-term-small-rw_1492.smt2.cnf",
@@ -296,8 +307,10 @@ def plot_roofline(common_tests, all_metrics, folder_names, colors, fonts,
     plt.close(fig)
 
 
-def plot_bandwidth_comparison(common_tests, all_metrics, folder_names, colors, fonts, output_path):
+def plot_bandwidth_comparison(common_tests, all_metrics, folder_names, colors, fonts, output_path,
+                              scale=ONE_COLUMN_SCALE):
     """Plot bandwidth utilization comparison bar chart."""
+    fonts = scale_fonts(fonts, scale)
     # Sort by baseline bandwidth (ascending)
     baseline_name = folder_names[0]
     accel_name = folder_names[1]
@@ -315,8 +328,8 @@ def plot_bandwidth_comparison(common_tests, all_metrics, folder_names, colors, f
 
     labels = [tc[:6] for tc in sorted_tests]
 
-    fig_width = max(12, len(sorted_tests) * 0.5)
-    fig, ax = plt.subplots(figsize=(fig_width, 6.5))
+    fig_width = max(12, len(sorted_tests) * 0.5) * scale
+    fig, ax = plt.subplots(figsize=(fig_width, 6.5 * scale))
 
     num_folders = len(folder_names)
     bar_width = 0.8 / num_folders
@@ -329,15 +342,15 @@ def plot_bandwidth_comparison(common_tests, all_metrics, folder_names, colors, f
         ax.bar(x_positions, values, bar_width,
                label=folder_name,
                color=colors[folder_idx],
-               alpha=0.85, edgecolor='black', linewidth=0.8)
+               alpha=0.85, edgecolor='black', linewidth=0.8 * scale)
 
     ax.set_ylabel('L2 Bandwidth\n(GB/s)', fontsize=fonts['axis_label'], fontweight=fonts['axis_label_weight'])
     ax.set_xticks([x + bar_width * (num_folders - 1) / 2 for x in x_base])
-    ax.set_xticklabels(labels, fontsize=20, rotation=45, ha='right')
+    ax.set_xticklabels(labels, fontsize=20 * scale, rotation=45, ha='right')
     ax.tick_params(axis='y', labelsize=fonts['tick'])
     ax.set_xlim(-0.5, len(sorted_tests) - 0.2)
 
-    ax.grid(axis='y', alpha=0.6, linestyle='-', linewidth=1.2)
+    ax.grid(axis='y', alpha=0.6, linestyle='-', linewidth=1.2 * scale)
     ax.set_axisbelow(True)
 
     # Annotation for geometric mean
@@ -392,8 +405,10 @@ def plot_throughput_vs_req_per_prop(common_tests, all_metrics, folder_names, col
     plt.close(fig)
 
 
-def plot_req_per_prop_bars(common_tests, all_metrics, folder_names, colors, fonts, output_path):
+def plot_req_per_prop_bars(common_tests, all_metrics, folder_names, colors, fonts, output_path,
+                           scale=ONE_COLUMN_SCALE):
     """Plot L1 requests per propagation as grouped bar chart per test."""
+    fonts = scale_fonts(fonts, scale)
     # Sort by baseline req/prop (ascending)
     baseline_name = folder_names[0]
     accel_name = folder_names[1]
@@ -412,8 +427,8 @@ def plot_req_per_prop_bars(common_tests, all_metrics, folder_names, colors, font
     # First 5 characters of test name, slanted
     labels = [tc[:6] for tc in sorted_tests]
 
-    fig_width = max(12, len(sorted_tests) * 0.5)
-    fig, ax = plt.subplots(figsize=(fig_width, 6.5))
+    fig_width = max(12, len(sorted_tests) * 0.5) * scale
+    fig, ax = plt.subplots(figsize=(fig_width, 6.5 * scale))
 
     num_folders = len(folder_names)
     bar_width = 0.8 / num_folders
@@ -426,13 +441,13 @@ def plot_req_per_prop_bars(common_tests, all_metrics, folder_names, colors, font
         ax.bar(x_positions, values, bar_width,
                label=folder_name,
                color=colors[folder_idx],
-               alpha=0.85, edgecolor='black', linewidth=0.8)
+               alpha=0.85, edgecolor='black', linewidth=0.8 * scale)
 
     ax.set_yscale('log')
     ax.set_ylabel('L1 Requests /\nPropagation',
                   fontsize=fonts['axis_label'], fontweight=fonts['axis_label_weight'])
     ax.set_xticks([x + bar_width * (num_folders - 1) / 2 for x in x_base])
-    ax.set_xticklabels(labels, fontsize=20, rotation=45, ha='right')
+    ax.set_xticklabels(labels, fontsize=20 * scale, rotation=45, ha='right')
     ax.tick_params(axis='y', labelsize=fonts['tick'])
     ax.set_xlim(-0.5, len(sorted_tests) - 0.2)
 

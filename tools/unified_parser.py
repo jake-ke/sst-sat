@@ -123,6 +123,16 @@ def parse_minisat_log(log_file_path, content):
             if cpu_match_alt:
                 cpu_seconds = float(cpu_match_alt.group(1))
                 result['sim_time_ms'] = cpu_seconds * 1000.0
+
+        # Extract preprocess time from "Simplification time:" line (seconds)
+        simp_match = re.search(r'Simplification time:\s*([\d.]+)\s*s', content)
+        if simp_match:
+            result['preprocess_time_ms'] = float(simp_match.group(1)) * 1000.0
+
+        # Extract parse time from "Parse time:" line (seconds)
+        parse_match = re.search(r'Parse time:\s*([\d.]+)\s*s', content)
+        if parse_match:
+            result['parse_time_ms'] = float(parse_match.group(1)) * 1000.0
         
         # Extract solver statistics
         solver_patterns = {
@@ -230,6 +240,18 @@ def parse_kissat_log(log_file_path, content):
                     result['sim_time_ms'] = float(last_secs) * 1000.0
                 except Exception:
                     pass
+
+        # Preprocess time from profiling table line like:
+        # "c           2.84   80.08 %  preprocess"
+        pm_pre = re.search(r"^\s*c\s+([0-9]*\.?[0-9]+)\s+[0-9]*\.?[0-9]+\s*%\s+preprocess\s*$",
+                           content, re.MULTILINE)
+        if pm_pre:
+            result['preprocess_time_ms'] = float(pm_pre.group(1)) * 1000.0
+
+        # Parse time from line like: "c finished parsing after 0.02 seconds"
+        pm_parse = re.search(r"finished parsing after\s+([0-9]*\.?[0-9]+)\s+seconds", content)
+        if pm_parse:
+            result['parse_time_ms'] = float(pm_parse.group(1)) * 1000.0
 
         # Memory: try explicit stats lines first ("maximum-resident-set-size" or variants)
         # Prefer the bytes value if available, fallback to the MB/GiB number.

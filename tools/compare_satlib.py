@@ -14,6 +14,7 @@ Example:
 """
 
 import argparse
+import math
 import re
 import sys
 from pathlib import Path
@@ -61,6 +62,17 @@ VERISAT_DATA = {
 }
 
 
+# Per-instance VeriSAT@150MHz runtimes from the paper's Table IV. BMC's Table II
+# dataset average (18.07 ms over a nominal 13 instances) is internally
+# inconsistent with these numbers (impossible given bmc-ibm-1 alone at 134.41 ms;
+# only 5 of 13 fit VeriSAT's variable capacity), so the BMC row aggregates only
+# the instances reported individually. {ds: [(name, verisat_ms), ...]}
+VERISAT_TAB4 = {
+    "BMC":  [("bmc-ibm-1", 134.41), ("bmc-ibm-2", 1.94),
+             ("bmc-ibm-5", 21.08), ("bmc-ibm-7", 86.37)],
+}
+
+
 def fmt_compact(val):
     """Format number compactly for LaTeX (e.g., 63624 -> '64k')."""
     if val >= 2000:
@@ -74,6 +86,20 @@ def fmt_range_compact(vals):
     if lo == hi:
         return str(lo)
     return f"{fmt_compact(lo)}--{fmt_compact(hi)}"
+
+
+def fmt_ms(val):
+    """Compact number for the LaTeX table that never renders as '0.0'.
+    Values that round to a non-zero single decimal use one decimal place;
+    smaller values that would round to zero fall back to two significant
+    figures (e.g. 0.0025) so no cell ever shows a misleading 0.0."""
+    if val is None or val <= 0:
+        return "0"
+    s = f"{val:.1f}"
+    if s != "0.0":
+        return s
+    digits = 1 - math.floor(math.log10(val))  # two significant figures
+    return f"{val:.{digits}f}".rstrip("0")
 
 
 def classify_dataset(test_name):
@@ -236,14 +262,38 @@ def main():
         total_ours_to += timeouts
         total_inst += n_inst
 
-        # Collect LaTeX row (skip HOLE — flawed benchmarks)
-        if ds != "HOLE":
+        # Collect LaTeX row. HOLE is omitted (its reported figures are
+        # inconsistent). BMC aggregates only the instances disclosed individually
+        # in the source's Table IV, since its Table II average is inconsistent.
+        if ds == "HOLE":
+            pass  # omitted from the comparison
+        elif ds in VERISAT_TAB4:
+            by_name = {re.sub(r'\.cnf$', '', t.get('test_case', '')): t
+                       for t in our_tests}
+            sel = [(vs, by_name[nm]) for nm, vs in VERISAT_TAB4[ds]
+                   if nm in by_name and by_name[nm].get('sim_time_ms', 0) > 0]
+            if sel:
+                vs_avg = sum(vs for vs, _ in sel) / len(sel)
+                our_avg = sum(t['sim_time_ms'] for _, t in sel) / len(sel)
+                vs8 = vs_avg * VERISAT_SCALE
+                sp = vs8 / our_avg if our_avg > 0 else 0.0
+                svars = [t['variables'] for _, t in sel]
+                scls = [t['clauses'] for _, t in sel]
+                latex_rows.append(
+                    f"{ds} & {fmt_range_compact(svars)} & {fmt_range_compact(scls)} & {len(sel)}$^{{*}}$ & "
+                    f"{fmt_ms(vs_avg)} & {fmt_ms(vs8)} & {fmt_ms(our_avg)} & {fmt_ms(sp)} & 0/0 \\\\"
+                )
+                latex_inst += len(sel)
+                latex_speedups.append(sp)
+        else:
             var_compact = fmt_range_compact(vars_list) if vars_list else "N/A"
             cl_compact = fmt_range_compact(cls_list) if cls_list else "N/A"
+            # UUF100 count corrects the source (reports 999; the set has 1000).
+            inst_disp = f"{n_inst}$^{{*}}$" if ds == "UUF100" else str(n_inst)
             latex_rows.append(
-                f"{ds} & {var_compact} & {cl_compact} & {n_inst} & "
-                f"{verisat_scaled:.1f} & {avg_time:.1f} & "
-                f"{speedup_scaled_str} & {verisat['timeouts']}/{timeouts} \\\\"
+                f"{ds} & {var_compact} & {cl_compact} & {inst_disp} & "
+                f"{fmt_ms(verisat_150)} & {fmt_ms(verisat_scaled)} & {fmt_ms(avg_time)} & "
+                f"{fmt_ms(speedup_scaled)} & {verisat['timeouts']}/{timeouts} \\\\"
             )
             latex_inst += n_inst
             latex_verisat_to += verisat['timeouts']
@@ -329,9 +379,9 @@ def main():
         {"name": "uuf100-02",   "our_name": "uuf100-02.cnf",              "vars": 100, "clauses": 430,  "sh_ms": 4940},
         {"name": "uuf125-05",   "our_name": "uuf125-05.cnf",              "vars": 125, "clauses": 538,  "sh_ms": 4900},
         {"name": "CBS-k3-n100-m403-k3-10", "our_name": "CBS_k3_n100_m403_b10_1.cnf", "vars": 100, "clauses": 403, "sh_ms": 2340},
-        {"name": "aim-200-3_4-yes1-4",     "our_name": "aim-200-3_4-yes1-4.cnf",      "vars": 200, "clauses": 320, "sh_ms": 1200},
+        {"name": "aim-200-3_4-yes1-4",     "our_name": "aim-200-3_4-yes1-4.cnf",      "vars": 200, "clauses": 680, "sh_ms": 1200},
         {"name": "aim-200-1_6-no-4",       "our_name": "aim-200-1_6-no-4.cnf",        "vars": 200, "clauses": 320, "sh_ms": 10},
-        {"name": "ii16e2",      "our_name": "ii16e2.cnf",                 "vars": 222, "clauses": 1186, "sh_ms": 5760},
+        {"name": "ii16e2",      "our_name": "ii16e2.cnf",                 "vars": 532, "clauses": 7825, "sh_ms": 5760},
         {"name": "ii32e1",      "our_name": "ii32e1.cnf",                 "vars": 222, "clauses": 1186, "sh_ms": 20},
     ]
 
@@ -370,7 +420,13 @@ def main():
         our = our_lookup.get(t["our_name"], {})
         our_time = our.get('sim_time_ms', 0.0)
 
+        # Prefer actual instance dimensions parsed from the log; fall back to
+        # the hardcoded values only if the instance wasn't matched.
+        n_vars = our.get('variables') or t['vars']
+        n_cls = our.get('clauses') or t['clauses']
+
         sh_scaled = t['sh_ms'] * SATHARD_SCALE
+        sh_orig_s = t['sh_ms'] / 1000.0  # original SATHard runtime in seconds
         sh_str = f"{sh_scaled:.1f}"
         our_str = f"{our_time:.1f}" if our_time > 0 else "N/A"
 
@@ -382,16 +438,20 @@ def main():
             sp_str = "N/A"
 
         # Collect SATHard LaTeX row (escape underscores for LaTeX)
+        # orig (s): 2 decimals; div10 (ms): no decimals; SATBlast (ms): 2 decimals
         latex_name = t['name'].replace('_', r'\_')
+        sh_orig_str = f"{sh_orig_s:.2f}"
+        sh_div10_str = f"{sh_scaled:.0f}"
+        our_latex_str = f"{our_time:.2f}" if our_time > 0 else "N/A"
         sh_latex_rows.append(
-            f"{latex_name} & {t['vars']} & {t['clauses']} & "
-            f"{sh_str} & {our_str} & {sp_str} \\\\"
+            f"{latex_name} & {n_vars} & {n_cls} & "
+            f"{sh_orig_str} & {sh_div10_str} & {our_latex_str} & {sp_str} \\\\"
         )
 
         print(
             f"{t['name']:<30} "
-            f"{t['vars']:>6} "
-            f"{t['clauses']:>8} "
+            f"{n_vars:>6} "
+            f"{n_cls:>8} "
             f"{t['sh_ms']:>12.2f} "
             f"{sh_str:>16} "
             f"{our_str:>12} "
@@ -419,16 +479,18 @@ def main():
     if args.latex:
         print()
         print("% ============ LaTeX Table: VeriSAT Comparison ============")
-        print(r"\begin{table}[h]")
+        print(r"\begin{table}[ht]")
         print(r"\centering")
+        print(r"\renewcommand{\arraystretch}{0.85}")
         print(r"\caption{Comparison with VeriSAT on SATLIB benchmarks.}")
         print(r"\label{tab:verisat}")
         print(r"\small")
-        print(r"\setlength{\tabcolsep}{1.5pt}")
-        print(r"\renewcommand{\arraystretch}{0.9}")
-        print(r"\begin{tabular}{@{}lrrrrrrr@{}}")
+        print(r"\setlength{\tabcolsep}{1pt}")
+        print(r"\resizebox{\columnwidth}{!}{%")
+        print(r"\begin{tabular}{@{}lrrrrrrrr@{}}")
         print(r"\toprule")
-        print(r"Dataset & \#Var & \#Cl & \#Inst & \makecell{VeriSAT\\$\div$8 (ms)} & \makecell{SATBlast\\(ms)} & \makecell{Speed-\\up} & TO \\")
+        print(r" & & & & \multicolumn{2}{c}{VeriSAT} & & & \\")
+        print(r"Dataset & \#Var & \#Cl & \#Inst & (ms) & \textbf{$\div$8} (ms) & \makecell{SATBlast\\(ms)} & \makecell{Speed-\\up} & TO \\")
         print(r"\midrule")
         for row in latex_rows:
             print(row)
@@ -436,30 +498,34 @@ def main():
         latex_avg = sum(latex_speedups) / len(latex_speedups) if latex_speedups else 0.0
         print(
             f"\\textbf{{Average}} & & & {latex_inst} & "
-            f"& & {latex_avg:.1f} & "
-            f"{latex_verisat_to}/{latex_ours_to} \\\\"
+            f"& & & \\textbf{{{latex_avg:.1f}}} & "
+            f"\\textbf{{{latex_verisat_to}/{latex_ours_to}}} \\\\"
         )
         print(r"\bottomrule")
-        print(r"\end{tabular}")
+        print(r"\end{tabular}}")
+        print(r"\vspace{1pt}")
+        print(r"\parbox{\columnwidth}{\footnotesize\textit{$^{*}$Correcting "
+              r"VeriSAT~\cite{verisat}. BMC reports only 4 of 13 (ibm-1/2/5/7).}}")
         print(r"\end{table}")
         print()
 
         print("% ============ LaTeX Table: SATHard Comparison ============")
-        print(r"\begin{table}[h]")
+        print(r"\begin{table}[ht]")
         print(r"\centering")
+        print(r"\renewcommand{\arraystretch}{0.85}")
         print(r"\caption{Comparison with SATHard.}")
         print(r"\label{tab:sathard}")
         print(r"\small")
-        print(r"\setlength{\tabcolsep}{3pt}")
-        print(r"\begin{tabular}{@{}lrrrrr@{}}")
+        print(r"\setlength{\tabcolsep}{2pt}")
+        print(r"\begin{tabular}{@{}lrrrrrr@{}}")
         print(r"\toprule")
-        print(r" & & & SATHard & SATBlast & \\")
-        print(r"Problem & \#Var & \#Cl & $\div$10 (ms) & (ms) & Speedup \\")
+        print(r" & & & \multicolumn{2}{c}{SATHard} & SATBlast & \\")
+        print(r"Problem & \#Var & \#Cl & (s) & \textbf{$\div$10} (ms) & (ms) & Speedup \\")
         print(r"\midrule")
         for row in sh_latex_rows:
             print(row)
         print(r"\midrule")
-        print(f"\\textbf{{Average}} & & & & & {avg_sp:.1f} \\\\")
+        print(f"\\textbf{{Average}} & & & & & & \\textbf{{{avg_sp:.1f}}} \\\\")
         print(r"\bottomrule")
         print(r"\end{tabular}")
         print(r"\end{table}")

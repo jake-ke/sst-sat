@@ -55,10 +55,10 @@ def main():
 
     # ── (a) Lits ablation ──────────────────────────────────────────────
     lits_folders = [
-        '../sat-isca26-data/lits3/lits-1/',
-        '../sat-isca26-data/lits3/lits-4/',
+        '~/sat-isca26-data/lits3/lits-1/',
+        '~/sat-isca26-data/lits3/lits-4/',
         '~/sat-isca26-data/opt_128KB_no-spec_l1_4_1_l2_8_32/seed3',
-        '../sat-isca26-data/lits3/lits-16/',
+        '~/sat-isca26-data/lits3/lits-16/',
     ]
     lits_names = ['1', '4', '8', '16']
     # Expand ~ in paths
@@ -75,12 +75,19 @@ def main():
 
     # ── (b) Multi-conflict learning ────────────────────────────────────
     confl_folders = [
-        '../sat-isca26-data/confl3/confl1/',
-        '../sat-isca26-data/confl3/confl4/',
-        '~/sat-isca26-data/confl3/confl8/',
-        '../sat-isca26-data/confl3/confl12/',
+        '~/sat-isca26-data/multi-confl/opt-final_mc1/',
+        '~/sat-isca26-data/multi-confl/opt-final_mc8/',
+        '~/sat-isca26-data/multi-confl/opt-final_mc32/',
+        '~/sat-isca26-data/multi-confl/opt-final_mc64/',
     ]
-    confl_names = ['1', '4', '8', '12']
+    confl_names = ['1', '8', '32', '64']
+    # confl_folders = [
+    #     '../sat-isca26-data/confl3/confl1/',
+    #     '../sat-isca26-data/confl3/confl4/',
+    #     '~/sat-isca26-data/confl3/confl8/',
+    #     '../sat-isca26-data/confl3/confl12/',
+    # ]
+    # confl_names = ['1', '4', '8', '12']
     confl_folders = [str(Path(f).expanduser()) for f in confl_folders]
 
     print("\nLoading multi-conflict learning data...")
@@ -163,7 +170,7 @@ def main():
     for fi, fname in enumerate(folder_names_b):
         x_positions = [x + fi * bar_width for x in x_base]
         values = []
-        for key, _ in LEARNING_METRICS:
+        for key, _, _ in LEARNING_METRICS:
             v = confl_ratios[key].get(fname, None)
             values.append(v if v is not None else 0.0)
         ax_right.bar(x_positions, values, bar_width,
@@ -174,7 +181,7 @@ def main():
     ax_right.set_ylabel('Ratio', fontsize=fs + 6)
     group_centers = [x + bar_width * (num_b - 1) / 2 for x in x_base]
     ax_right.set_xticks(group_centers)
-    ax_right.set_xticklabels([label for _, label in LEARNING_METRICS],
+    ax_right.set_xticklabels([label for _, label, _ in LEARNING_METRICS],
                              fontsize=fs + 4, ha='center', linespacing=0.8)
     ax_right.tick_params(axis='y', labelsize=fs - 2)
     ax_right.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.1f'))
@@ -188,7 +195,7 @@ def main():
 
     # "HIGHER/LOWER BETTER" annotations
     label_y = 1.8 * 0.8
-    for gi, (key, _) in enumerate(LEARNING_METRICS):
+    for gi, (key, _, _) in enumerate(LEARNING_METRICS):
         label_text = 'Higher\nBetter' if key == 'unit_learnt_clauses' else 'Lower\nBetter'
         ax_right.text(group_centers[gi], label_y, label_text,
                       ha='center', va='top',

@@ -14,6 +14,7 @@ Example:
 """
 
 import sys
+import math
 import argparse
 from pathlib import Path
 from collections import OrderedDict
@@ -34,18 +35,176 @@ from plot_comparison import (
     wrap_label,
 )
 
+# Cycle-domain reference frequency: the uniform timeout budget is anchored here.
+# timeout_seconds * CYCLE_REF_HZ cycles (default 36 s * 1 GHz = 36 Gcycles).
+CYCLE_REF_HZ = 1e9
+
+
+def get_folder_frequency(name, default_hz=250e6):
+    """Infer a solver's clock frequency (Hz) from its display name.
+
+    Used by the cycle-domain plots to convert wall-clock runtimes into clock cycles.
+    Assumed clocks: Kissat/MiniSAT = 5 GHz, SATBlast = 1 GHz, Baseline = 1 GHz,
+    everything else (SAT-Accel / our accelerator) = 250 MHz. At 250 MHz the cycle-domain
+    factor (1 GHz ref / 250 MHz = 4) matches the wall-clock --normalize-sataccel /4.
+    """
+    n = name.lower()
+    if 'kissat' in n or 'minisat' in n:
+        return 5e9
+    if 'satblast' in n or 'baseline' in n:
+        return 1e9
+    return default_hz
+
+
+def compute_par2_cycles_on_shared_set(folder_metrics, freq_map, shared_tests,
+                                      timeout_seconds, ref_freq_hz=CYCLE_REF_HZ,
+                                      errors_as_timeout=False):
+    """Compute PAR-2 in clock cycles (returned in Gcycles) on the shared test set.
+
+    Each instance's cycle count = runtime_s * solver_frequency. The timeout budget is a
+    single uniform value anchored at ref_freq_hz: timeout_seconds * ref_freq_hz
+    (default 36 s * 1 GHz = 36 Gcycles). Any instance whose cycle count exceeds this
+    budget, or that timed out in wall-clock, is treated as a timeout and charged 2x the
+    budget. 'solved' counts instances finishing within the cycle budget.
+
+    Returns: dict folder_name -> (par2_gcycles, solved_count, total_count).
+    """
+    wall_timeout_ms = timeout_seconds * 1000.0
+    timeout_cycles = timeout_seconds * ref_freq_hz
+    penalty_cycles = 2 * timeout_cycles
+
+    scores = {}
+    for folder_name, metrics in folder_metrics.items():
+        freq = freq_map.get(folder_name, 250e6)
+        if errors_as_timeout:
+            shared_results = [r for r in metrics['results']
+                              if r.get('test_case') in shared_tests]
+        else:
+            shared_results = [r for r in metrics['results']
+                              if r.get('test_case') in shared_tests
+                              and r.get('result') not in ('ERROR', 'UNKNOWN')]
+        if not shared_results:
+            scores[folder_name] = (None, 0, 0)
+            continue
+
+        total_cycles = 0.0
+        solved = 0
+        for r in shared_results:
+            result = r.get('result', 'UNKNOWN')
+            primary = result.split()[0] if result else 'UNKNOWN'
+            try:
+                # Cycle domain uses the TRUE runtime; the /4 SatAccel wall-clock
+                # normalization must not be applied again here.
+                sim_ms = float(r.get('sim_time_ms_true', r.get('sim_time_ms', 0.0)) or 0.0)
+            except (TypeError, ValueError):
+                sim_ms = 0.0
+            if errors_as_timeout and primary in ('ERROR', 'UNKNOWN'):
+                total_cycles += timeout_cycles  # 1x penalty for errors
+            elif primary in ('SAT', 'UNSAT') and sim_ms <= wall_timeout_ms:
+                cyc = (sim_ms / 1000.0) * freq
+                if cyc <= timeout_cycles:
+                    total_cycles += cyc
+                    solved += 1
+                else:
+                    total_cycles += penalty_cycles
+            else:  # TIMEOUT or over wall-clock limit
+                total_cycles += penalty_cycles
+
+        par2_gcycles = (total_cycles / len(shared_results)) / 1e9
+        scores[folder_name] = (par2_gcycles, solved, len(shared_results))
+
+    return scores
+
+
+def compute_geomean_speedups_cycles(folder_metrics, freq_map, shared_tests,
+                                    timeout_seconds, baseline_name, ref_freq_hz=CYCLE_REF_HZ,
+                                    errors_as_timeout=False):
+    """Geometric mean speedup in the cycle domain vs baseline on the shared test set.
+
+    Speedup per test = base_cycles / config_cycles, using the same uniform cycle budget
+    and penalty as compute_par2_cycles_on_shared_set. Baseline has speedup 1.0.
+    Returns: dict folder_name -> geomean_speedup (float or None).
+    """
+    wall_timeout_ms = timeout_seconds * 1000.0
+    timeout_cycles = timeout_seconds * ref_freq_hz
+    penalty_cycles = 2 * timeout_cycles
+    error_penalty = timeout_cycles if errors_as_timeout else penalty_cycles
+
+    def eff_cycles(r, freq):
+        result = r.get('result', 'UNKNOWN')
+        primary = result.split()[0] if result else 'UNKNOWN'
+        try:
+            # Cycle domain uses the TRUE runtime; the /4 SatAccel wall-clock
+            # normalization must not be applied again here.
+            sim_ms = float(r.get('sim_time_ms_true', r.get('sim_time_ms', 0.0)) or 0.0)
+        except (TypeError, ValueError):
+            sim_ms = 0.0
+        if primary in ('SAT', 'UNSAT') and sim_ms <= wall_timeout_ms:
+            cyc = (sim_ms / 1000.0) * freq
+            return cyc if cyc <= timeout_cycles else penalty_cycles
+        if errors_as_timeout and primary in ('ERROR', 'UNKNOWN'):
+            return error_penalty
+        return penalty_cycles
+
+    folder_case_map = {}
+    for folder_name, metrics in folder_metrics.items():
+        freq = freq_map.get(folder_name, 250e6)
+        case_map = {}
+        for r in metrics['results']:
+            tc = r.get('test_case')
+            if tc not in shared_tests:
+                continue
+            case_map[tc] = eff_cycles(r, freq)
+        folder_case_map[folder_name] = case_map
+
+    geomeans = {}
+    baseline_map = folder_case_map.get(baseline_name, {})
+    for folder_name in folder_metrics.keys():
+        if folder_name == baseline_name:
+            geomeans[folder_name] = 1.0
+            continue
+        case_map = folder_case_map.get(folder_name, {})
+        ln_sum = 0.0
+        n = 0
+        for tc in shared_tests:
+            tb = baseline_map.get(tc)
+            tc_eff = case_map.get(tc)
+            if not tb or not tc_eff or tb <= 0 or tc_eff <= 0:
+                continue
+            ln_sum += math.log(tb / tc_eff)
+            n += 1
+        geomeans[folder_name] = math.exp(ln_sum / n) if n > 0 else None
+
+    return geomeans
+
 
 def generate_figure(folder_metrics, folder_names, baseline_name, shared_tests,
-                    timeout_seconds, errors_as_timeout, exclude_timeouts, pdf_path):
-    """Generate a single (a)+(b) PDF for the given shared test set."""
-    shared_par2 = compute_par2_on_shared_set(folder_metrics, shared_tests,
-                                              timeout_seconds, errors_as_timeout)
-    geomeans = compute_geomean_speedups(folder_metrics, shared_tests,
-                                         timeout_seconds, baseline_name, errors_as_timeout)
+                    timeout_seconds, errors_as_timeout, exclude_timeouts, pdf_path,
+                    freq_map=None):
+    """Generate a single (a)+(b) PDF for the given shared test set.
 
-    tag = "no-timeouts" if exclude_timeouts else "with-timeouts"
+    When freq_map is provided, the (a) panel shows PAR-2 in Gcycles and (b) shows the
+    frequency-normalized (cycle-domain) geomean speedup instead of wall-clock values.
+    """
+    cycles = freq_map is not None
+    unit = 'Gcyc' if cycles else 's'
+    if cycles:
+        shared_par2 = compute_par2_cycles_on_shared_set(
+            folder_metrics, freq_map, shared_tests, timeout_seconds,
+            errors_as_timeout=errors_as_timeout)
+        geomeans = compute_geomean_speedups_cycles(
+            folder_metrics, freq_map, shared_tests, timeout_seconds, baseline_name,
+            errors_as_timeout=errors_as_timeout)
+    else:
+        shared_par2 = compute_par2_on_shared_set(folder_metrics, shared_tests,
+                                                  timeout_seconds, errors_as_timeout)
+        geomeans = compute_geomean_speedups(folder_metrics, shared_tests,
+                                             timeout_seconds, baseline_name, errors_as_timeout)
+
+    tag = "cycles" if cycles else ("no-timeouts" if exclude_timeouts else "with-timeouts")
+    par2_col = 'PAR-2 (Gcyc)' if cycles else 'PAR-2 (s)'
     print(f"\n[{tag}] {len(shared_tests)} shared tests")
-    print(f"{'Folder':<30} {'PAR-2 (s)':<12} {'Solved/Total':<16} {'Geomean×':<12}")
+    print(f"{'Folder':<30} {par2_col:<14} {'Solved/Total':<16} {'Geomean×':<12}")
     print("-" * 74)
     for fn in folder_names:
         par2, solved, total = shared_par2[fn]
@@ -85,7 +244,10 @@ def generate_figure(folder_metrics, folder_names, baseline_name, shared_tests,
         fig, (ax_par2, ax_geo) = plt.subplots(1, 2, figsize=(fig_w, fig_h))
 
         # ---- (a) PAR-2 ----
-        y_label = 'Runtime (s)' if exclude_timeouts else 'PAR-2 (s)'
+        if cycles:
+            y_label = 'PAR-2 (Gcycles)'
+        else:
+            y_label = 'Runtime (s)' if exclude_timeouts else 'PAR-2 (s)'
         ax_par2.set_ylabel(y_label, fontsize=int(30 * font_scale))
         ax_par2.tick_params(axis='y', labelsize=int(26 * font_scale))
         ax_par2.grid(axis='y', alpha=0.3)
@@ -97,10 +259,13 @@ def generate_figure(folder_metrics, folder_names, baseline_name, shared_tests,
         for bar, par2, solved in zip(bars_a, par2_values, solved_counts):
             h = bar.get_height()
             timeout_count = total_count - solved
+            # Cycle plot drops the unit suffix in bar labels (unit is on the y-axis);
+            # wall-clock keeps "s".
+            val_label = f'{par2:.2f}' if cycles else f'{par2:.2f} {unit}'
             if exclude_timeouts:
-                bar_label = f'{par2:.2f} s'
+                bar_label = val_label
             else:
-                bar_label = f'{par2:.2f} s\nTO: {timeout_count}'
+                bar_label = f'{val_label}\nTO: {timeout_count}'
             ax_par2.text(bar.get_x() + bar.get_width() / 2., h,
                          bar_label,
                          ha='center', va='bottom', fontsize=int(20 * font_scale))
@@ -232,6 +397,20 @@ def main():
                         output_dir / 'overall_perf_no_timeouts.pdf')
     else:
         print("Error: No shared tests for no-timeouts set")
+
+    # --- PDF 3: frequency-normalized (cycle domain), uses the with-timeouts set ---
+    freq_map = {name: get_folder_frequency(name) for name in folder_metrics}
+    print("\nCycle view assumed clocks (from name match):")
+    for name, hz in freq_map.items():
+        print(f"  {name:<30} {hz/1e9:g} GHz")
+    print(f"Cycle timeout budget: {args.timeout * CYCLE_REF_HZ / 1e9:g} Gcycles "
+          f"({args.timeout:g} s x {CYCLE_REF_HZ/1e9:g} GHz)")
+    if shared_tests:
+        generate_figure(folder_metrics, folder_names, baseline_name, shared_tests,
+                        args.timeout, args.errors_as_timeout, False,
+                        output_dir / 'overall_perf_cycle.pdf', freq_map=freq_map)
+    else:
+        print("Error: No shared tests for cycle set")
 
 
 if __name__ == '__main__':

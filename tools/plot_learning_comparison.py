@@ -22,23 +22,25 @@ import matplotlib.ticker as mticker
 
 from plot_comparison import (
     compute_metrics_for_folder, get_shared_test_set, get_folder_colors,
+    compute_geomean_speedups,
 )
 
 FIG_SIZE = (13, 6)
 
+# (metric_key, chart_label_with_newlines, plain_text_label_for_console)
 LEARNING_METRICS = [
-    ('avg_backtrack_level', 'BT\nLevel'),
-    ('avg_lbd', 'LBD'),
-    ('avg_learnt_clause_length', 'CL\nLength'),
-    ('unit_learnt_clauses', 'Unit\nClauses'),
-    ('decisions', 'Decisions'),
+    ('avg_backtrack_level', 'BT\nLevel', 'BT Level'),
+    ('avg_lbd', 'LBD', 'LBD'),
+    ('avg_learnt_clause_length', 'CL\nLength', 'CL Length'),
+    ('decisions', 'Decisions', 'Decisions'),
+    ('unit_learnt_clauses', 'Unit\nClauses', 'Unit Clauses'),
 ]
 
 LEARNING_METRICS_NO_BT = [
-    ('avg_lbd', 'LBD'),
-    ('avg_learnt_clause_length', 'CL\nLength'),
-    ('unit_learnt_clauses', 'Unit\nClauses'),
-    ('decisions', 'Decisions'),
+    ('avg_lbd', 'LBD', 'LBD'),
+    ('avg_learnt_clause_length', 'CL\nLength', 'CL Length'),
+    ('decisions', 'Decisions', 'Decisions'),
+    ('unit_learnt_clauses', 'Unit\nClauses', 'Unit Clauses'),
 ]
 
 
@@ -64,7 +66,7 @@ def compute_learning_averages(folder_metrics, shared_tests):
 
     Returns: dict metric_key -> dict folder_name -> average_value
     """
-    averages = {key: {} for key, _ in LEARNING_METRICS}
+    averages = {key: {} for key, _, _ in LEARNING_METRICS}
 
     for folder_name, metrics in folder_metrics.items():
         result_map = {}
@@ -73,7 +75,7 @@ def compute_learning_averages(folder_metrics, shared_tests):
             if tc in shared_tests:
                 result_map[tc] = r
 
-        for key, _ in LEARNING_METRICS:
+        for key, _, _ in LEARNING_METRICS:
             vals = []
             for tc in shared_tests:
                 r = result_map.get(tc)
@@ -98,7 +100,7 @@ def compute_learning_geomean_ratios(folder_metrics, shared_tests, baseline_name)
 
     Returns: dict metric_key -> dict folder_name -> geomean_ratio
     """
-    ratios = {key: {} for key, _ in LEARNING_METRICS}
+    ratios = {key: {} for key, _, _ in LEARNING_METRICS}
 
     # Build per-folder result maps
     folder_maps = {}
@@ -112,7 +114,7 @@ def compute_learning_geomean_ratios(folder_metrics, shared_tests, baseline_name)
 
     baseline_map = folder_maps.get(baseline_name, {})
 
-    for key, _ in LEARNING_METRICS:
+    for key, _, _ in LEARNING_METRICS:
         for folder_name in folder_metrics.keys():
             if folder_name == baseline_name:
                 ratios[key][folder_name] = 1.0
@@ -167,7 +169,7 @@ def plot_learning_grouped(folder_metrics, shared_tests, output_dir, large_fonts=
 
         for folder_idx, folder_name in enumerate(folder_names):
             x_positions = [x + folder_idx * bar_width for x in x_base]
-            values = [averages[key].get(folder_name, 0.0) for key, _ in LEARNING_METRICS]
+            values = [averages[key].get(folder_name, 0.0) for key, _, _ in LEARNING_METRICS]
             ax.bar(x_positions, values, bar_width,
                    label=folder_name,
                    color=folder_colors[folder_idx],
@@ -181,14 +183,14 @@ def plot_learning_grouped(folder_metrics, shared_tests, output_dir, large_fonts=
 
         ax.set_ylabel('Value', fontsize=int(32 * font_scale))
         ax.set_xticks([x + bar_width * (num_folders - 1) / 2 for x in x_base])
-        ax.set_xticklabels([label for _, label in LEARNING_METRICS],
+        ax.set_xticklabels([label for _, label, _ in LEARNING_METRICS],
                            fontsize=int(30 * font_scale), ha='center')
         ax.tick_params(axis='y', labelsize=int(28 * font_scale))
         ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.1f'))
         ax.grid(axis='y', alpha=0.3)
         ax.set_axisbelow(True)
 
-        all_vals = [averages[key].get(name, 0.0) for key, _ in LEARNING_METRICS for name in folder_names]
+        all_vals = [averages[key].get(name, 0.0) for key, _, _ in LEARNING_METRICS for name in folder_names]
         max_val = max(all_vals) if all_vals else 1
         ax.set_ylim(0, max_val * 1.3)
 
@@ -231,7 +233,7 @@ def plot_learning_per_test_ratios(folder_metrics, shared_tests, output_dir, base
     baseline_map = folder_maps.get(baseline_name, {})
 
     with matplotlib.backends.backend_pdf.PdfPages(pdf_path) as pdf:
-        for key, label in LEARNING_METRICS:
+        for key, label, _ in LEARNING_METRICS:
             # Get tests that have valid values in all folders
             valid_tests = []
             for tc in shared_tests:
@@ -311,7 +313,7 @@ def plot_learning_geomean(folder_metrics, shared_tests, output_dir, baseline_nam
         for folder_idx, folder_name in enumerate(folder_names):
             x_positions = [x + folder_idx * bar_width for x in x_base]
             values = []
-            for key, _ in LEARNING_METRICS:
+            for key, _, _ in LEARNING_METRICS:
                 v = ratios[key].get(folder_name, None)
                 values.append(v if v is not None else 0.0)
             ax.bar(x_positions, values, bar_width,
@@ -323,7 +325,7 @@ def plot_learning_geomean(folder_metrics, shared_tests, output_dir, baseline_nam
         ax.set_ylabel('Geomean Ratio', fontsize=int(32 * font_scale))
         group_centers = [x + bar_width * (num_folders - 1) / 2 for x in x_base]
         ax.set_xticks(group_centers)
-        ax.set_xticklabels([label for _, label in LEARNING_METRICS],
+        ax.set_xticklabels([label for _, label, _ in LEARNING_METRICS],
                            fontsize=int(30 * font_scale), ha='center')
         ax.tick_params(axis='y', labelsize=int(28 * font_scale))
         ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.1f'))
@@ -332,13 +334,13 @@ def plot_learning_geomean(folder_metrics, shared_tests, output_dir, baseline_nam
         ax.set_axisbelow(True)
         ax.axhline(y=1.0, color='darkred', linestyle='--', linewidth=1.5, alpha=0.8, zorder=3)
 
-        all_vals = [ratios[key].get(name, 0.0) or 0.0 for key, _ in LEARNING_METRICS for name in folder_names]
+        all_vals = [ratios[key].get(name, 0.0) or 0.0 for key, _, _ in LEARNING_METRICS for name in folder_names]
         max_val = max(all_vals) if all_vals else 1.0
         ax.set_ylim(0, max(max_val * 1.3, 1.5))
 
         # Add "Lower Better" / "Higher Better" labels per group above the 1.0 line
         label_y = max_val * 1.3 * 0.90  # above bars, below legend
-        for gi, (key, _) in enumerate(LEARNING_METRICS):
+        for gi, (key, _, _) in enumerate(LEARNING_METRICS):
             label_text = 'Higher\nBetter' if key == 'unit_learnt_clauses' else 'Lower\nBetter'
             ax.text(group_centers[gi], label_y, label_text, ha='center', va='top',
                     fontsize=int(22 * font_scale), color='green', fontweight='bold')
@@ -380,7 +382,7 @@ def plot_learning_geomean_no_bt(folder_metrics, shared_tests, output_dir, baseli
         for folder_idx, folder_name in enumerate(folder_names):
             x_positions = [x + folder_idx * bar_width for x in x_base]
             values = []
-            for key, _ in metrics:
+            for key, _, _ in metrics:
                 v = ratios[key].get(folder_name, None)
                 values.append(v if v is not None else 0.0)
             ax.bar(x_positions, values, bar_width,
@@ -392,7 +394,7 @@ def plot_learning_geomean_no_bt(folder_metrics, shared_tests, output_dir, baseli
         ax.set_ylabel('Geomean Ratio', fontsize=int(32 * font_scale))
         group_centers = [x + bar_width * (num_folders - 1) / 2 for x in x_base]
         ax.set_xticks(group_centers)
-        ax.set_xticklabels([label for _, label in metrics],
+        ax.set_xticklabels([label for _, label, _ in metrics],
                            fontsize=int(30 * font_scale), ha='center')
         ax.tick_params(axis='y', labelsize=int(28 * font_scale))
         ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.1f'))
@@ -401,13 +403,13 @@ def plot_learning_geomean_no_bt(folder_metrics, shared_tests, output_dir, baseli
         ax.set_axisbelow(True)
         ax.axhline(y=1.0, color='darkred', linestyle='--', linewidth=1.5, alpha=0.8, zorder=3)
 
-        all_vals = [ratios[key].get(name, 0.0) or 0.0 for key, _ in metrics for name in folder_names]
+        all_vals = [ratios[key].get(name, 0.0) or 0.0 for key, _, _ in metrics for name in folder_names]
         max_val = max(all_vals) if all_vals else 1.0
         ax.set_ylim(0, max(max_val * 1.3, 1.5))
 
         # Add "Lower Better" / "Higher Better" labels per group above the 1.0 line
         label_y = max_val * 1.3 * 0.90  # above bars, below legend
-        for gi, (key, _) in enumerate(metrics):
+        for gi, (key, _, _) in enumerate(metrics):
             label_text = 'Higher\nBetter' if key == 'unit_learnt_clauses' else 'Lower\nBetter'
             ax.text(group_centers[gi], label_y, label_text, ha='center', va='top',
                     fontsize=int(22 * font_scale), color='green', fontweight='bold')
@@ -423,6 +425,115 @@ def plot_learning_geomean_no_bt(folder_metrics, shared_tests, output_dir, baseli
     print(f"Learning geomean ratio chart (no BT level) saved to: {pdf_path}")
 
 
+def plot_speedup_vs_runtime(folder_metrics, shared_tests, output_dir, baseline_name,
+                            timeout_seconds, large_fonts=False):
+    """Scatter: x = baseline runtime (ms, log), y = speedup vs baseline (log).
+    Each non-baseline folder is a separate marker color.
+    Prints Pearson/Spearman correlation on (log_runtime, log_speedup) per folder.
+    """
+    font_scale = 1.5 if large_fonts else 1.0
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = output_dir / 'speedup_vs_runtime.pdf'
+
+    timeout_ms = timeout_seconds * 1000.0
+    penalty_ms = 2 * timeout_ms
+
+    # Build folder -> tc -> (result, sim_ms)
+    folder_case_map = {}
+    for fn, m in folder_metrics.items():
+        cm = {}
+        for r in m['results']:
+            tc = r.get('test_case')
+            if tc not in shared_tests:
+                continue
+            try:
+                sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                sim_ms = penalty_ms
+            cm[tc] = (r.get('result'), sim_ms)
+        folder_case_map[fn] = cm
+    baseline_cm = folder_case_map.get(baseline_name, {})
+
+    def eff(res, ms):
+        return ms if (res in ('SAT', 'UNSAT') and ms <= timeout_ms) else penalty_ms
+
+    folder_names = list(folder_metrics.keys())
+    colors = get_folder_colors(folder_names)
+
+    # Bucket boundaries (ms): for the runtime-bucket summary
+    buckets = [(0, 10), (10, 100), (100, 1000), (1000, 10000), (10000, float('inf'))]
+    bucket_labels = ['<10ms', '10ms-100ms', '100ms-1s', '1s-10s', '>10s']
+
+    fig, ax = plt.subplots(figsize=(10 * (1 + 0.2 * (font_scale - 1)),
+                                    6 * (1 + 0.2 * (font_scale - 1))))
+
+    bucket_summary = OrderedDict()  # folder -> list of geomeans per bucket
+
+    for fi, fn in enumerate(folder_names):
+        if fn == baseline_name:
+            continue
+        cm = folder_case_map.get(fn, {})
+        xs, ys = [], []
+        for tc in shared_tests:
+            b = baseline_cm.get(tc); c = cm.get(tc)
+            if not b or not c:
+                continue
+            tb = eff(*b); tc_t = eff(*c)
+            if tb <= 0 or tc_t <= 0:
+                continue
+            xs.append(tb)
+            ys.append(tb / tc_t)
+
+        if not xs:
+            continue
+
+        ax.scatter(xs, ys, label=fn, color=colors[fi], alpha=0.7, edgecolor='black',
+                   linewidth=0.5, s=int(50 * font_scale))
+
+        # Geomean speedup per runtime bucket
+        n = len(xs)
+        bucket_summary[fn] = []
+        for lo, hi in buckets:
+            lsy = [math.log(ys[i]) for i in range(n) if lo <= xs[i] < hi]
+            if lsy:
+                gm = math.exp(sum(lsy) / len(lsy))
+                bucket_summary[fn].append((len(lsy), gm))
+            else:
+                bucket_summary[fn].append((0, None))
+
+    # Reference lines
+    ax.axhline(y=1.0, color='black', linestyle='--', linewidth=1.0, alpha=0.6)
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlabel(f'{baseline_name} runtime (ms)', fontsize=int(13 * font_scale))
+    ax.set_ylabel(f'Speedup vs {baseline_name}', fontsize=int(13 * font_scale))
+    ax.set_title(f'Per-test speedup vs baseline runtime (n={len(shared_tests)})',
+                 fontsize=int(13 * font_scale))
+    ax.tick_params(axis='both', labelsize=int(11 * font_scale))
+    ax.grid(True, which='both', alpha=0.3)
+    ax.legend(fontsize=int(11 * font_scale), loc='best', frameon=True)
+
+    plt.tight_layout()
+    with matplotlib.backends.backend_pdf.PdfPages(pdf_path) as pdf:
+        pdf.savefig(fig, bbox_inches='tight')
+    plt.close(fig)
+
+    # Print per-bucket geomean speedup table
+    print(f"\nGeomean speedup by {baseline_name} runtime bucket:")
+    header = f"{'Folder':<20}" + "".join(f" {lbl:<13}" for lbl in bucket_labels)
+    print(header)
+    print("-" * len(header))
+    for fn, rows in bucket_summary.items():
+        line = f"{fn:<20}"
+        for cnt, gm in rows:
+            cell = f"{gm:.3f}x(n={cnt})" if gm is not None else f"-     (n={cnt})"
+            line += f" {cell:<13}"
+        print(line)
+
+    print(f"\nSpeedup-vs-runtime scatter saved to: {pdf_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Compare conflict learning statistics across folders',
@@ -436,6 +547,9 @@ def main():
                         help='Output directory for plots (default: results/)')
     parser.add_argument('--large-fonts', action='store_true',
                         help='Use larger font sizes')
+    parser.add_argument('--exclude', nargs='+', default=[],
+                        help='Extra test_case substrings to exclude (matched against '
+                             'each loaded test name; e.g. --exclude 1427 vmpc_24)')
 
     args = parser.parse_args()
 
@@ -473,6 +587,19 @@ def main():
         print("\nError: Need at least 2 folders with valid results")
         sys.exit(1)
 
+    if args.exclude:
+        import plot_comparison
+        all_tcs = {r.get('test_case') for fm in folder_metrics.values() for r in fm['results']}
+        matched = {tc for pat in args.exclude for tc in all_tcs if pat in tc}
+        if matched:
+            plot_comparison.MANUAL_EXCLUSIONS.update(matched)
+            print(f"\nExtra exclusions from --exclude ({len(matched)} match):")
+            for tc in sorted(matched):
+                print(f"  {tc}")
+        for pat in args.exclude:
+            if not any(pat in tc for tc in all_tcs):
+                print(f"  Warning: --exclude '{pat}' matched no test")
+
     shared_tests, exclusion_table = get_shared_test_set(folder_metrics, args.timeout)
 
     if exclusion_table:
@@ -487,33 +614,86 @@ def main():
     shared_set = set(shared_tests)
     baseline_name = next(iter(folder_metrics.keys()))
 
-    # Print averages table
+    # Print averages table (use plain-text labels; add geomean Speedup× column)
     averages = compute_learning_averages(folder_metrics, shared_set)
-    header = f"{'Folder':<30}"
-    for _, label in LEARNING_METRICS:
-        header += f" {label:<14}"
+    geomean_speedups = compute_geomean_speedups(
+        folder_metrics, shared_set, args.timeout, baseline_name, errors_as_timeout=False,
+    )
+    col_w = 15
+    header = f"{'Folder':<30}" + "".join(f" {txt:<{col_w}}" for _, _, txt in LEARNING_METRICS) + f" {'Speedup×':<{col_w}}"
+    sep = "-" * (30 + (col_w + 1) * (len(LEARNING_METRICS) + 1))
     print(f"\n{header}")
-    print("-" * (30 + 15 * len(LEARNING_METRICS)))
+    print(sep)
     for folder_name in folder_metrics.keys():
         row = f"{folder_name:<30}"
-        for key, _ in LEARNING_METRICS:
+        for key, _, _ in LEARNING_METRICS:
             v = averages[key].get(folder_name, 0.0)
-            row += f" {v:<14.2f}"
+            row += f" {v:<{col_w}.2f}"
+        sp = geomean_speedups.get(folder_name)
+        sp_str = f"{sp:.4f}x" if sp is not None else 'n/a'
+        row += f" {sp_str:<{col_w}}"
         print(row)
 
     # Print geomean ratios table
     ratios = compute_learning_geomean_ratios(folder_metrics, shared_set, baseline_name)
     print(f"\nGeomean Ratio vs {baseline_name}:")
-    print(f"{header}")
-    print("-" * (30 + 15 * len(LEARNING_METRICS)))
+    print(header)
+    print(sep)
     for folder_name in folder_metrics.keys():
         row = f"{folder_name:<30}"
-        for key, _ in LEARNING_METRICS:
+        for key, _, _ in LEARNING_METRICS:
             v = ratios[key].get(folder_name, None)
-            row += f" {(f'{v:.4f}x' if v is not None else 'n/a'):<14}"
+            row += f" {(f'{v:.4f}x' if v is not None else 'n/a'):<{col_w}}"
+        sp = geomean_speedups.get(folder_name)
+        sp_str = f"{sp:.4f}x" if sp is not None else 'n/a'
+        row += f" {sp_str:<{col_w}}"
         print(row)
 
+    # Per-test slowdown counts vs baseline (using same effective-time rules
+    # as compute_geomean_speedups: timeout/error -> 2×timeout penalty)
+    timeout_ms = args.timeout * 1000.0
+    penalty_ms = 2 * timeout_ms
+    folder_case_map = {}
+    for fn, m in folder_metrics.items():
+        cm = {}
+        for r in m['results']:
+            tc = r.get('test_case')
+            if tc not in shared_set:
+                continue
+            try:
+                sim_ms = float(r.get('sim_time_ms', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                sim_ms = penalty_ms
+            cm[tc] = (r.get('result'), sim_ms)
+        folder_case_map[fn] = cm
+    baseline_cm = folder_case_map.get(baseline_name, {})
+
+    def eff(res, ms):
+        return ms if (res in ('SAT', 'UNSAT') and ms <= timeout_ms) else penalty_ms
+
+    print(f"\nPer-test perf vs {baseline_name} (effective time, 2× penalty on timeout/error):")
+    print(f"{'Folder':<30} {'Slower':<10} {'Faster':<10} {'Tied':<10} {'Compared':<10}")
+    print("-" * 70)
+    for fn in folder_metrics.keys():
+        if fn == baseline_name:
+            continue
+        cm = folder_case_map.get(fn, {})
+        n_slow = n_fast = n_tie = 0
+        for tc in shared_set:
+            b = baseline_cm.get(tc); c = cm.get(tc)
+            if not b or not c:
+                continue
+            tb = eff(*b); tc_t = eff(*c)
+            if tb <= 0 or tc_t <= 0:
+                continue
+            if tc_t > tb:   n_slow += 1
+            elif tc_t < tb: n_fast += 1
+            else:           n_tie  += 1
+        print(f"{fn:<30} {n_slow:<10} {n_fast:<10} {n_tie:<10} {n_slow+n_fast+n_tie:<10}")
+
     # Generate plots (1 PDF each)
+    plot_speedup_vs_runtime(folder_metrics, shared_set, args.output_dir, baseline_name,
+                            args.timeout, args.large_fonts)
     plot_learning_grouped(folder_metrics, shared_set, args.output_dir, args.large_fonts)
     plot_learning_geomean(folder_metrics, shared_set, args.output_dir, baseline_name, args.large_fonts)
     plot_learning_geomean_no_bt(folder_metrics, shared_set, args.output_dir, baseline_name, args.large_fonts)

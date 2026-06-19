@@ -17,13 +17,15 @@ Examples:
 
 import sys
 import csv
+import re
 import argparse
 from pathlib import Path
 from collections import defaultdict
 import math
 import matplotlib.pyplot as plt
 import matplotlib.backends.backend_pdf
-from matplotlib.ticker import MaxNLocator, FormatStrFormatter
+import matplotlib.patches
+import matplotlib.colors
 
 # Unified figure size for all charts - wider to accommodate compact legend
 FIG_SIZE = (14, 4)
@@ -33,6 +35,12 @@ from unified_parser import parse_log_directory, format_bytes
 def wrap_label(text, max_len=9):
     """Wrap text to next line if longer than max_len characters.
     Splits after the first max_len characters at the nearest space, or exactly at max_len."""
+    # Honor explicit line breaks passed as the literal two-char sequence "\n"
+    # (e.g. from a shell script using plain double quotes), or as a real newline.
+    if '\\n' in text:
+        text = text.replace('\\n', '\n')
+    if '\n' in text:
+        return text
     if len(text) <= max_len:
         return text
     # Try to find a space near the max_len boundary to split cleanly
@@ -73,8 +81,10 @@ def get_folder_colors(folder_names):
     """Assign colors to folders with custom logic:
     - First folder (baseline): Red
     - "SATBlast" folder: Blue
+    - SATBlast cache-size sweep (names like "2MB", "24MB"): one blue family,
+      shaded light->dark in order so they read as a single group.
     - Other folders: Colors in spectrum order (orange, yellow, green, cyan, purple, pink, etc.)
-    
+
     Returns list of color hex codes in same order as folder_names.
     """
     # Color spectrum in order for smooth transitions
@@ -88,14 +98,40 @@ def get_folder_colors(folder_names):
         '#8c564b',  # Brown
         '#7f7f7f',  # Gray
     ]
-    
+
+    # Fixed colors for software-solver baselines so they stay consistent
+    # regardless of position (and across plot_comparison / plot_preprocess).
+    fixed_solver_colors = {
+        'minisat': '#bcbd22',  # Yellow-green
+        'kissat': '#2ca02c',   # Green
+    }
+
+    # Detect the SATBlast cache-size sweep: bare size labels like "2MB" / "24 MB".
+    size_re = re.compile(r'^\s*\d+\s*[KMG]B\s*$', re.IGNORECASE)
+    size_indices = [i for i, n in enumerate(folder_names) if size_re.match(n)]
+    # Map each sweep member to a shade of one blue hue (light -> dark, in order).
+    sweep_shade = {}
+    if size_indices:
+        blues = plt.get_cmap('Blues')
+        n = len(size_indices)
+        for rank, idx in enumerate(size_indices):
+            # Spread across 0.40..0.95 of the colormap (avoid near-white at the low end).
+            t = 0.40 + (0.55 * rank / (n - 1) if n > 1 else 0.55)
+            sweep_shade[idx] = matplotlib.colors.to_hex(blues(t))
+
     colors = []
     spectrum_idx = 0
-    
+
     for idx, name in enumerate(folder_names):
-        if idx == 0:
-            # First folder is always red (baseline)
+        if idx == 0 and 'baseline' in name.lower():
+            # First folder is red only when it is explicitly the baseline
             colors.append('#d62728')
+        elif name.strip().lower() in fixed_solver_colors:
+            # Software solvers always get their fixed color (any position).
+            colors.append(fixed_solver_colors[name.strip().lower()])
+        elif idx in sweep_shade:
+            # SATBlast cache-size sweep: shared blue family, shaded by size.
+            colors.append(sweep_shade[idx])
         elif 'SATBlast' in name or 'satblast' in name.lower():
             # SATBlast folder is always blue
             colors.append('#1f77b4')
@@ -103,7 +139,7 @@ def get_folder_colors(folder_names):
             # Other folders use spectrum colors in order
             colors.append(spectrum_colors[spectrum_idx % len(spectrum_colors)])
             spectrum_idx += 1
-    
+
     return colors
 
 
@@ -182,7 +218,10 @@ def parse_raw_text_file(file_path, timeout_seconds, normalize_sataccel=False):
 
         if normalize_sataccel:
             # Use par2 column to detect timeouts (par2 >= 2*timeout means timeout),
-            # then use sim_time column for actual runtime of solved tests.
+            # then use sim_time column for the true runtime of solved tests.
+            # NOTE: parsing stays TRUE here -- the /4 SatAccel clock normalization is
+            # applied later, post-parse, in compute_metrics_for_folder (wall-clock only),
+            # so cycle-domain plots can read the un-normalized runtime.
             is_timeout = (time_ms > timeout_ms)
             if is_timeout:
                 result = 'TIMEOUT'
@@ -195,7 +234,6 @@ def parse_raw_text_file(file_path, timeout_seconds, normalize_sataccel=False):
                         time_ms = float(parts[sim_time_col])
                     except (ValueError, IndexError):
                         pass
-                time_ms /= 4.0
         else:
             # Determine result based on time
             if time_ms > timeout_ms:
@@ -247,7 +285,21 @@ def compute_metrics_for_folder(folder_path, timeout_seconds, normalize_sataccel=
                 'total_count': 0,
                 'excluded_tests': []
             }
-        
+
+        # Preserve the true (un-normalized) runtime for cycle-domain plots, then apply
+        # the SatAccel clock normalization (1/4) only to the wall-clock value. This is
+        # the sole place the /4 is applied, so cycle plots read sim_time_ms_true and are
+        # never double-normalized.
+        for r in results:
+            r['sim_time_ms_true'] = r.get('sim_time_ms', 0.0)
+        if normalize_sataccel:
+            for r in results:
+                if r.get('result') in ('SAT', 'UNSAT'):
+                    try:
+                        r['sim_time_ms'] = float(r['sim_time_ms']) / 4.0
+                    except (TypeError, ValueError):
+                        pass
+
         # Calculate metrics
         timeout_ms = timeout_seconds * 1000.0
         par2_penalty = 2 * timeout_ms
@@ -785,7 +837,7 @@ def plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests,
     output_dir.mkdir(parents=True, exist_ok=True)
     
     pdf_path = output_dir / 'comparison_charts.pdf'
-    
+
     with matplotlib.backends.backend_pdf.PdfPages(pdf_path) as pdf:
         # Chart 1: PAR-2 Score Comparison (shared set)
         fig, ax = plt.subplots(figsize=fig_size)
@@ -822,7 +874,7 @@ def plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests,
             ax.plot(x_positions, par2_values, marker='o', markersize=10, linewidth=2.5,
                     color='#1f77b4', zorder=3, markeredgecolor='white', markeredgewidth=1.5)
             for i, (x, par2, solved) in enumerate(zip(x_positions, par2_values, solved_counts)):
-                ax.annotate(f'{par2:.2f} s\nSolved: {solved}',
+                ax.annotate(f'{par2:.2f} s\nTO: {total_count - solved}',
                            (x, par2), textcoords="offset points", xytext=(0, 12),
                            ha='center', va='bottom', fontsize=int(20 * font_scale), fontweight='bold')
             # Highlight the last point with a star and label
@@ -840,14 +892,20 @@ def plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests,
             for i, (bar, par2, solved) in enumerate(zip(bars, par2_values, solved_counts)):
                 height = bar.get_height()
                 ax.text(bar.get_x() + bar.get_width()/2., height,
-                        f'{par2:.2f} s\nSolved: {solved}',
+                        f'{par2:.2f} s\nTO: {total_count - solved}',
                         ha='center', va='bottom', fontsize=int(24 * font_scale))
 
         ax.set_xticks(x_positions)
-        ax.set_xticklabels([wrap_label(n) for n in folder_names], fontsize=int(28 * font_scale), ha='center')
+        ax.set_xticklabels([wrap_label(n) for n in folder_names], fontsize=int(24 * font_scale), ha='center')
         max_par2 = max(par2_values) if par2_values else 1
-        ax.set_ylim(0, max_par2 * 1.25)
-        
+        ax.set_ylim(0, max_par2 * 1.4)
+
+        # Legend (top right) explaining the TO abbreviation
+        to_handle = matplotlib.patches.Patch(visible=False)
+        ax.legend([to_handle], ['TO = Timeout'], loc='upper right',
+                  fontsize=int(20 * font_scale), frameon=True,
+                  handlelength=0, handletextpad=0, borderaxespad=0.5)
+
         plt.tight_layout()
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
@@ -982,7 +1040,7 @@ def plot_geomean_chart(folder_metrics, shared_tests, timeout_seconds, output_dir
             ax.plot(x_positions, plot_vals, marker='o', markersize=10 * font_scale ** 1.5, linewidth=2.5 * font_scale ** 1.5,
                     color='#1f77b4', zorder=3, markeredgecolor='white', markeredgewidth=1.5 * font_scale)
             for x, val in zip(x_positions, g_values):
-                label = 'n/a' if val is None else f'{val:.3f}×'
+                label = 'n/a' if val is None else f'{val:.2f}×'
                 y = val if val is not None else 0.0
                 ax.annotate(label, (x, y), textcoords="offset points", xytext=(0, 12 * font_scale),
                            ha='center', va='bottom', fontsize=int(20 * font_scale), fontweight='bold')
@@ -1000,7 +1058,7 @@ def plot_geomean_chart(folder_metrics, shared_tests, timeout_seconds, output_dir
             bars = ax.bar(x_positions, plot_vals, width=bar_width, color=folder_colors, alpha=0.85, edgecolor='black', linewidth=0.8)
             for bar, val in zip(bars, g_values):
                 height = bar.get_height()
-                label = 'n/a' if val is None else f'{val:.3f}×'
+                label = 'n/a' if val is None else f'{val:.2f}×'
                 ax.text(bar.get_x() + bar.get_width()/2., height,
                         label, ha='center', va='bottom', fontsize=int(26 * font_scale))
 
@@ -1008,8 +1066,6 @@ def plot_geomean_chart(folder_metrics, shared_tests, timeout_seconds, output_dir
         ax.set_xticklabels([wrap_label(n) for n in folder_names], fontsize=int(28 * font_scale), ha='center')
         ymax = max(plot_vals) if plot_vals else 1.0
         ax.set_ylim(0, ymax * 1.25)
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
-        ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
         plt.tight_layout()
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
@@ -1201,7 +1257,7 @@ Examples:
                        help='Highlight the last point in line charts with a star and label underneath (e.g. "SATBlast")')
     parser.add_argument('--normalize-sataccel', action='store_true',
                        help='Divide all runtimes in .txt file inputs by 4 (normalize SatAccel clock scaling)')
-    
+
     args = parser.parse_args()
     
     if len(args.folders) < 2:
@@ -1245,7 +1301,7 @@ Examples:
     if len(folder_metrics) < 2:
         print("\nError: Need at least 2 folders with valid results")
         sys.exit(1)
-    
+
     # Determine shared test set (with optional timeout exclusion)
     error_mode = "as timeout" if args.errors_as_timeout else "excluded"
     print(f"\nDetermining shared test set (exclude_timeouts={args.exclude_timeouts_geomean}, errors={error_mode})...")
@@ -1276,16 +1332,22 @@ Examples:
     geomean_results = compute_geomean_speedups(folder_metrics, shared_tests, args.timeout, baseline_name, args.errors_as_timeout)
     
     # Combined table: PAR-2 + Geomean Speedup
-    print(f"\n{'Folder':<30} {'PAR-2 (s)':<12} {'Solved/Total':<16} {'Geomean×':<12}")
-    print("-" * 74)
-    for folder_name in folder_metrics.keys():
-        par2, solved, total = shared_par2_scores[folder_name]
-        speed = geomean_results.get(folder_name, None)
-        if folder_name == baseline_name:
-            speed = 1.0
-        speed_str = f"{speed:.4f}" if speed is not None else 'n/a'
-        print(f"{folder_name:<30} {par2:<12.6f} {solved:>8}/{total:<8} {speed_str:<12}")
-    
+    def _print_table(title, ref_name, geomeans, exclude=None):
+        print(f"\n{title}")
+        print(f"{'Folder':<30} {'PAR-2 (s)':<12} {'Solved/Total':<16} {'Geomean×':<12}")
+        print("-" * 74)
+        for folder_name in folder_metrics.keys():
+            if folder_name == exclude:
+                continue
+            par2, solved, total = shared_par2_scores[folder_name]
+            speed = geomeans.get(folder_name, None)
+            if folder_name == ref_name:
+                speed = 1.0
+            speed_str = f"{speed:.4f}" if speed is not None else 'n/a'
+            print(f"{folder_name:<30} {par2:<12.6f} {solved:>8}/{total:<8} {speed_str:<12}")
+
+    _print_table(f"[Geomean vs '{baseline_name}']", baseline_name, geomean_results)
+
     # Generate PAR-2 comparison chart PDF
     plot_comparison_charts(folder_metrics, shared_par2_scores, shared_tests,
                           exclusion_table, args.timeout, args.output_dir, args.exclude_timeouts_geomean, args.large_fonts, args.line, highlight_last=args.highlight_last)
