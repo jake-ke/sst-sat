@@ -42,6 +42,8 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from unified_parser import (parse_sync_stats_full, hist_scalars,
                             SYNC_CONFLICT_STATS, SYNC_OCC_STATS)
+# Shared exclusion list (drops the did-not-finish tests) — single source of truth.
+from plot_comparison import MANUAL_EXCLUSIONS
 
 OCC_LABELS = {
     'clause_lock_occ': 'Clause-lock occupancy\n(concurrent locked clauses)',
@@ -387,6 +389,43 @@ def plot_hwm_summary(records, out_pdf):
     plt.close(fig)
 
 
+def plot_conflict_rate_box(records, out_pdf):
+    """Standalone, large-font boxplot + strip of per-instance conflict rate by
+    lock type (subplot (a) on its own, for slides/figures)."""
+    if not records:
+        return
+    types = ['clause', 'wl_process', 'wl_insert']
+    labels = ['clause', 'WL-\npending', 'WL-\ninsert']
+    colors = ['#4C72B0', '#55A868', '#DD8452']
+    rate_key = {'clause': 'clause_rate', 'wl_insert': 'wl_insert_rate',
+                'wl_process': 'wl_process_rate'}
+    rates = {t: [r.get(rate_key[t], 0.0) for r in records] for t in types}
+
+    rng = random.Random(0)
+    fig, ax = plt.subplots(figsize=(13, 4.3))
+    bp = ax.boxplot([rates[t] for t in types], vert=False, patch_artist=True,
+                    showfliers=False, widths=0.6,
+                    medianprops=dict(color='black', linewidth=3),
+                    whiskerprops=dict(linewidth=2), capprops=dict(linewidth=2),
+                    boxprops=dict(linewidth=2))
+    for patch, c in zip(bp['boxes'], colors):
+        patch.set_facecolor(c)
+        patch.set_alpha(0.45)
+    for i, t in enumerate(types):
+        ys = [i + 1 + rng.uniform(-0.16, 0.16) for _ in rates[t]]
+        ax.scatter(rates[t], ys, s=55, color=colors[i], edgecolor='k',
+                   linewidth=0.6, alpha=0.7, zorder=3)
+    ax.set_yticks(range(1, len(labels) + 1))
+    ax.set_yticklabels(labels, fontsize=26, linespacing=0.95)
+    ax.invert_yaxis()  # clause on top
+    ax.tick_params(axis='x', labelsize=24)
+    ax.set_xlabel('conflict rate (%)', fontsize=26)
+    ax.grid(axis='x', alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_pdf)
+    plt.close(fig)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description='Extract & plot propagation synchronization-sizing stats '
@@ -413,12 +452,16 @@ def main():
         print(f"No *.stats.csv found under {run_folder}")
         sys.exit(1)
 
-    if args.exclude:
-        patterns = [p.strip() for p in args.exclude.split(',') if p.strip()]
-        before = len(cases)
-        cases = {c: v for c, v in cases.items()
-                 if not any(p in c for p in patterns)}
-        print(f"Excluded {before - len(cases)} instance(s) matching {patterns}")
+    # Always drop the shared MANUAL_EXCLUSIONS (e.g. did-not-finish tests);
+    # --exclude adds further ad-hoc substring filters.
+    patterns = [p.strip() for p in (args.exclude or '').split(',') if p.strip()]
+    before = len(cases)
+    cases = {c: v for c, v in cases.items()
+             if c not in MANUAL_EXCLUSIONS and not any(p in c for p in patterns)}
+    dropped = before - len(cases)
+    if dropped:
+        print(f"Excluded {dropped} instance(s) "
+              f"(MANUAL_EXCLUSIONS{' + ' + str(patterns) if patterns else ''})")
 
     records = build_records(cases)
     print(f"Found {len(cases)} instances; {len(records)} with sync stats")
@@ -432,6 +475,7 @@ def main():
 
     for fname, fn in (('race_occupancy_distributions.pdf', plot_occupancy_distributions),
                       ('race_conflicts.pdf', plot_conflict_views),
+                      ('race_conflict_rate.pdf', plot_conflict_rate_box),
                       ('race_hwm_summary.pdf', plot_hwm_summary)):
         path = out_dir / fname
         fn(records, path)
