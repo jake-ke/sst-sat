@@ -1900,6 +1900,12 @@ void SATSolver::propagateLiteral(
     uint64_t para_watchers = 0;  // watchers inspected in this propagation
     uint64_t watcher_occ = 0;    // number of watchers residing in watch lists
 
+    // Rebuilt (singly linked) free list head, reconstructed from scratch as we
+    // walk every block below. This literal's watchlist is exclusively ours for
+    // the whole traversal (no other worker inserts into a literal that is being
+    // propagated), so we publish the new free_head with a single write at the end.
+    uint32_t rebuilt_free_head = 0;
+
     // Traverse the linked list
     while (curr_addr != 0 || do_prewatch) {
         bool block_modified = false;
@@ -2029,24 +2035,55 @@ void SATSolver::propagateLiteral(
             polling_cycles += worker_polling[last_worker];
         }
         
-        // After processing all nodes in the block, check if we need to write it back
-        if (block_modified) {
-            if (do_prewatch) watches.writePreWatchers(watch_idx, curr_block.nodes);
-            else watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block, wmd);
+        // After all workers finished, write back the pre-watchers or the block.
+        if (do_prewatch) {
+            // Pre-watchers live in metadata and never join the free list.
+            if (block_modified) watches.writePreWatchers(watch_idx, curr_block.nodes);
+        } else {
+            // Rebuild the free list for kept blocks; emptied blocks are freed
+            // by updateBlock and simply not prepended. This is authoritative
+            // over free_index: any stale value from a prior traversal is
+            // overwritten here.
+            bool block_freed = curr_block.countValidNodes() == 0;
+            if (USE_FREE_LIST && !block_freed) {
+                int slot = curr_block.firstFreeSlot();
+                if (slot != -1) {
+                    // Prepend this block: its linkage node points at the running head.
+                    curr_block.nodes[slot] = WatcherNode(rebuilt_free_head);
+                    curr_block.free_index = slot;
+                    rebuilt_free_head = curr_addr | slot;
+                    block_modified = true;
+                } else if (curr_block.free_index != PROPAGATORS) {
+                    // Full block: clear any stale free-list membership.
+                    curr_block.free_index = PROPAGATORS;
+                    block_modified = true;
+                }
+            }
+
+            if (block_modified)
+                watches.updateBlock(watch_idx, prev_addr, curr_addr, prev_block, curr_block, wmd);
+
+            // the current block is deleted if it has no valid nodes left
+            if (!block_freed) {
+                prev_addr = curr_addr;
+                prev_block = curr_block;
+            }
         }
 
         if (max_confl >= 0 && (int)conflicts.size() >= max_confl) break;
 
-        // the current block is deleted if it has no valid nodes left
-        if (curr_block.countValidNodes() != 0 && !do_prewatch) {
-            prev_addr = curr_addr;
-            prev_block = curr_block;
-        }
-        
         // Move to next block
         curr_addr = curr_block.getNextBlock();
         block_modified = false;
         do_prewatch = false;
+    }
+
+    // Publish the rebuilt free list. On an early break above this reflects only
+    // the blocks visited so far; unvisited blocks are simply not referenced by
+    // free_head (their stale linkage is inert and gets rebuilt next time).
+    if (USE_FREE_LIST && wmd.free_head != rebuilt_free_head) {
+        watches.writeFreeHead(watch_idx, rebuilt_free_head);
+        wmd.free_head = rebuilt_free_head;
     }
 
     stat_para_watchers->addData(para_watchers);

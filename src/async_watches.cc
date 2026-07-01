@@ -73,18 +73,6 @@ void Watches::writeBlock(uint32_t addr, const WatcherBlock& block) {
     writeBurst(addr, data);
 }
 
-void Watches::writePrevFree(uint32_t node_ptr, const uint32_t prev_ptr) {
-    // Extract block address and node index from the combined pointer
-    uint32_t block_addr = node_ptr & ~(FREE_IDX_BITS - 1);
-    int node_idx = node_ptr & (FREE_IDX_BITS - 1);
-    uint32_t node_addr = block_addr + offsetof(WatcherBlock, nodes) + node_idx * sizeof(WatcherNode);
-    
-    // Write the prev_ptr directly (assuming LSB is already 0 for valid=0)
-    std::vector<uint8_t> bytes(sizeof(uint32_t));
-    memcpy(bytes.data(), &prev_ptr, sizeof(uint32_t));
-    write(node_addr, bytes.size(), bytes);
-}
-
 void Watches::writeNextFree(uint32_t node_ptr, const uint32_t next_ptr) {
     // Extract block address and node index from the combined pointer
     uint32_t block_addr = node_ptr & ~(FREE_IDX_BITS - 1);
@@ -103,17 +91,11 @@ int Watches::addToFreeList(int lit_idx, WatchMetaData& metadata, WatcherBlock& b
     // If block is already in the free list, don't add it again
     if (block.isInFreeList()) return 0;
 
-    int block_visits = 0;
     // Calculate combined pointer value (block address | node index)
     uint32_t node_ptr = block_addr | node_idx;
-    // Set up the new free list head
-    block.nodes[node_idx] = WatcherNode(0, metadata.free_head);
-    
-    // If there was an existing free head, update its prev_free to point to this node
-    if (metadata.free_head != 0) {
-        writePrevFree(metadata.free_head, node_ptr);
-        block_visits++;
-    }
+    // Prepend: this node's next_free points at the old head (singly linked,
+    // so no prev pointer to maintain).
+    block.nodes[node_idx] = WatcherNode(metadata.free_head);
 
     // Update the free list head in metadata
     metadata.free_head = node_ptr;
@@ -122,46 +104,32 @@ int Watches::addToFreeList(int lit_idx, WatchMetaData& metadata, WatcherBlock& b
     // Update the block's free_index to mark which node is used for the free list
     block.free_index = node_idx;
     writeBlock(block_addr, block);
-    block_visits++;
 
-    output.verbose(CALL_INFO, 7, 0, 
-        "Add to free list: var %d, lit_idx %d, block 0x%x, node %d\n", 
+    output.verbose(CALL_INFO, 7, 0,
+        "Add to free list: var %d, lit_idx %d, block 0x%x, node %d\n",
         lit_idx/2, lit_idx, block_addr, node_idx);
-    return block_visits;
+    return 1;  // one block write
 }
 
-// Remove a node from the free list
+// Remove the head node of the free list. With a singly linked free list the
+// only removal site is insertWatcher consuming the free_head block, so this is
+// always a head pop and never needs a prev pointer.
 int Watches::removeFromFreeList(int lit_idx, WatchMetaData& metadata, WatcherBlock& block) {
     if (!block.isInFreeList()) return 0;
 
-    int block_visits = 0;
     WatcherNode& free_node = block.nodes[block.free_index];
-    uint32_t prev_ptr = free_node.getPrevFree();
     uint32_t next_ptr = free_node.next_free;
-    output.verbose(CALL_INFO, 7, 0, 
-        "Removing from free list: var %d, lit_idx %d, head_ptr 0x%x, free_head=0x%x, prev_free=0x%x, next_free=0x%x\n",
-        lit_idx/2, lit_idx, metadata.head_ptr, metadata.free_head, prev_ptr, next_ptr);
-    
-    // Update previous node if exists
-    if (prev_ptr != 0) {
-        writeNextFree(prev_ptr, next_ptr);
-        block_visits++;
-    }
-    else {
-        // This was the head, update metadata
-        metadata.free_head = next_ptr;
-        writeFreeHead(lit_idx, next_ptr);
-    }
-    
-    // Update next node if exists
-    if (next_ptr != 0) {
-        writePrevFree(next_ptr, prev_ptr);
-        block_visits++;
-    }
+    output.verbose(CALL_INFO, 7, 0,
+        "Removing free-list head: var %d, lit_idx %d, free_head=0x%x, next_free=0x%x\n",
+        lit_idx/2, lit_idx, metadata.free_head, next_ptr);
+
+    // Pop the head: advance free_head to the next free node.
+    metadata.free_head = next_ptr;
+    writeFreeHead(lit_idx, next_ptr);
 
     // Mark this block as not in free list anymore
     block.free_index = PROPAGATORS;
-    return block_visits;
+    return 0;  // only metadata free_head touched
 }
 
 void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
@@ -250,8 +218,8 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
                 uint32_t curr_block_addr = first_block_addr + (block_idx * block_size);
                 uint32_t free_node_idx = nodes_in_this_block;  // First empty slot
                 
-                // Set up the free node, no prev or next free
-                block.nodes[free_node_idx] = WatcherNode(0, 0);
+                // Set up the free node, no next free (tail of the free list)
+                block.nodes[free_node_idx] = WatcherNode((uint32_t)0);
                 
                 // Update free_index in the block
                 block.free_index = free_node_idx;
@@ -288,12 +256,16 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
                    block_idx_counter, block_idx_counter * block_size);
 }
 
-// Update Watcher Blocks after potential removes
-void Watches::updateBlock(int lit_idx, uint32_t prev_addr, uint32_t curr_addr, 
+// Update Watcher Blocks after potential removes.
+// Free-list maintenance is NOT done here: propagateLiteral rebuilds the free
+// list during its full traversal, and removeWatcher drops it on the partial
+// (detach) path. That keeps the free list singly linked -- no mid-list splice.
+void Watches::updateBlock(int lit_idx, uint32_t prev_addr, uint32_t curr_addr,
                           WatcherBlock& prev_block, WatcherBlock& curr_block, WatchMetaData& metadata) {
+    (void)metadata;  // no longer needed here; kept for a stable call signature
     // Check if block is empty and should be removed from watch list
     if (curr_block.countValidNodes() == 0) {
-        // Block became empty, remove it
+        // Block became empty, unlink it from the watch chain and recycle it.
         if (prev_addr == 0) {
             // Current block was the head
             writeHeadPointer(lit_idx, curr_block.getNextBlock());
@@ -302,17 +274,11 @@ void Watches::updateBlock(int lit_idx, uint32_t prev_addr, uint32_t curr_addr,
             prev_block.setNextBlock(curr_block.getNextBlock());
             writeBlock(prev_addr, prev_block);
         }
-        if (USE_FREE_LIST) removeFromFreeList(lit_idx, metadata, curr_block);
         freeBlock(curr_addr);
     } else {
-        // Block still has valid nodes, update it
+        // Block still has valid nodes, write back its current contents
+        // (including any free-list linkage the caller staged in it).
         writeBlock(curr_addr, curr_block);
-        
-        // If the block has free slots and free list is enabled, add it to the free list
-        if (USE_FREE_LIST) {
-            int free_slot = curr_block.findNextFreeNode();
-            if (free_slot != -1) addToFreeList(lit_idx, metadata, curr_block, curr_addr, free_slot);
-        }
     }
 }
 
@@ -459,14 +425,28 @@ void Watches::removeWatcher(int lit_idx, Cref clause_addr) {
             if (curr_block.nodes[i].valid && curr_block.nodes[i].getClauseAddr() == clause_addr) {
                 // Found the clause, invalidate this node
                 curr_block.nodes[i].valid = 0;
-                
-                // Update the block
+
+                bool became_empty = (curr_block.countValidNodes() == 0);
+                bool was_in_free_list = curr_block.isInFreeList();
+
+                // Update the block (unlinks + recycles it if now empty)
                 updateBlock(lit_idx, prev_addr, curr_addr, prev_block, curr_block, metadata);
 
-                output.verbose(CALL_INFO, 7, 0, 
-                    "Removed watcher for var %d: clause 0x%x\n", 
+                // This is a partial traversal (no rebuild). If we just recycled a
+                // block that was in the free list, free_head (or some next_free in
+                // the chain) could now dangle into recycled memory. Since the free
+                // list is singly linked we cannot splice a mid-list block out, so
+                // conservatively drop the whole free list; the next
+                // propagateLiteral traversal rebuilds it from block validity.
+                if (USE_FREE_LIST && became_empty && was_in_free_list && metadata.free_head != 0) {
+                    metadata.free_head = 0;
+                    writeFreeHead(lit_idx, 0);
+                }
+
+                output.verbose(CALL_INFO, 7, 0,
+                    "Removed watcher for var %d: clause 0x%x\n",
                     lit_idx/2, clause_addr);
-                
+
                 return;
             }
         }

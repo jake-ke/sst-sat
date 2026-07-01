@@ -15,13 +15,13 @@
 struct WatcherNode {
     // Use bit fields: 1 bit for valid flag
     uint32_t valid : 1;
-    // used as either a Cref addr or the prev_free in free list
-    uint32_t addr31 : 31;  // Cref or uint32_t
-    
+    // Cref address of the watched clause (only meaningful when valid=1)
+    uint32_t addr31 : 31;  // Cref >> 1
+
     union {
         // When used as a watcher
         Lit blocker;        // Blocker literal
-        // When used in free list (valid=0)
+        // When used in free list (valid=0): singly linked, next node only
         uint32_t next_free; // Next free node pointer (block_addr | node_idx)
     };
 
@@ -30,16 +30,11 @@ struct WatcherNode {
     WatcherNode(uint32_t ca, Lit b) : valid(1), addr31(ca >> 1), blocker(b) {
         assert((ca & 1) == 0 && "Clause address LSB must be 0 (bit fields)");
     }
-    // Constructor for free list nodes
-    WatcherNode(uint32_t p, uint32_t n) : valid(0), addr31(p >> 1), next_free(n) {
-        assert((p & 1) == 0 && "Previous address LSB must be 0 (bit fields)");
-    }
+    // Constructor for free list nodes (singly linked: only next_free is stored)
+    explicit WatcherNode(uint32_t n) : valid(0), addr31(0), next_free(n) {}
 
     // left-shift to restore the original address
     Cref getClauseAddr() const { return addr31 << 1; }
-    uint32_t getPrevFree() const { return addr31 << 1; }
-    // right-shift to fit in 31 bits
-    void setPrevFree(uint32_t ptr) { addr31 = ptr >> 1; }
 };
 
 // Block of watchers - dynamically sized based on PROPAGATORS
@@ -62,6 +57,16 @@ struct WatcherBlock {
     // Check if this block is in the free list
     bool isInFreeList() const {
         return free_index < PROPAGATORS;
+    }
+
+    // find the first free (invalid) slot, ignoring free-list bookkeeping.
+    // Used by the propagate-time free-list rebuild, which is authoritative
+    // over free_index and cannot trust any prior value.
+    int firstFreeSlot() const {
+        for (int i = 0; i < PROPAGATORS; i++) {
+            if (!nodes[i].valid) return i;
+        }
+        return -1;
     }
 
     // find next free slot, prioritizing slots not used in free list
@@ -126,7 +131,6 @@ public:
 
     WatcherBlock readBlock(uint32_t addr, int worker_id = 0);
     void writeBlock(uint32_t addr, const WatcherBlock& block);
-    void writePrevFree(uint32_t node_addr, const uint32_t prev_free);
     void writeNextFree(uint32_t node_addr, const uint32_t next_free);
 
     // Free list management functions
