@@ -3,7 +3,8 @@ BUILD_DIR = ../build
 
 # Compiler configuration
 CXX = $(shell sst-config --CXX)
-CXXFLAGS = $(shell sst-config --ELEMENT_CXXFLAGS) -DBOOST_COROUTINES_NO_DEPRECATION_WARNING
+OPTFLAGS ?= -O3 -g
+CXXFLAGS = $(shell sst-config --ELEMENT_CXXFLAGS) $(OPTFLAGS) -DBOOST_COROUTINES_NO_DEPRECATION_WARNING
 
 # Heap implementation selection
 # Default (no flag): pipelined heap

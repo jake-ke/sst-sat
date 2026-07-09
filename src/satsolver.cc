@@ -983,7 +983,8 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
         last_state_change = cycle;
     }
 
-    if (cycle % 100000 == 0 && cycle > 0) {
+    if (--progress_countdown_ == 0) {  // every 100000 cycles; avoids a 64-bit modulo per tick
+        progress_countdown_ = 100000;
         output.verbose(CALL_INFO, 2, 0, "Propagations: %lu, Conflicts: %lu, Decisions: %lu, Learnt: %lu\n",
             getStatCount(stat_propagations), getStatCount(stat_conflicts),
             getStatCount(stat_decisions), getStatCount(stat_learned));
@@ -2809,6 +2810,10 @@ uint64_t SATSolver::getStatCount(Statistic<uint64_t>* stat) {
 }
 
 std::string SATSolver::printClause(const std::vector<Lit>& literals) {
+    // All call sites pass the result to output.verbose at level >= 3; skip the
+    // string build entirely when it cannot be printed (hot path: called per
+    // watcher block during propagation).
+    if (output.getVerboseLevel() < 3) return std::string();
     std::string clause_str = "";
     for (const auto& lit : literals) {
         clause_str += " " + std::to_string(toInt(lit));

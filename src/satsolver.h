@@ -108,7 +108,6 @@ public:
         {"learnt_units", "Number of unit-literal learnt clauses", "count", 1},
         {"learnt_lbd", "Total LBD of learnt clauses", "count", 1},
         {"bt_level", "Total backtrack level", "count", 1},
-        {"bt_distance", "Total backtrack distance (levels jumped)", "count", 1},
         {"multi_confl_rounds", "Number of conflict rounds that collected more than one conflict", "count", 1},
         {"bt_level_diff", "Number of multi-conflict rounds whose conflicts disagree on the backtrack level (min < max)", "count", 1},
         {"clause_lock_occ", "Clause-lock table occupancy sampled at each acquire (concurrent locked clauses)", "count", 1},
@@ -422,6 +421,7 @@ private:
     // Cycle tracking
     SolverState prev_state;
     SST::Cycle_t last_state_change;
+    uint64_t progress_countdown_ = 100000;  // ticks until next progress verbose
 
     // Prefetch support
     bool prefetch_enabled;

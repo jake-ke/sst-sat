@@ -3,6 +3,14 @@
 # Preserve script name for usage printing (zsh sets $0 to function name inside functions)
 SCRIPT_NAME=$(basename "$0")
 
+# Use mimalloc for all sst runs if available (~10-15% faster than glibc malloc
+# for this workload). Build once with:
+#   git clone https://github.com/microsoft/mimalloc ~/mimalloc
+#   cmake -S ~/mimalloc -B ~/mimalloc/build -DCMAKE_BUILD_TYPE=Release && make -C ~/mimalloc/build mimalloc
+if [[ -z "$LD_PRELOAD" && -f "$HOME/mimalloc/build/libmimalloc.so" ]]; then
+    export LD_PRELOAD="$HOME/mimalloc/build/libmimalloc.so"
+fi
+
 # Check if help is requested or show usage
 show_usage() {
     echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--l2-latency LATENCY] [--l2-bw BW] [--l2-width WIDTH] [--mem-latency LATENCY] [--prefetch] [--spec] [--profile-2wl] [--profile-prop-timing] [--enable-histograms] [--cache-profiler] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [--max-confl N] [-j jobs]"

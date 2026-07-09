@@ -25,6 +25,7 @@ PipelinedHeap::PipelinedHeap(
 
     registerClock(params.find<std::string>("clock", "1GHz"),
                  new SST::Clock::Handler2<PipelinedHeap, &PipelinedHeap::tick>(this));
+    maybe_active_ = false;
 
     response_port = configureLink("response");
     sst_assert(response_port != nullptr, CALL_INFO, -1, 
@@ -72,6 +73,10 @@ uint32_t priority_encoder(uint32_t x) {
 
 bool PipelinedHeap::tick(SST::Cycle_t cycle) {
     // output.verbose(CALL_INFO, 7, 0, "=============== Tick %lu =============== \n", cycle);
+
+    // Fast path: nothing queued and pipeline empty (set at the end of the
+    // previous tick; handleRequest/handleMem set maybe_active_ on new work).
+    if (!maybe_active_) return false;
 
     if (!insert_queue.empty() && canStartOperation(HEAP_OP_INSERT) && !rescale) {
         InsReq& op = insert_queue.front();
@@ -151,7 +156,21 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
     }
 
     advancePipeline();
+
+    // Cache the idle state so the (dominant) idle ticks cost O(1) instead of
+    // sweeping queues and the 22x3 pipeline array every simulated cycle.
+    // NOTE: the clock handler must stay registered -- unregistering and
+    // re-registering would reorder handlers on SST's shared per-frequency
+    // Clock and skew same-cycle solver->heap request handling.
+    maybe_active_ = !allIdle();
     return false;
+}
+
+bool PipelinedHeap::allIdle() const {
+    return request_queue.empty() && insert_queue.empty() && req_to_op.empty()
+        && !bump_active && !rescale && !debug_heap_pending
+        && active_inserts == 0 && in_progress_vars.empty()
+        && isPipelineIdle();
 }
 
 void PipelinedHeap::advancePipeline() {
@@ -584,10 +603,11 @@ void PipelinedHeap::handleRequest(HeapReqEvent* req) {
     // Assert var is valid
     sst_assert(req->arg != var_Undef || (req->op != HeapReqEvent::INSERT || req->op != HeapReqEvent::BUMP),
         CALL_INFO, -1, "Attempting to insert undefined variable");
-    sst_assert(req->arg <= num_vars, CALL_INFO, -1, 
+    sst_assert(req->arg <= num_vars, CALL_INFO, -1,
         "Attempting to insert var %d which exceeds num_vars %zu", req->arg, num_vars);
     request_queue.emplace_back(req->op, req->arg);
     delete req;
+    maybe_active_ = true;
 }
 
 void PipelinedHeap::sendResp(int result) {
@@ -596,6 +616,7 @@ void PipelinedHeap::sendResp(int result) {
 
 void PipelinedHeap::handleMem(SST::Interfaces::StandardMem::Request* req) {
     if (auto* read_resp = dynamic_cast<SST::Interfaces::StandardMem::ReadResp*>(req)) {
+        maybe_active_ = true;  // read responses feed the pipeline/queues; WriteResp below does not need ticks
         auto it = req_to_op.find(read_resp->getID());
         sst_assert(it != req_to_op.end(), CALL_INFO, -1, "Unexpected memory response ID %lu", read_resp->getID());
 

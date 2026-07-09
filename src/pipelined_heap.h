@@ -204,6 +204,11 @@ private:
     bool rescale;
     size_t rescale_pending_reads;
 
+    // Idle fast path: true when queues/pipeline may hold work. Recomputed at
+    // the end of each active tick; set by handleRequest/handleMem on new work.
+    bool maybe_active_;
+    bool allIdle() const;
+
     // Pipeline control functions
     void advancePipeline();
     bool canStartOperation(HeapOpType op);
