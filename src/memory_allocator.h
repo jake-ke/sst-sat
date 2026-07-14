@@ -45,6 +45,7 @@ public:
     void setReorderBuffer(ReorderBuffer* rb) { reorder_buffer = rb; }
     void initialize(AsyncBase* async_base, Cref reserved_size = 0);
     uint64_t getMemoryEnd() const { return mem_base_addr + heap_size; }
+    uint64_t capacity() const { return heap_size; }
     
     // Fragmentation tracking
     double fragRatio() const { return frag_ratio; }

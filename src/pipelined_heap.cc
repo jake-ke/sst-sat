@@ -158,7 +158,8 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
     advancePipeline();
 
     // Cache the idle state so the (dominant) idle ticks cost O(1) instead of
-    // sweeping queues and the 22x3 pipeline array every simulated cycle.
+    // sweeping queues and the MAX_HEAP_LEVELS x PIPELINE_DEPTH pipeline array
+    // every simulated cycle.
     // NOTE: the clock handler must stay registered -- unregistering and
     // re-registering would reorder handlers on SST's shared per-frequency
     // Clock and skew same-cycle solver->heap request handling.
@@ -510,14 +511,21 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
             Var repl_var = curr_stage.var;
             double repl_act = curr_stage.act;
 
-            Var left_child, right_child; double left_act, right_act;
+            Var left_child = var_Undef, right_child = var_Undef;
+            double left_act = 0.0, right_act = 0.0;
             // bypass from next level's WRITE is omitted for simplicity
             // because next level always executes before this stage and has updated the memory
             // node_idx is updated by previous level's COMPARE
-            uint32_t lchild_idx = getChildIdx(level, node_idx, true);
-            left_child = getVar(level+1, lchild_idx);
-            left_act = getActivity(level+1, lchild_idx);
-            bool has_right = heap_size >= ((lchild_idx + 1) | (1 << (level + 1)));
+            // The deepest level has no children: without this guard a compare
+            // executing at level MAX_HEAP_LEVELS-1 indexes heap_vars[MAX_HEAP_LEVELS]
+            // out of bounds (reachable once heap_size >= 2^(MAX_HEAP_LEVELS-1)).
+            bool has_children = level < MAX_HEAP_LEVELS - 1;
+            uint32_t lchild_idx = has_children ? getChildIdx(level, node_idx, true) : 0;
+            if (has_children) {
+                left_child = getVar(level+1, lchild_idx);
+                left_act = getActivity(level+1, lchild_idx);
+            }
+            bool has_right = has_children && heap_size >= ((lchild_idx + 1) | (1 << (level + 1)));
             if (has_right) {
                 right_child = getVar(level+1, lchild_idx + 1);
                 right_act = getActivity(level+1, lchild_idx + 1);
@@ -739,7 +747,12 @@ bool PipelinedHeap::isPipelineIdle() const {
 
 void PipelinedHeap::initHeap(uint64_t random_seed) {
     in_progress_vars.clear();
-    assert(heap_size <= (1 << MAX_HEAP_LEVELS));
+    // Capacity is 2^MAX_HEAP_LEVELS - 1 (levels 0..MAX_HEAP_LEVELS-1, 1-indexed
+    // tree): must match the INSERT-path bound in startOperation, and must stay
+    // an sst_assert so it cannot be compiled out.
+    sst_assert(heap_size <= (size_t)MAX_HEAP_SIZE, CALL_INFO, -1,
+        "Instance has %lu vars but pipelined heap capacity is %u (MAX_HEAP_LEVELS=%d)\n",
+        heap_size, MAX_HEAP_SIZE, MAX_HEAP_LEVELS);
     // Collect all decision variables first
     std::vector<Var> decision_vars;
     for (Var v = 1; v <= (Var)heap_size; v++) {

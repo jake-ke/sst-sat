@@ -1,17 +1,19 @@
 #include <sst/core/sst_config.h>
 #include "async_clauses.h"
 
-Clauses::Clauses(int verbose, SST::Interfaces::StandardMem* mem, 
-                 uint64_t clauses_cmd_base_addr, uint64_t clauses_base_addr, 
-                 coro_t::push_type** yield_ptr)
+Clauses::Clauses(int verbose, SST::Interfaces::StandardMem* mem,
+                 uint64_t clauses_cmd_base_addr, uint64_t clauses_base_addr,
+                 coro_t::push_type** yield_ptr,
+                 uint64_t clauses_region_size)
     : AsyncBase("CLAUSES-> ", verbose, mem, yield_ptr),
       clauses_cmd_base_addr(clauses_cmd_base_addr),
       clauses_base_addr(clauses_base_addr),
       num_orig_clauses(0), learnt_offset(0),
-      allocator(verbose, clauses_base_addr, 0x0FFFFFFF) {
-    
+      allocator(verbose, clauses_base_addr, clauses_region_size) {
+
     output.verbose(CALL_INFO, 1, 0, "base addresses: "
-        "cmd=0x%lx, data=0x%lx\n", clauses_cmd_base_addr, clauses_base_addr);
+        "cmd=0x%lx, data=0x%lx, region=%lu B\n",
+        clauses_cmd_base_addr, clauses_base_addr, clauses_region_size);
 }
 
 // update the pointer to clause literals at clause index
@@ -76,6 +78,16 @@ void Clauses::initialize(const std::vector<Clause>& clauses) {
     for (size_t i = 0; i < clauses.size(); i++) {
         addr_array[i] = total_memory;
         total_memory += clauses[i].size();
+    }
+
+    // Guard here while the byte count is still size_t: allocator.initialize
+    // takes Cref (int), so an oversized instance would otherwise wrap negative
+    // before the allocator's own check can see it.
+    if (total_memory > (size_t)0x7FFFFFF0 || total_memory + MIN_BLOCK_SIZE > allocator.capacity()) {
+        output.fatal(CALL_INFO, -1,
+            "Original clauses need %zu B but the clauses region holds %lu B "
+            "(learnt headroom excluded). Instance does not fit the clause DB.\n",
+            total_memory, allocator.capacity());
     }
 
     // Initialize allocator with the reserved area for original clauses

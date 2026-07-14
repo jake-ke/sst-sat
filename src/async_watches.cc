@@ -9,10 +9,16 @@ uint32_t Watches::allocateBlock() {
         free_blocks.pop();
     } else {
         // Otherwise, allocate a new block
+        if (nodes_region_end != 0 && next_free_block + block_size > nodes_region_end) {
+            output.fatal(CALL_INFO, -1,
+                "Watch node region exhausted: next block at 0x%lx + %zu B crosses "
+                "region end 0x%lx. Instance needs a larger watch_nodes region.\n",
+                next_free_block, block_size, nodes_region_end);
+        }
         addr = next_free_block;
         next_free_block += block_size;  // Allocate based on computed block size
     }
-    
+
     output.verbose(CALL_INFO, 7, 0, "Allocating new block at 0x%x\n", addr);
     return addr;
 }
@@ -133,6 +139,20 @@ int Watches::removeFromFreeList(int lit_idx, WatchMetaData& metadata, WatcherBlo
 }
 
 void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
+    // The metadata array must not run into the node region: before this guard
+    // existed, oversized instances silently overwrote every watcher block
+    // (watch lists aliased other literals' metadata) and produced corrupt
+    // propagation instead of an error.
+    uint64_t meta_end = watches_base_addr + watch_count * sizeof(WatchMetaData);
+    if (meta_end > nodes_base_addr) {
+        output.fatal(CALL_INFO, -1,
+            "Watch metadata (%zu lists, %zu B) overruns the node region: "
+            "0x%lx-0x%lx crosses watch_nodes_base_addr 0x%lx. "
+            "Instance needs a larger watches region.\n",
+            watch_count, watch_count * sizeof(WatchMetaData),
+            watches_base_addr, meta_end, nodes_base_addr);
+    }
+
     // First, allocate and initialize metadata to null
     std::vector<WatchMetaData> metadata(watch_count);
     size_ = watch_count;
@@ -239,9 +259,17 @@ void Watches::initWatches(size_t watch_count, std::vector<Clause>& clauses) {
     
     // Write all blocks in one operation if any
     if (all_blocks_data.size() > 0) {
+        if (nodes_region_end != 0 &&
+            nodes_base_addr + all_blocks_data.size() > nodes_region_end) {
+            output.fatal(CALL_INFO, -1,
+                "Initial watch node blocks (%zu blocks, %zu B) overrun the node "
+                "region 0x%lx-0x%lx. Instance needs a larger watch_nodes region.\n",
+                block_idx_counter, all_blocks_data.size(),
+                nodes_base_addr, nodes_region_end);
+        }
         writeUntimed(nodes_base_addr, all_blocks_data.size(), all_blocks_data);
     }
-    
+
     // Update next_free_block to point after our allocated blocks
     next_free_block = next_free_block + (block_idx_counter * block_size);
     

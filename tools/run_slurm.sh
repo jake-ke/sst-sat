@@ -173,9 +173,15 @@ if [[ "${1:-}" == "--summarize" ]]; then
     fi
 
     passed=0; timedout=0; skipped=0; failed_oom=0; failed_other=0
-    declare -A DONE      # "<name>.seed<seed>" seen in results/
+    declare -A DONE          # "<name>.seed<seed>" seen in results/
+    declare -A DROWS DCOUNT  # display-verdict -> detail rows / count
     oom_lines=""
     : > "$RUNDIR/filter_pass.txt"
+
+    add_row() {  # <display-verdict> <name> <start> <end>
+        DROWS[$1]+="$(printf '%-13s %10s  %-19s  %s' "$1" "$(elapsed "$3" "$4")" "$3-$4" "$2")"$'\n'
+        DCOUNT[$1]=$(( ${DCOUNT[$1]:-0} + 1 ))
+    }
 
     shopt -s nullglob
     for f in "$RUNDIR"/results/*; do
@@ -183,9 +189,10 @@ if [[ "${1:-}" == "--summarize" ]]; then
         base=$(basename "$f"); seed=${base##*.seed}; name=${base%.seed*}
         IFS='|' read -r rname verdict start end < "$f"
         DONE[$base]=1
+        dv=$verdict   # display verdict, reconciled with the reclassified counts below
         case "$verdict" in
             PASSED|PASSED_SAT|PASSED_UNSAT) passed=$((passed + 1)); echo "$rname" >> "$RUNDIR/filter_pass.txt" ;;
-            TIMEOUT)                        timedout=$((timedout + 1)) ;;
+            TIMEOUT)                        timedout=$((timedout + 1)); dv=CYCLE_TIMEOUT ;;
             SKIPPED)                        skipped=$((skipped + 1)) ;;
             *)  # FAILED/FAILED_SAT: worker survived; check if the sim child was OOM-killed
                 scan=("$RUNDIR/seed$seed/$name.log")
@@ -194,12 +201,13 @@ if [[ "${1:-}" == "--summarize" ]]; then
                 tline=$(grep -nF "/$name|$seed" "$RUNDIR/tasks.txt" 2>/dev/null | head -1 | cut -d: -f1)
                 [[ -n "$tline" && -f "$RUNDIR/slurm/${jid}_$((tline - 1)).out" ]] && scan+=("$RUNDIR/slurm/${jid}_$((tline - 1)).out")
                 if is_oom "${scan[@]}"; then
-                    failed_oom=$((failed_oom + 1)); oom_lines+="  $name"$'\n'
+                    failed_oom=$((failed_oom + 1)); oom_lines+="  $name"$'\n'; dv=OOM
                 else
-                    failed_other=$((failed_other + 1))
+                    failed_other=$((failed_other + 1)); dv=FAILED
                 fi
                 ;;
         esac
+        add_row "$dv" "$name" "$start" "$end"
     done
 
     # Missing = submitted tasks (tasks.txt) with no result file. Split by the
@@ -265,16 +273,19 @@ if [[ "${1:-}" == "--summarize" ]]; then
     emit_list "OOM tests" "$oom_lines"
     emit_list "Queued/running/unknown" "$run_lines$other_lines"
 
-    # ---- full per-test detail: summary.log only (glob is name-sorted) ----
+    # ---- full per-test detail: summary.log only, grouped by outcome so failures
+    # are not buried among passes, and each group's count matches the header
+    # (FAILED excludes OOM; child-OOM rows appear under OOM). ----
     {
         echo ""
         echo "==============================================="
-        printf '%-13s %10s  %-19s  %s\n' "VERDICT" "ELAPSED" "START-END" "TEST"
-        for f in "$RUNDIR"/results/*; do
-            [[ -f "$f" ]] || continue
-            IFS='|' read -r name verdict start end < "$f"
-            printf '%-13s %10s  %-19s  %s\n' \
-                "$verdict" "$(elapsed "$start" "$end")" "$start-$end" "$name"
+        echo "Per-test detail (recorded results only; missing tasks are listed above)"
+        for dv in FAILED OOM CYCLE_TIMEOUT PASSED_SAT PASSED_UNSAT PASSED SKIPPED; do
+            [[ -n "${DROWS[$dv]:-}" ]] || continue
+            echo ""
+            echo "--- $dv (${DCOUNT[$dv]}) ---"
+            printf '%-13s %10s  %-19s  %s\n' "VERDICT" "ELAPSED" "START-END" "TEST"
+            printf '%s' "${DROWS[$dv]}"
         done
     } >> "$RUNDIR/summary.log"
     exit 0

@@ -25,9 +25,9 @@ public:
 
     SST_ELI_DOCUMENT_PARAMS(
         {"clock", "Clock frequency", "1GHz"},
-        {"heap_addr", "Base address for heap array", "0x10000000"},
-        {"indices_addr", "Base address for indices array", "0x20000000"},
-        {"var_act_base_addr", "Base address for variable activity array", "0x70000000"}
+        {"heap_addr", "Base address for heap array (unused: passed via constructor)", "0x00000000"},
+        {"indices_addr", "Base address for indices array (unused: passed via constructor)", "0x08000000"},
+        {"var_act_base_addr", "Base address for variable activity array", "0x1C0000000"}
     )
 
     SST_ELI_DOCUMENT_SUBCOMPONENT_SLOTS(

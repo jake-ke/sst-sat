@@ -7,9 +7,10 @@
 
 class Clauses : public AsyncBase {
 public:
-    Clauses(int verbose = 0, SST::Interfaces::StandardMem* mem = nullptr, 
-            uint64_t clauses_cmd_base_addr = 0, uint64_t clauses_base_addr = 0, 
-            coro_t::push_type** yield_ptr = nullptr);
+    Clauses(int verbose = 0, SST::Interfaces::StandardMem* mem = nullptr,
+            uint64_t clauses_cmd_base_addr = 0, uint64_t clauses_base_addr = 0,
+            coro_t::push_type** yield_ptr = nullptr,
+            uint64_t clauses_region_size = 0x0FFFFFFF);
 
     void setReorderBuffer(ReorderBuffer* rb) override { 
         reorder_buffer = rb;

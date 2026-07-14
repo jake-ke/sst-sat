@@ -102,15 +102,26 @@ class Watches : public AsyncBase {
 public:
     Watches(int verbose = 0, SST::Interfaces::StandardMem* mem = nullptr,
             uint64_t watches_base_addr = 0, uint64_t nodes_base_addr = 0,
-            coro_t::push_type** yield_ptr = nullptr)
-        : AsyncBase("WATCH-> ", verbose, mem, yield_ptr), 
-          watches_base_addr(watches_base_addr), 
-          nodes_base_addr(nodes_base_addr), 
+            coro_t::push_type** yield_ptr = nullptr,
+            uint64_t nodes_region_end = 0)
+        : AsyncBase("WATCH-> ", verbose, mem, yield_ptr),
+          watches_base_addr(watches_base_addr),
+          nodes_base_addr(nodes_base_addr),
+          nodes_region_end(nodes_region_end),
           next_free_block(nodes_base_addr),
           block_size(sizeof(WatcherBlock)) {
-        output.verbose(CALL_INFO, 1, 0, 
-            "base addresses: watchlist=0x%lx, nodes=0x%lx\n", 
-            watches_base_addr, nodes_base_addr);
+        // head_ptr/free_head/next_free pack absolute node addresses into
+        // uint32 (and next_block stores addr>>3 in 29 bits), so the node
+        // region must end at or below 4GiB. output.fatal, not assert: this
+        // must survive NDEBUG builds like every other region guard.
+        if (nodes_region_end > (1ULL << 32)) {
+            output.fatal(CALL_INFO, -1,
+                "watch node region end 0x%lx exceeds 4GiB: node pointers are "
+                "packed into uint32 fields\n", nodes_region_end);
+        }
+        output.verbose(CALL_INFO, 1, 0,
+            "base addresses: watchlist=0x%lx, nodes=0x%lx-0x%lx\n",
+            watches_base_addr, nodes_base_addr, nodes_region_end);
     }
 
     // Memory address calculations
@@ -148,7 +159,9 @@ public:
 private:
     uint64_t watches_base_addr;    // Base address of the watches array (head pointers)
     uint64_t nodes_base_addr;      // Base address for watcher nodes
-    uint32_t next_free_block;      // Next free address for block allocation
+    uint64_t nodes_region_end;     // First address past the node region (0 = unchecked)
+    uint64_t next_free_block;      // Next free address for block allocation (uint64 so the
+                                   //  exhaustion check below cannot be defeated by uint32 wrap)
     size_t block_size;             // Size of a watcher block in bytes
     
     // Free list for recycling blocks

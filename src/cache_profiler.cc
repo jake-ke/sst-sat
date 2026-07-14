@@ -21,11 +21,12 @@ CacheProfiler::CacheProfiler(ComponentId_t id, Params& params) : CacheListener(i
                    exclude_cold_misses ? "true" : "false");
 
     // Get base addresses for each data structure from the solver
+    // (defaults mirror the 8GiB map in tests/test_two_level.py)
     heap_base_addr = std::stoull(params.find<std::string>("heap_base_addr", "0x00000000"), nullptr, 0);
-    variables_base_addr = std::stoull(params.find<std::string>("variables_base_addr", "0x20000000"), nullptr, 0);
+    variables_base_addr = std::stoull(params.find<std::string>("variables_base_addr", "0x10000000"), nullptr, 0);
     watches_base_addr = std::stoull(params.find<std::string>("watches_base_addr", "0x30000000"), nullptr, 0);
-    clauses_cmd_base_addr = std::stoull(params.find<std::string>("clauses_cmd_base_addr", "0x50000000"), nullptr, 0);
-    var_act_base_addr = std::stoull(params.find<std::string>("var_act_base_addr", "0x70000000"), nullptr, 0);
+    clauses_cmd_base_addr = std::stoull(params.find<std::string>("clauses_cmd_base_addr", "0x100000000"), nullptr, 0);
+    var_act_base_addr = std::stoull(params.find<std::string>("var_act_base_addr", "0x1C0000000"), nullptr, 0);
 
     // Register statistics
     heap_hits = registerStatistic<uint64_t>("heap_hits");

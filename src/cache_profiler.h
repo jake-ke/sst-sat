@@ -38,10 +38,10 @@ public:
     SST_ELI_DOCUMENT_PARAMS(
         { "cache_level", "Cache level (L1, L2, L3) for reporting", "unknown" },
         { "heap_base_addr", "Base address for heap data", "0x00000000" },
-        { "variables_base_addr", "Base address for variables data", "0x20000000" },
+        { "variables_base_addr", "Base address for variables data", "0x10000000" },
         { "watches_base_addr", "Base address for watches data", "0x30000000" },
-        { "clauses_cmd_base_addr", "Base address for clauses command data", "0x50000000" },
-        { "var_act_base_addr", "Base address for variable activity data", "0x70000000" },
+        { "clauses_cmd_base_addr", "Base address for clauses command data", "0x100000000" },
+        { "var_act_base_addr", "Base address for variable activity data", "0x1C0000000" },
         { "verbose", "Verbosity level", "0" },
         { "exclude_cold_misses", "Exclude cold misses when counting cache misses", "0" }
     )

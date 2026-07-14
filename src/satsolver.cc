@@ -111,15 +111,17 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     clause_decay = params.find<double>("clause_decay", 0.999);  // Add clause decay parameter
     random_var_freq = params.find<double>("random_var_freq", 0.0);
     
-    // Get heap memory addresses
+    // Get heap memory addresses (defaults mirror the 8GiB map in tests/test_two_level.py;
+    // region ORDER must stay heap < indices < variables < watches < watch_nodes <
+    // clauses_cmd < clauses < var_act — the >= routing cascades depend on it)
     heap_base_addr = std::stoull(params.find<std::string>("heap_base_addr", "0x00000000"), nullptr, 0);
-    indices_base_addr = std::stoull(params.find<std::string>("indices_base_addr", "0x10000000"), nullptr, 0);
-    variables_base_addr = std::stoull(params.find<std::string>("variables_base_addr", "0x20000000"), nullptr, 0);
+    indices_base_addr = std::stoull(params.find<std::string>("indices_base_addr", "0x08000000"), nullptr, 0);
+    variables_base_addr = std::stoull(params.find<std::string>("variables_base_addr", "0x10000000"), nullptr, 0);
     watches_base_addr = std::stoull(params.find<std::string>("watches_base_addr", "0x30000000"), nullptr, 0);
-    watch_nodes_base_addr = std::stoull(params.find<std::string>("watch_nodes_base_addr", "0x40000000"), nullptr, 0);
-    clauses_cmd_base_addr = std::stoull(params.find<std::string>("clauses_cmd_base_addr", "0x50000000"), nullptr, 0);
-    clauses_base_addr = std::stoull(params.find<std::string>("clauses_base_addr", "0x60000000"), nullptr, 0);
-    var_act_base_addr = std::stoull(params.find<std::string>("var_act_base_addr", "0x70000000"), nullptr, 0);
+    watch_nodes_base_addr = std::stoull(params.find<std::string>("watch_nodes_base_addr", "0xC0000000"), nullptr, 0);
+    clauses_cmd_base_addr = std::stoull(params.find<std::string>("clauses_cmd_base_addr", "0x100000000"), nullptr, 0);
+    clauses_base_addr = std::stoull(params.find<std::string>("clauses_base_addr", "0x140000000"), nullptr, 0);
+    var_act_base_addr = std::stoull(params.find<std::string>("var_act_base_addr", "0x1C0000000"), nullptr, 0);
     
     // Coprocessor mode
 
@@ -147,12 +149,20 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     variables = Variables(verbose, global_memory, variables_base_addr, &yield_ptr);
     variables.setReorderBuffer(&reorder_buffer);
     
-    // Create Watches object
-    watches = Watches(verbose, global_memory, watches_base_addr, watch_nodes_base_addr, &yield_ptr);
+    // Create Watches object. Node addresses are packed into uint32 fields
+    // (head_ptr/free_head/next_block), so the node region is bounded by the
+    // next region base or the 4GiB pointer limit, whichever is lower.
+    uint64_t watch_nodes_region_end = std::min(clauses_cmd_base_addr, (uint64_t)1 << 32);
+    watches = Watches(verbose, global_memory, watches_base_addr, watch_nodes_base_addr,
+                      &yield_ptr, watch_nodes_region_end);
     watches.setReorderBuffer(&reorder_buffer);
-    
-    // Create Clauses object
-    clauses = Clauses(verbose, global_memory, clauses_cmd_base_addr, clauses_base_addr, &yield_ptr);
+
+    // Create Clauses object. The allocator manages [clauses_base, var_act_base),
+    // capped below 2GiB because Cref offsets are signed 32-bit.
+    uint64_t clauses_region_size = std::min(var_act_base_addr - clauses_base_addr,
+                                            (uint64_t)0x7FFFFFF0);
+    clauses = Clauses(verbose, global_memory, clauses_cmd_base_addr, clauses_base_addr,
+                      &yield_ptr, clauses_region_size);
     clauses.setReorderBuffer(&reorder_buffer);
     
     // Load the selected heap subcomponent depending on build flag
@@ -257,6 +267,24 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
         if (!tracer_->open(trace_file, trace_buf)) {
             output.fatal(CALL_INFO, -1, "trace_file: could not open %s\n", trace_file.c_str());
         }
+        // The DsMap classifies addresses by bits 28-31 only, which requires all
+        // eight bases to live in distinct 256MiB slots below 4GiB. The 8GiB map
+        // violates that (e.g. clauses_cmd at 0x100000000 aliases nibble 0), so
+        // refuse to trace rather than emit silently misclassified events.
+        const uint64_t bases[8] = { heap_base_addr, indices_base_addr, variables_base_addr,
+                                    watches_base_addr, watch_nodes_base_addr,
+                                    clauses_cmd_base_addr, clauses_base_addr, var_act_base_addr };
+        uint16_t nibble_seen = 0;
+        for (int bi = 0; bi < 8; bi++) {
+            uint16_t bit = 1u << ((bases[bi] >> 28) & 0xF);
+            if (bases[bi] >= ((uint64_t)1 << 32) || (nibble_seen & bit)) {
+                output.fatal(CALL_INFO, -1,
+                    "trace_file: DsMap needs distinct 256MiB-aligned region bases below "
+                    "4GiB; base 0x%lx does not qualify. Tracing is unsupported with this "
+                    "address map.\n", bases[bi]);
+            }
+            nibble_seen |= bit;
+        }
         TraceWriter::DsMap m;
         m.nibble[(heap_base_addr        >> 28) & 0xF] = TraceWriter::DS_HEAP;
         m.nibble[(indices_base_addr     >> 28) & 0xF] = TraceWriter::DS_INDICES;
@@ -302,6 +330,15 @@ void SATSolver::init(unsigned int phase) {
         var_assigned.resize(num_vars + 1, false);
         var_value.resize(num_vars + 1);
         resetSpecState();
+
+        // The variables array is the only per-var region without its own
+        // bounds check; overrunning it would silently clobber watch metadata.
+        // (initWatches and the clause allocator guard their own regions.)
+        uint64_t variables_end = variables_base_addr
+                               + (uint64_t)(num_vars + 1) * sizeof(Variable);
+        sst_assert(variables_end <= watches_base_addr, CALL_INFO, -1,
+            "Variables region (%u vars, 0x%lx-0x%lx) overruns watches_base_addr 0x%lx\n",
+            num_vars, variables_base_addr, variables_end, watches_base_addr);
 
         // Untimed data structure initialization
         variables.init(num_vars);

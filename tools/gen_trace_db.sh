@@ -121,6 +121,12 @@ run_one() {
     [[ -n "$L2_BW"       ]] && extra+=(--l2-bw "$L2_BW")
     [[ -n "$PREFETCH"    ]] && extra+=(--prefetch)
 
+    # NOTE: tracing is currently incompatible with the 8GiB address map. The
+    # trace DsMap classifies addresses by bits 28-31, which cannot represent the
+    # regions now placed above 4GiB, so the solver fatals when --trace-file is
+    # combined with the default map. To regenerate a trace DB, first rework the
+    # DsMap (src/satsolver.cc, src/trace_writer.*) to classify by region range
+    # instead of nibble. See git history for the removed --legacy-map flag.
     sst tests/test_two_level.py -- \
         --cnf "$cnf_path" \
         --rand "$seed" \

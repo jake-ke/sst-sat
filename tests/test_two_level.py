@@ -218,16 +218,26 @@ if args.trace_file:
 # Create the SAT solver component
 solver = sst.Component("solver", "satsolver.SATSolver")
 
-# Define memory addresses for global memory operations
-heap_base_addr          = 0x00000000
-indices_base_addr       = 0x10000000
-variables_base_addr     = 0x20000000
-watches_base_addr       = 0x30000000
-watch_nodes_base_addr   = 0x40000000
-clauses_cmd_base_addr   = 0x50000000
-clauses_base_addr       = 0x60000000
-var_act_base_addr       = 0x70000000
-# clause_act_base_addr    = 0x80000000
+# Define memory addresses for global memory operations.
+# 8GiB map sized for instances up to 16.7M vars (MAX_HEAP_LEVELS=24) and 2GiB
+# of clause data. Hard constraints, in addition to keeping this region ORDER
+# (the solver/profiler route responses by ordered >= comparisons):
+#   - watch_nodes must END at or below 4GiB: watcher head_ptr/free_head/
+#     next_block pack absolute node addresses into uint32 fields
+#   - clauses region must span < 2GiB: Cref offsets are signed 32-bit
+#     (bases above 4GiB are fine -- Crefs are region-relative)
+#   - watches metadata needs 128 B per variable (64 B per literal)
+heap_base_addr          = 0x000000000   # 128MiB (classic-heap build only)
+indices_base_addr       = 0x008000000   # 128MiB (classic-heap build only)
+variables_base_addr     = 0x010000000   # 512MiB: 16 B/var
+watches_base_addr       = 0x030000000   # 2.25GiB: 64 B/literal metadata
+watch_nodes_base_addr   = 0x0C0000000   # 1GiB, ends exactly at 4GiB
+clauses_cmd_base_addr   = 0x100000000   # 1GiB: 4 B/clause
+clauses_base_addr       = 0x140000000   # 2GiB: clause data + learnt headroom
+var_act_base_addr       = 0x1C0000000   # 512MiB: 16 B/var (VarMem)
+
+mem_size_str   = "8GiB"
+addr_range_end = "0x1FFFFFFFF"
 
 # Get file size and pass it to solver
 params = {
@@ -274,6 +284,10 @@ else:
     heap = solver.setSubComponent("order_heap", "satsolver.PipelinedHeap")
 heap.addParams({
     "verbose" : str(args.verbose),
+    # The classic Heap reads var_act_base_addr from its OWN params (not the
+    # solver's); without this it falls back to a default and misroutes
+    # var-activity traffic under a non-default address map.
+    "var_act_base_addr" : hex(var_act_base_addr),
 })
 print()
 
@@ -372,15 +386,15 @@ global_memctrl.addParams({
     "debug_level" : "10",
     "verbose" : "0",
     "addr_range_start" : "0",
-    "addr_range_end" : "0xFFFFFFFF",
-    "mem_size" : "4GiB",
+    "addr_range_end" : addr_range_end,
+    "mem_size" : mem_size_str,
 })
 
 # Create memory backend for global operations
 if (args.ram2_config):
     global_memory = global_memctrl.setSubComponent("backend", "memHierarchy.ramulator2")
     global_memory.addParams({
-        "mem_size" : "4GiB",
+        "mem_size" : mem_size_str,  # ramulator2-ddr4.cfg models 16GiB (DDR4_8Gb_x8, 1ch x 2rank)
         "configFile" : args.ram2_config,
         "max_requests_per_cycle" : "2",
         "debug_level" : "10",
@@ -391,7 +405,7 @@ else:
     global_memory = global_memctrl.setSubComponent("backend", "memHierarchy.simpleMem")
     global_memory.addParams({
         "access_time" : args.mem_latency,
-        "mem_size" : "4GiB",
+        "mem_size" : mem_size_str,
         "max_requests_per_cycle" : args.l2_bw,
         "request_width" : args.l2_width[:-1],  # Remove 'B' from width
     })

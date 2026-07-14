@@ -7,6 +7,13 @@ MemoryAllocator::MemoryAllocator(int verbose, uint64_t mem_base_addr, uint64_t t
       req_mem(0), alloc_mem(0), frag_ratio(0.0), peak_frag_ratio(0.0) {
 
     output.init("ALLOC->", verbose, 0, SST::Output::STDOUT);
+    // Cref offsets and BlockHeader.block_size are signed-32/31-bit, so the
+    // managed region must stay below 2GiB regardless of what the caller asks for.
+    if (total_size > 0x7FFFFFF0ULL) {
+        output.fatal(CALL_INFO, -1,
+            "Clause region size %lu B exceeds the 2GiB Cref/block_size limit\n",
+            total_size);
+    }
     // Initialize free lists
     for (int i = 0; i < NUM_SIZE_CLASSES; i++) {
         free_lists[i] = ClauseRef_Undef;
@@ -15,12 +22,21 @@ MemoryAllocator::MemoryAllocator(int verbose, uint64_t mem_base_addr, uint64_t t
 
 void MemoryAllocator::initialize(AsyncBase* async_base, Cref res_size) {
     this->async_base = async_base;
+    // Before this guard existed, reserved > heap_size made the uint32
+    // free_size below wrap, sending the footer write ~4GiB past the region
+    // (the historical constant-0x16FFFFFFB init fatal).
+    if (res_size < 0 || (uint64_t)res_size + MIN_BLOCK_SIZE > heap_size) {
+        output.fatal(CALL_INFO, -1,
+            "Clause region too small: %ld B reserved for original clauses + %u B "
+            "minimum free block > %lu B region. Instance needs a larger clauses region.\n",
+            (long)res_size, MIN_BLOCK_SIZE, heap_size);
+    }
     reserved_size = res_size;
-    
+
     // Reset fragmentation tracking
     req_mem = res_size;
     alloc_mem = res_size;
-    
+
     // Create one large free block for the rest of memory
     Cref start_addr = reserved_size;
     uint32_t free_size = heap_size - reserved_size;
@@ -254,9 +270,11 @@ void MemoryAllocator::freeBlock(Cref addr, size_t req_size) {
         }
     }
     
-    // Check if the next physical block is free
+    // Check if the next physical block is free. Crefs are region-relative, so
+    // the bound is heap_size — comparing against getMemoryEnd() (absolute) was
+    // always true and read a phantom header past the region for the last block.
     Cref next_physical = addr + curr_size;
-    if (next_physical < getMemoryEnd()) {
+    if ((uint64_t)next_physical + TAG_SIZE <= heap_size) {
         BlockHeader next_header = readBlockTag(next_physical);
         if (!next_header.allocated) {
             // Coalesce with next block

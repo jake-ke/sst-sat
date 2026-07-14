@@ -13,8 +13,8 @@
 #include "trace_writer.h"
 
 // Define maximum number of heap levels and corresponding parameters
-#define MAX_HEAP_LEVELS 22
-#define MAX_HEAP_SIZE (1 << MAX_HEAP_LEVELS) - 1
+#define MAX_HEAP_LEVELS 24
+#define MAX_HEAP_SIZE ((1u << MAX_HEAP_LEVELS) - 1)
 #define PIPELINE_DEPTH 3  // Number of stages per level (read, compare, write)
 
 // Operation types for pipeline stages

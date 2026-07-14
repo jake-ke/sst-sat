@@ -106,6 +106,7 @@ solver.addParams(params)
 heap = solver.setSubComponent("order_heap", "satsolver.Heap")
 heap.addParams({
     "verbose" : str(args.verbose),
+    "var_act_base_addr" : hex(var_act_base_addr),
 })
 
 # Configure memory interface for global operations (heap and variables)

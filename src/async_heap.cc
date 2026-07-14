@@ -7,8 +7,8 @@ Heap::Heap(SST::ComponentId_t id, SST::Params& params,
     : SST::SubComponent(id), memory(mem), state(IDLE), heap_size(0),
       outstanding_mem_requests(0), heap_addr(heap_base_addr), indices_addr(indices_base_addr),
       heap_sink_ptr(nullptr), debugging(false), need_rescale(false),
-      var_activity(params.find<int>("verbose", 0), mem, 
-                   params.find<uint64_t>("var_act_base_addr", 0x70000000), this) {
+      var_activity(params.find<int>("verbose", 0), mem,
+                   params.find<uint64_t>("var_act_base_addr", 0x1C0000000), this) {
     
     output.init("HEAP-> ", params.find<int>("verbose", 0), 0, SST::Output::STDOUT);
     output.verbose(CALL_INFO, 1, 0, "base addresses: heap=0x%lx, indices=0x%lx\n", 
@@ -20,7 +20,7 @@ Heap::Heap(SST::ComponentId_t id, SST::Params& params,
     response_port = configureLink("response");
     sst_assert( response_port != nullptr, CALL_INFO, -1, "Error: 'response_port' is not connected to a link\n");
 
-    var_act_base_addr = params.find<uint64_t>("var_act_base_addr", 0x70000000);
+    var_act_base_addr = params.find<uint64_t>("var_act_base_addr", 0x1C0000000);
     
     // Set up VarActivity to use our heap_sink_ptr
     var_activity.setHeapSinkPtr(&heap_sink_ptr);
