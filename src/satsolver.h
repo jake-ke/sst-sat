@@ -16,6 +16,7 @@
 #include "async_watches.h"
 #include "async_clauses.h"
 #include "async_activity.h"
+#include "activity_histogram.h"
 #include "trace_writer.h"
 
 //-----------------------------------------------------------------------------------
@@ -144,6 +145,7 @@ public:
     void handleCnfMemEvent(SST::Interfaces::StandardMem::Request* req);
     void handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req);
     void handleHeapResponse(SST::Event* ev);
+    void handleReduceScan(SST::Event* ev);
 
     // Top level FSM
     bool clockTick(SST::Cycle_t currentCycle);
@@ -184,7 +186,6 @@ public:
 
     // Two-Watched Literals
     void attachClause(int clause_idx, const Clause& c);
-    void detachClause(int clause_idx);
     
     // Decision Heuristics
     Lit chooseBranchVariable();
@@ -195,9 +196,13 @@ public:
     
     // Clause Activity
     void claDecayActivity();
-    void claBumpActivity(Cref clause_addr, float act);
-    void reduceDB();               // Reduce the learnt clause database
-    bool locked(Cref clause_addr);   // Check if clause is locked (reason for assignment)
+    // Bump a learnt clause's activity given its CURRENT activity (already in
+    // hand from the analyze traversal — no clause re-read). Returns true when
+    // the bump triggered a global activity rescale, so the caller can rescale
+    // any remembered activities it still holds.
+    bool claBumpActivity(Cref clause_addr, float act);
+    void reduceDB();                 // Reduce the learnt clause database
+    void rescaleAllActivities();     // Pipelined x2^-66 sweep over all learnt activities
 
     // Clause Minimization
     void minimizeL2_sub(std::vector<bool>& redundant, int worker_id = 0);  // coroutine function
@@ -262,7 +267,9 @@ private:
     int learnt_lbd;                             // LBD of learnt clause from conflict analysis
     int round_max_bt;                           // Max backtrack level among conflicts analyzed this round (-1 = none yet)
     std::vector<char> seen;                     // Temporary array for conflict analysis
-    std::vector<Cref> c_to_bump;
+    // Clauses to bump with their CURRENT activity, captured while the analyze
+    // traversal already holds the clause (saves a full re-read per bump).
+    std::vector<std::pair<Cref, float>> c_to_bump;
     std::vector<Var> v_to_bump;
 
     // Clause minimization
@@ -304,6 +311,12 @@ private:
     // Clause activity now stored in the Clause memory
     double clause_decay;
     double cla_inc;
+
+    // On-chip running histogram of learnt non-binary clause activities
+    // (median oracle for reduceDB; see activity_histogram.h).
+    ActivityHistogram cla_hist_;
+    SST::Link* reduce_scan_link_;       // Self-link modeling the serial prefix scan
+    bool scan_done_;                    // Reduce commits gate on this
 
     // Memory addresses
     uint64_t clauses_base_addr;         // Base address for clauses

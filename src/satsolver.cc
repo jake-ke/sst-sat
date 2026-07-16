@@ -5,6 +5,7 @@
 #include "sst/core/statapi/stataccumulator.h"
 #include <algorithm>  // For std::sort
 #include <cmath>      // For pow function
+#include <deque>      // For reduceDB dispatch/free queues
 #include <fstream>    // For file reading
 #include "directedprefetch.h" // Include for PrefetchRequestEvent
 #include <sst/core/realtimeAction.h>  // For current simulation time
@@ -79,8 +80,15 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     output.init("MAIN-> ",verbose, 0, SST::Output::STDOUT);
 
     // Configure clock
-    registerClock(params.find<std::string>("clock", "1GHz"),
+    SST::TimeConverter* clock_tc =
+        registerClock(params.find<std::string>("clock", "1GHz"),
                   new SST::Clock::Handler2<SATSolver, &SATSolver::clockTick>(this));
+
+    // Self-link modeling the serial on-chip histogram prefix scan at reduce
+    // time (one cycle per bucket; commits gate on its arrival).
+    reduce_scan_link_ = configureSelfLink("reduce_scan", *clock_tc,
+        new SST::Event::Handler2<SATSolver, &SATSolver::handleReduceScan>(this));
+    scan_done_ = true;
 
     // Print build-time/static configuration from structs.h
     output.output("==================[ SATSolver Configuration (structs.h) ]==================\n");
@@ -89,6 +97,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     output.output("LEARNERS            : %d\n", LEARNERS);
     output.output("HEAPLANES           : %d\n", HEAPLANES);
     output.output("MINIMIZERS          : %d\n", MINIMIZERS);
+    output.output("REDUCE_WORKERS      : %d\n", REDUCE_WORKERS);
     output.output("OVERLAP_HEAP_INSERT : %s\n", OVERLAP_HEAP_INSERT ? "true" : "false");
     output.output("OVERLAP_HEAP_BUMP   : %s\n", OVERLAP_HEAP_BUMP ? "true" : "false");
     output.output("WRITE_BUFFER        : %s\n", WRITE_BUFFER ? "true" : "false");
@@ -524,7 +533,11 @@ void SATSolver::finish() {
     // output.output("=========================[ Clauses Fragmentation ]=========================\n");
     // clauses.printFragStats();
     // output.output("===========================================================================\n");
-    
+
+    output.output("=========================[ Binary Clause Region ]=========================\n");
+    clauses.printBinaryStats();
+    output.output("===========================================================================\n");
+
     uint64_t total_counted = cycles_propagate + cycles_analyze + cycles_minimize +
                             cycles_backtrack + cycles_decision + cycles_reduce + cycles_restart +
                             cycles_heap_insert + cycles_heap_bump;
@@ -931,6 +944,19 @@ void SATSolver::handleHeapResponse(SST::Event* ev) {
     }
     assert(heap_resp_cnt >= 0);
     delete resp;
+}
+
+// The histogram prefix scan finished: unblock reduce commits and wake the
+// reduce parent coroutine (same wake protocol as a memory response).
+void SATSolver::handleReduceScan(SST::Event* ev) {
+    delete ev;
+    output.verbose(CALL_INFO, 4, 0, "REDUCEDB: threshold scan complete\n");
+    scan_done_ = true;
+    main_active = true;
+    if (state != STEP) {
+        saved_state = state;
+        state = STEP;
+    }
 }
 
 bool SATSolver::clockTick(SST::Cycle_t cycle) {
@@ -1380,9 +1406,15 @@ void SATSolver::execAnalyze() {
         heap_resp_cnt++;
 #endif
     }
-    for (const Cref& c : c_to_bump) {
-        const Clause& cdata = clauses.readClause(c);
-        claBumpActivity(c, cdata.act());
+    for (size_t bi = 0; bi < c_to_bump.size(); bi++) {
+        if (claBumpActivity(c_to_bump[bi].first, c_to_bump[bi].second)) {
+            // A rescale fired mid-loop: the remaining remembered activities
+            // are stale by exactly the rescale factor. Apply the same float
+            // transform the DRAM sweep applied (power-of-two, exact).
+            for (size_t bj = bi + 1; bj < c_to_bump.size(); bj++)
+                c_to_bump[bj].second =
+                    ActivityHistogram::rescaleValue(c_to_bump[bj].second);
+        }
     }
 
     output.verbose(CALL_INFO, 3, 0, "Final learnt: %s\n",
@@ -1522,6 +1554,9 @@ void SATSolver::execBacktrack() {
         // Add the learned clause
         Clause new_clause(learnt_clause, cla_inc);
         Cref addr = clauses.addClause(new_clause);
+        // Non-binary learnts enter the activity histogram (binaries are never
+        // removable, so the median oracle excludes them).
+        if (new_clause.litSize() > 2) cla_hist_.add(new_clause.act());
         output.verbose(CALL_INFO, 3, 0,
             "Added learnt clause 0x%x: %s\n",
             addr, printClause(new_clause.literals).c_str());
@@ -2384,7 +2419,7 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     int tmp_btlevel = 0;
     int tmp_lbd = 0;
     std::vector<bool> lbd_levels(current_level() + 1, false);
-    std::vector<Cref> tmp_c_to_bump;
+    std::vector<std::pair<Cref, float>> tmp_c_to_bump;
     std::vector<Var> tmp_v_to_bump;
 
     int pathC = 0;  // Counter for literals at current decision level
@@ -2397,8 +2432,9 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
             "ANALYZE[%d]: conflict clause is undefined\n", worker_id);
         const Clause& c = clauses.readClause(conflict, worker_id);
         
-        // Bump activity for learnt clauses
-        if (clauses.isLearnt(conflict)) tmp_c_to_bump.push_back(conflict);
+        // Bump activity for learnt clauses. The clause is in hand, so remember
+        // its current activity too — the bump loop then needs no re-read.
+        if (clauses.isLearnt(conflict)) tmp_c_to_bump.push_back({conflict, c.act()});
 
         // Debug print for current clause
         output.verbose(CALL_INFO, 5, 0, "ANALYZE[%d]: current clause (0x%x): %s\n",
@@ -2565,67 +2601,257 @@ void SATSolver::backtrack(int backtrack_level) {
 //-----------------------------------------------------------------------------------
 // clause deletion
 //-----------------------------------------------------------------------------------
-// Remove half of the learnt clauses, 
-// minus the clauses locked by the current assignment. 
-// Locked clauses are clauses that are reason to some assignment. 
-// Binary clauses are never removed.
+// Remove half of the learnt clauses,
+// minus the clauses locked by the current assignment.
+// Locked clauses are clauses that are reason to some assignment.
+// Binary clauses are never removed (skipped by address range, zero reads).
+//
+// Streaming design: the on-chip activity histogram provides the median
+// threshold without any sorting or activity sweep. One pass over the learnt
+// pointer array (double-buffered stream) fans clauses out to REDUCE_WORKERS
+// coroutines, each reading only the 16 B clause head; decisions commit in
+// index order so survivors compact in place (no O(N) to_keep buffer). Frees
+// funnel through a single free-engine coroutine (shared allocator state).
 void SATSolver::reduceDB() {
     output.verbose(CALL_INFO, 4, 0, "REDUCEDB: Starting clause database reduction\n");
-    
-    size_t nl = nLearnts();
-    std::vector<Cref> learnts_addr = clauses.readAllAddr();
-    std::vector<float> activities = clauses.readAllAct(learnts_addr);
 
-    // Create pairs of (idx, activity) for sorting
-    std::vector<std::pair<Cref, float>> learnts(nl);
-    for (uint32_t i = 0; i < nl; i++) {
-        learnts[i] = std::make_pair(learnts_addr[i], activities[i]);
-    }
-    
-    // 2. Sort learnt clauses by activity
-    std::sort(learnts.begin(), learnts.end(), [&](const auto& a, const auto& b) {
-        Cref i = a.first, j = b.first;
-        return clauses.getClauseSize(i) > 2 && (clauses.getClauseSize(j) == 2 || a.second < b.second);
-    });
-    
-    // 3. Extra activity limit for removal
-    double extra_lim = learnts.size() > 0 ? cla_inc / learnts.size() : 0;
-    
-    output.verbose(CALL_INFO, 4, 0, 
-        "REDUCEDB: Found %zu learnt clauses, extra_lim = %f\n", 
-        learnts.size(), extra_lim);
-    
-    // 4. mark for removal
-    std::vector<Cref> to_keep;
+    const size_t nl = nLearnts();
+    if (nl == 0) return;
+
+    // --- Threshold select (on-chip prefix scan; latency modeled below) ---
+    // MiniSat removes the bottom half of the activity-sorted learnt list;
+    // binaries sort to the top, so the bottom half is non-binary as long as
+    // binaries are a minority (the clamp handles the degenerate case).
+    uint64_t target = std::min((uint64_t)(nl / 2), cla_hist_.total());
+    uint64_t below = 0;
+    int t_bucket = cla_hist_.selectThreshold(target, below);
+    uint64_t quota = target - below;  // tie-bucket allowance, consumed in commit order
+    double extra_lim = cla_inc / nl;  // Extra activity limit for removal
+
+    output.verbose(CALL_INFO, 4, 0,
+        "REDUCEDB: %zu learnts, target %lu, t_bucket %d, quota %lu, extra_lim = %f\n",
+        nl, target, t_bucket, quota, extra_lim);
+
+    // Model the serial NUM_BUCKETS-cycle scan: commits gate on scan_done_.
+    scan_done_ = false;
+    reduce_scan_link_->send(ActivityHistogram::NUM_BUCKETS, new ReduceScanEvent());
+
+    // --- Streaming pass ---
+    const int W = REDUCE_WORKERS;
+    const int STREAMER = W;
+    const int FREEER = W + 1;
+    const int TOTAL = W + 2;
+    const size_t CHUNK_CREFS = 64;  // 256 B of pointer stream per fetch (4 lines)
+
+    coro_t::push_type* parent_yield_ptr = yield_ptr;
+    active_workers.assign(TOTAL, false);
+    polling.assign(TOTAL, false);
+
+    std::deque<std::pair<size_t, Cref>> dispatch;  // (learnt idx, clause addr)
+    std::deque<std::pair<Cref, uint32_t>> free_q;  // (clause addr, num_lits)
+    std::unordered_set<int> wl_busy;               // watchlists under surgery
+    size_t stream_pos = 0;      // next learnt idx the streamer fetches
+    bool stream_done = false;
+    size_t next_commit = 0;     // in-order commit cursor
+    size_t write_idx = 0;       // in-place compaction write position
+    int workers_running = W;
     int removed = 0;
-    for (size_t i = 0; i < learnts.size(); i++) {
-        Cref addr = learnts[i].first;
-        float act = learnts[i].second;
-        uint32_t cls_size = clauses.getClauseSize(addr);
 
-        // Only remove non-binary, unlocked clauses
-        if (cls_size > 2 && !locked(addr) && (i < learnts.size() / 2 || act < extra_lim)) {
-            output.verbose(CALL_INFO, 4, 0,
-                "REDUCEDB: Marking clause 0x%x for removal\n", addr);
+    std::vector<coro_t::pull_type*> coros(TOTAL, nullptr);
+    std::vector<coro_t::push_type*> yptrs(TOTAL, nullptr);
 
-            // remove watchers
-            detachClause(addr);
-            clauses.freeClause(addr, cls_size);
-            removed++;
+    // Pointer-array streamer: double-buffered chunk fetches. While a chunk is
+    // in flight the workers keep draining the previous one — the streamer's
+    // blocked time is the overlap.
+    auto streamer_body = [&]() {
+        while (stream_pos < nl) {
+            while (dispatch.size() >= CHUNK_CREFS) {
+                polling[STREAMER] = true;
+                (*yield_ptr)();
+            }
+            polling[STREAMER] = false;
+            size_t cnt = std::min(CHUNK_CREFS, nl - stream_pos);
+            std::vector<Cref> addrs = clauses.readAddrChunk(stream_pos, cnt, STREAMER);
+            for (size_t k = 0; k < cnt; k++)
+                dispatch.push_back({stream_pos + k, addrs[k]});
+            stream_pos += cnt;
         }
-        else to_keep.push_back(addr);
+        stream_done = true;
+    };
+
+    // Clause worker: one 16 B head read per clause (activity + both watched
+    // literals), speculative reason pre-read for potential candidates, then a
+    // memory-free in-order commit; watchlist surgery happens post-commit.
+    auto worker_body = [&](int w) {
+        while (true) {
+            if (dispatch.empty()) {
+                if (stream_done) break;
+                polling[w] = true;
+                (*yield_ptr)();
+                polling[w] = false;
+                continue;
+            }
+            size_t idx = dispatch.front().first;
+            Cref addr = dispatch.front().second;
+            dispatch.pop_front();
+
+            bool is_bin = clauses.isBinaryLearnt(addr);
+            float act = 0.0f;
+            Lit c0 = lit_Undef, c1 = lit_Undef;
+            uint32_t nlits = 0;
+            int b = 0;
+            bool reason_read = false;
+            Cref reason = ClauseRef_Undef;
+
+            if (!is_bin) {
+                ClauseHead h = clauses.readClauseHead(addr, w);
+                act = h.activity; c0 = h.l0; c1 = h.l1; nlits = h.num_lits;
+                b = ActivityHistogram::bucketOf(act);
+                // Locked short-circuit: the reason read is issued only for a
+                // potential removal candidate whose first literal is
+                // currently assigned true (sparse at reduce time).
+                bool candidate_possible = (b <= t_bucket) || ((double)act < extra_lim);
+                if (candidate_possible && var_assigned[var(c0)] && value(c0)) {
+                    reason = variables.getReason(var(c0), w);
+                    reason_read = true;
+                }
+            }
+
+            // In-order, memory-free commit; also gated on the threshold scan.
+            while (!(next_commit == idx && scan_done_)) {
+                polling[w] = true;
+                (*yield_ptr)();
+            }
+            polling[w] = false;
+
+            bool remove = false;
+            if (!is_bin) {
+                bool bottom_half = (b < t_bucket) || (b == t_bucket && quota > 0);
+                if (b == t_bucket && quota > 0) quota--;  // consumed by encounter
+                remove = bottom_half || ((double)act < extra_lim);
+                if (remove && reason_read && reason == addr) remove = false;  // locked
+            }
+
+            if (remove) {
+                output.verbose(CALL_INFO, 4, 0,
+                    "REDUCEDB: Marking clause 0x%x for removal\n", addr);
+                cla_hist_.remove(act);
+                removed++;
+                next_commit++;
+                // Watchlist surgery after releasing the commit cursor. Both
+                // lists are acquired atomically (no yield between test and
+                // set), so concurrent removals cannot deadlock.
+                int l0 = toWatchIndex(~c0), l1 = toWatchIndex(~c1);
+                while (wl_busy.count(l0) || wl_busy.count(l1)) {
+                    polling[w] = true;
+                    (*yield_ptr)();
+                }
+                polling[w] = false;
+                wl_busy.insert(l0);
+                wl_busy.insert(l1);
+                watches.removeWatcher(l0, addr, w);
+                watches.removeWatcher(l1, addr, w);
+                wl_busy.erase(l0);
+                wl_busy.erase(l1);
+                free_q.push_back({addr, nlits});
+            } else {
+                clauses.compactKeep(write_idx, addr);  // fire-and-forget write
+                write_idx++;
+                next_commit++;
+            }
+        }
+        workers_running--;
+    };
+
+    // Free engine: drains removals into the allocator. Frees mutate shared
+    // free-list state, so they stay sequential but pipeline behind the
+    // removal workers instead of blocking them.
+    auto freeer_body = [&]() {
+        while (true) {
+            if (free_q.empty()) {
+                if (workers_running == 0) break;
+                polling[FREEER] = true;
+                (*yield_ptr)();
+                polling[FREEER] = false;
+                continue;
+            }
+            Cref addr = free_q.front().first;
+            uint32_t nlits = free_q.front().second;
+            free_q.pop_front();
+            clauses.freeClause(addr, nlits, FREEER);
+        }
+    };
+
+    // Spawn all sub-coroutines (streamer, W workers, free engine).
+    for (int t = 0; t < TOTAL; t++) {
+        coros[t] = new coro_t::pull_type(
+            [this, t, W, STREAMER, &yptrs, &streamer_body, &worker_body, &freeer_body]
+            (coro_t::push_type& yield) {
+                yield_ptr = &yield;
+                yptrs[t] = yield_ptr;
+                if (t == STREAMER) streamer_body();
+                else if (t < W) worker_body(t);
+                else freeer_body();
+            });
+        if (!(*coros[t])) {
+            delete coros[t];
+            coros[t] = nullptr;
+        }
     }
 
-    // 5. Compact clauses by moving non-removed learnt clauses forward
-    clauses.reduceDB(to_keep);
+    // Stepping loop: run rounds until a full round makes no progress, then
+    // yield for the next external event (memory response or the scan event).
+    // Progress-based re-rounds let in-order commits cascade without waiting
+    // for another event per commit.
+    bool all_done = false;
+    while (!all_done) {
+        bool progress = true;
+        while (progress) {
+            progress = false;
+            size_t snap = next_commit + stream_pos + write_idx
+                        + (size_t)removed + free_q.size() + dispatch.size();
+            for (int t = 0; t < TOTAL; t++) {
+                if (coros[t] == nullptr) continue;
+                if (active_workers[t] || polling[t]) {
+                    active_workers[t] = false;
+                    yield_ptr = yptrs[t];
+                    (*coros[t])();
+                    if (!(*coros[t])) {
+                        delete coros[t];
+                        coros[t] = nullptr;
+                        polling[t] = false;
+                        progress = true;
+                    }
+                }
+            }
+            size_t snap2 = next_commit + stream_pos + write_idx
+                         + (size_t)removed + free_q.size() + dispatch.size();
+            if (snap2 != snap) progress = true;
+        }
+        all_done = true;
+        for (int t = 0; t < TOTAL; t++) {
+            if (coros[t] != nullptr) all_done = false;
+        }
+        if (!all_done) (*parent_yield_ptr)();
+    }
 
-    output.verbose(CALL_INFO, 4, 0, 
-        "REDUCEDB: Removed %d learnt clauses, new clause count: %zu\n", 
+    // finished all sub-coroutines
+    active_workers.clear();
+    polling.clear();
+    yield_ptr = parent_yield_ptr;
+
+    sst_assert(next_commit == nl && (size_t)removed + write_idx == nl,
+        CALL_INFO, -1, "REDUCEDB: commit bookkeeping mismatch (%zu/%zu/%d)\n",
+        next_commit, write_idx, removed);
+    clauses.finishReduce(write_idx);
+
+    output.verbose(CALL_INFO, 4, 0,
+        "REDUCEDB: Removed %d learnt clauses, new clause count: %zu\n",
         removed, clauses.size());
-        
+
     stat_db_reductions->addData(1);
     stat_removed->addDataNTimes(removed, 1);
-    if (tracer_) tracer_->emitReduce(removed, (int)to_keep.size());
+    if (tracer_) tracer_->emitReduce(removed, (int)write_idx);
 }
 
 //-----------------------------------------------------------------------------------
@@ -2667,12 +2893,69 @@ void SATSolver::attachClause(Cref clause_addr, const Clause& c) {
     watches.insertWatcher(toWatchIndex(~c[1]), clause_addr, c[0]);
 }
 
-void SATSolver::detachClause(Cref clause_addr) {
-    const Clause& c = clauses.readClause(clause_addr);
-    output.verbose(CALL_INFO, 6, 0, "DETACH: clause 0x%x from watcher %d and %d\n",
-        clause_addr, toInt(~c[0]), toInt(~c[1]));
-    watches.removeWatcher(toWatchIndex(~c[0]), clause_addr);
-    watches.removeWatcher(toWatchIndex(~c[1]), clause_addr);
+// Pipelined x2^-66 rescale of every learnt clause activity (binaries
+// included — they are bumped like any learnt clause, just not histogrammed).
+// W workers each stream their own chunks of the pointer array and RMW the
+// 4 B activity of each clause; denormal results are flushed to zero so the
+// stored floats match the histogram's bucket-0 collapse exactly.
+void SATSolver::rescaleAllActivities() {
+    const size_t nl = nLearnts();
+    if (nl == 0) return;
+    const int W = REDUCE_WORKERS;
+    const size_t CHUNK_CREFS = 64;
+    const size_t num_chunks = (nl + CHUNK_CREFS - 1) / CHUNK_CREFS;
+
+    coro_t::push_type* parent_yield_ptr = yield_ptr;
+    active_workers.assign(W, false);
+
+    std::vector<coro_t::pull_type*> coros(W, nullptr);
+    std::vector<coro_t::push_type*> yptrs(W, nullptr);
+
+    auto sweep_body = [&](int w) {
+        for (size_t chunk = w; chunk < num_chunks; chunk += W) {
+            size_t start = chunk * CHUNK_CREFS;
+            size_t cnt = std::min(CHUNK_CREFS, nl - start);
+            std::vector<Cref> addrs = clauses.readAddrChunk(start, cnt, w);
+            for (size_t k = 0; k < cnt; k++) {
+                float act = clauses.readAct(addrs[k], w);
+                clauses.writeAct(addrs[k], ActivityHistogram::rescaleValue(act));
+            }
+        }
+    };
+
+    bool done = true;
+    for (int w = 0; w < W; w++) {
+        coros[w] = new coro_t::pull_type(
+            [this, w, &yptrs, &sweep_body](coro_t::push_type& yield) {
+                yield_ptr = &yield;
+                yptrs[w] = yield_ptr;
+                sweep_body(w);
+            });
+        if (*coros[w]) done = false;
+        else { delete coros[w]; coros[w] = nullptr; }
+    }
+    if (!done) (*parent_yield_ptr)();
+
+    while (!done) {
+        done = true;
+        for (int w = 0; w < W; w++) {
+            if (coros[w] == nullptr) continue;
+            if (active_workers[w]) {
+                active_workers[w] = false;
+                yield_ptr = yptrs[w];
+                (*coros[w])();
+                if (!(*coros[w])) {
+                    delete coros[w];
+                    coros[w] = nullptr;
+                }
+            }
+            if (coros[w] != nullptr) done = false;
+        }
+        if (!done) (*parent_yield_ptr)();
+    }
+
+    active_workers.clear();
+    yield_ptr = parent_yield_ptr;
 }
 
 
@@ -2761,30 +3044,29 @@ void SATSolver::claDecayActivity() {
         "ACTIVITY: Decayed clause activity increment to %f\n", cla_inc);
 }
 
-// Bump activity for a specific clause
-void SATSolver::claBumpActivity(Cref clause_addr, float act) {
-    clauses.writeAct(clause_addr, act + cla_inc);
+// Bump activity for a specific clause. `act` is the clause's current
+// activity, already in hand from the analyze traversal (no clause re-read).
+// Returns true when the bump triggered a global rescale.
+bool SATSolver::claBumpActivity(Cref clause_addr, float act) {
+    float new_act = (float)(act + cla_inc);
+    clauses.writeAct(clause_addr, new_act);
+    // Histogram bump: dec old bucket, inc new (binaries are not tracked).
+    if (!clauses.isBinaryLearnt(clause_addr)) cla_hist_.move(act, new_act);
 
     if ((act + cla_inc) > 1e20) {
-        // Rescale all clause activities if they get too large
+        // Rescale all clause activities if they get too large. The factor is
+        // a power of two (2^-66) so the histogram update is an exact bucket
+        // shift; values that go denormal are flushed to zero by the sweep and
+        // collapse into bucket 0.
         output.verbose(CALL_INFO, 3, 0, "ACTIVITY: Rescaling all clause activities\n");
-        clauses.rescaleAllAct(1e-20);
-        cla_inc *= 1e-20;
+        rescaleAllActivities();
+        cla_inc *= 0x1p-66;
+        cla_hist_.rescaleShift();
+        return true;
     }
 
     output.verbose(CALL_INFO, 4, 0, "ACTIVITY: Bumped clause 0x%x\n", clause_addr);
-}
-
-// Check if a clause is "locked" -- cannot be removed
-bool SATSolver::locked(Cref clause_addr) {
-    const Clause& c = clauses.readClause(clause_addr);
-    assert(c.litSize() != 0);
-    Var v = var(c[0]);
-    int reason = variables.getReason(v);
-    
-    return var_assigned[v] && 
-           value(c[0]) == true &&   // First literal is true
-           reason == clause_addr;   // This clause is the reason
+    return false;
 }
 
 //-----------------------------------------------------------------------------------

@@ -23,6 +23,7 @@ const int PROPAGATORS = 7;  // Number of watchers to propagate
 const int LEARNERS = 8;  // Number of learners for clause learning
 const int HEAPLANES = 8;  // Number of heap lanes for parallel execution
 const int MINIMIZERS = 4;  // Number of minimizers
+const int REDUCE_WORKERS = 16;  // Parallel workers for the reduceDB streaming pass
 const bool OVERLAP_HEAP_INSERT = true;  // overlaps heap insertions (backtracking) with propagation
 const bool OVERLAP_HEAP_BUMP = true;  // overlaps heap bumping with clause minimization and find bt level
 const bool WRITE_BUFFER = true;  // enables write request buffering for improved performance
@@ -40,6 +41,13 @@ constexpr int SPEC_WORKER_BASE =
     (PARA_LITS * PROPAGATORS > LEARNERS
         ? (PARA_LITS * PROPAGATORS > MINIMIZERS ? PARA_LITS * PROPAGATORS : MINIMIZERS)
         : (LEARNERS > MINIMIZERS ? LEARNERS : MINIMIZERS));
+
+// reduceDB uses REDUCE_WORKERS clause workers + 1 pointer-array streamer +
+// 1 free engine. Their worker_ids must stay below SPEC_WORKER_BASE so a
+// speculative propagation running concurrently with REDUCE cannot be
+// misrouted by handleGlobalMemEvent.
+static_assert(REDUCE_WORKERS + 2 <= SPEC_WORKER_BASE,
+              "reduce worker ids must stay below SPEC_WORKER_BASE");
 
 // Define types for variables and literals
 typedef int Var;
@@ -149,12 +157,23 @@ public:
     int result;
     HeapRespEvent() : result(0) {}
     HeapRespEvent(int r) : result(r) {}
-    
+
     void serialize_order(SST::Core::Serialization::serializer& ser) override {
         Event::serialize_order(ser);
         SST_SER(result);
     }
     ImplementSerializable(HeapRespEvent);
+};
+
+// Self-link event modeling the serial on-chip histogram prefix scan at the
+// start of reduceDB (one cycle per bucket; commits gate on its arrival).
+class ReduceScanEvent : public SST::Event {
+public:
+    ReduceScanEvent() {}
+    void serialize_order(SST::Core::Serialization::serializer& ser) override {
+        Event::serialize_order(ser);
+    }
+    ImplementSerializable(ReduceScanEvent);
 };
 
 // Helper functions for literals

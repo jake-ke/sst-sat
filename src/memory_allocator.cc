@@ -150,9 +150,9 @@ void MemoryAllocator::insertFreeBlock(Cref addr, uint32_t size) {
     free_lists[size_class] = addr;
 }
 
-void MemoryAllocator::removeFreeBlock(Cref addr, uint32_t block_size) {
-    Cref next = getNextFreeBlock(addr);
-    Cref prev = getPrevFreeBlock(addr);
+void MemoryAllocator::removeFreeBlock(Cref addr, uint32_t block_size, int worker_id) {
+    Cref next = getNextFreeBlock(addr, worker_id);
+    Cref prev = getPrevFreeBlock(addr, worker_id);
     
     // Update previous block's next pointer
     if (prev != ClauseRef_Undef) {
@@ -244,41 +244,41 @@ Cref MemoryAllocator::allocateBlock(uint32_t size) {
     return block;
 }
 
-void MemoryAllocator::freeBlock(Cref addr, size_t req_size) {
+void MemoryAllocator::freeBlock(Cref addr, size_t req_size, int worker_id) {
     // Read the current block's information
-    BlockHeader curr_header = readBlockTag(addr);
+    BlockHeader curr_header = readBlockTag(addr, worker_id);
     uint32_t curr_size = curr_header.block_size;
     output.verbose(CALL_INFO, 8, 0, "Freeing block at 0x%x, %u bytes\n", addr, curr_size);
-    
+
     // fragmentation stats
     req_mem -= req_size;
     alloc_mem -= curr_size;
     updateFragStats();
-    
+
     Cref final_addr = addr;
     uint32_t final_size = curr_size;
 
     // Check if the previous physical block is free
     if (addr - TAG_SIZE >= reserved_size) {
-        BlockFooter prev_footer = readBlockTag(addr - TAG_SIZE);
+        BlockFooter prev_footer = readBlockTag(addr - TAG_SIZE, worker_id);
         Cref prev_physical = addr - prev_footer.block_size;
         if (!prev_footer.allocated) {
             // Coalesce with previous block
-            removeFreeBlock(prev_physical, prev_footer.block_size);
+            removeFreeBlock(prev_physical, prev_footer.block_size, worker_id);
             final_addr = prev_physical;
             final_size += prev_footer.block_size;
         }
     }
-    
+
     // Check if the next physical block is free. Crefs are region-relative, so
     // the bound is heap_size — comparing against getMemoryEnd() (absolute) was
     // always true and read a phantom header past the region for the last block.
     Cref next_physical = addr + curr_size;
     if ((uint64_t)next_physical + TAG_SIZE <= heap_size) {
-        BlockHeader next_header = readBlockTag(next_physical);
+        BlockHeader next_header = readBlockTag(next_physical, worker_id);
         if (!next_header.allocated) {
             // Coalesce with next block
-            removeFreeBlock(next_physical, next_header.block_size);
+            removeFreeBlock(next_physical, next_header.block_size, worker_id);
             final_size += next_header.block_size;
         }
     }
@@ -287,6 +287,29 @@ void MemoryAllocator::freeBlock(Cref addr, size_t req_size) {
         final_addr, final_size);
     // Insert into free list with the potentially coalesced block
     insertFreeBlock(final_addr, final_size);
+}
+
+bool MemoryAllocator::shrinkTop(uint32_t chunk) {
+    // The topmost block's footer sits at heap_size - TAG_SIZE.
+    BlockFooter top_footer = readBlockTag(heap_size - TAG_SIZE);
+    if (top_footer.allocated) {
+        output.verbose(CALL_INFO, 1, 0,
+            "shrinkTop: topmost block is allocated, cannot reclaim %u B\n", chunk);
+        return false;
+    }
+    if (top_footer.block_size < chunk + MIN_BLOCK_SIZE) {
+        output.verbose(CALL_INFO, 1, 0,
+            "shrinkTop: top free block (%u B) too small to give up %u B\n",
+            top_footer.block_size, chunk);
+        return false;
+    }
+    Cref top_addr = (Cref)(heap_size - top_footer.block_size);
+    removeFreeBlock(top_addr, top_footer.block_size);
+    insertFreeBlock(top_addr, top_footer.block_size - chunk);
+    heap_size -= chunk;
+    output.verbose(CALL_INFO, 3, 0,
+        "shrinkTop: ceiling lowered by %u B to %lu B\n", chunk, heap_size);
+    return true;
 }
 
 void MemoryAllocator::updateFragStats() {

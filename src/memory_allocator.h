@@ -39,8 +39,15 @@ public:
     
     // Core allocation functions
     Cref allocateBlock(uint32_t size);
-    void freeBlock(Cref addr, size_t req_size);
-    
+    void freeBlock(Cref addr, size_t req_size, int worker_id = 0);
+
+    // Lower the heap ceiling by `chunk` bytes, handing the reclaimed top of
+    // the region to the caller (the binary-clause bump region grows down into
+    // it). Only possible while the topmost block is free and large enough;
+    // returns false otherwise. All allocated blocks stay below the new
+    // ceiling, so `addr >= capacity()` remains a sound binary-region test.
+    bool shrinkTop(uint32_t chunk);
+
     // Initialization
     void setReorderBuffer(ReorderBuffer* rb) { reorder_buffer = rb; }
     void initialize(AsyncBase* async_base, Cref reserved_size = 0);
@@ -81,7 +88,7 @@ private:
     void setNextFreeBlock(Cref addr, Cref next);
     void setPrevFreeBlock(Cref addr, Cref prev);
     void insertFreeBlock(Cref addr, uint32_t size);
-    void removeFreeBlock(Cref addr, uint32_t block_size);
+    void removeFreeBlock(Cref addr, uint32_t block_size, int worker_id = 0);
 };
 
 #endif // MEMORY_ALLOCATOR_H

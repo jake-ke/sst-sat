@@ -419,12 +419,12 @@ int Watches::insertWatcher(int lit_idx, Cref clause_addr, Lit blocker, int worke
 }
 
 // Remove a watcher with given clause address
-void Watches::removeWatcher(int lit_idx, Cref clause_addr) {
-    output.verbose(CALL_INFO, 7, 0, 
+void Watches::removeWatcher(int lit_idx, Cref clause_addr, int worker_id) {
+    output.verbose(CALL_INFO, 7, 0,
         "Removing watcher for var %d: clause 0x%x\n", lit_idx/2, clause_addr);
 
     // Read metadata
-    WatchMetaData metadata = readMetaData(lit_idx);
+    WatchMetaData metadata = readMetaData(lit_idx, worker_id);
 
     // First check pre-watchers
     for (int i = 0; i < PRE_WATCHERS; i++) {
@@ -446,8 +446,8 @@ void Watches::removeWatcher(int lit_idx, Cref clause_addr) {
     WatcherBlock prev_block;
 
     while (curr_addr != 0) {
-        WatcherBlock curr_block = readBlock(curr_addr);
-        
+        WatcherBlock curr_block = readBlock(curr_addr, worker_id);
+
         // Search for the clause in this block
         for (int i = 0; i < PROPAGATORS; i++) {
             if (curr_block.nodes[i].valid && curr_block.nodes[i].getClauseAddr() == clause_addr) {
