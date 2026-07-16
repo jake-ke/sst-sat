@@ -171,13 +171,16 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
         SST::ComponentInfo::SHARE_PORTS | SST::ComponentInfo::SHARE_STATS,
         global_memory, heap_base_addr, indices_base_addr);
 #else
+    // The pipelined heap owns its memory interface (dedicated activity
+    // cache); it reads var_act_base_addr from its own params.
     order_heap = loadUserSubComponent<PipelinedHeap>("order_heap",
-        SST::ComponentInfo::SHARE_PORTS | SST::ComponentInfo::SHARE_STATS,
-        global_memory, var_act_base_addr);
+        SST::ComponentInfo::SHARE_PORTS | SST::ComponentInfo::SHARE_STATS);
+    if (order_heap) order_heap->setAssignedFlagsRef(&var_assigned);
 #endif
     sst_assert(order_heap != nullptr, CALL_INFO, -1, "Unable to load Heap subcomponent\n");
     in_decision = false;
     heap_resp_cnt = 0;
+    suppress_heap_inserts_ = false;
 
     // Configure the link to the heap subcomponent
     heap_link = configureLink("heap_port", 
@@ -313,6 +316,9 @@ SATSolver::~SATSolver() {}
 
 void SATSolver::init(unsigned int phase) {
     global_memory->init(phase);
+#ifndef USE_CLASSIC_HEAP
+    order_heap->init(phase);
+#endif
 
     // Only parse the file in phase 0
     if (phase == 0) {
@@ -376,7 +382,11 @@ void SATSolver::setup() {
     // Propagate cache line size to all memory-using components
     watches.setLineSize(line_size);
     clauses.setLineSize(line_size);
+#ifdef USE_CLASSIC_HEAP
     order_heap->setLineSize(line_size);
+#else
+    order_heap->setup();  // pipelined heap derives line size from its own interface
+#endif
 
     // Write the trace file header now that num_vars/num_clauses are known
     // (populated by init(phase=0) before setup runs). No trace events have
@@ -392,10 +402,16 @@ void SATSolver::setup() {
 
 void SATSolver::complete(unsigned int phase) {
     global_memory->complete(phase);
+#ifndef USE_CLASSIC_HEAP
+    order_heap->complete(phase);
+#endif
 }
 
 void SATSolver::finish() {
     global_memory->finish();
+#ifndef USE_CLASSIC_HEAP
+    order_heap->finish();
+#endif
 
     // Flush and close the binary trace writer (if enabled).
     if (tracer_) {
@@ -819,10 +835,15 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
         // only used if it is not heap's response, because heap has its own reorder buffer
         int worker_id = -1;
 
-        // Route the request to the appropriate handler based on address range
+        // Route the request to the appropriate handler based on address range.
+        // Pipelined-heap build: activity traffic uses the heap's own
+        // interface, so no var_act (or heap/indices) responses arrive here.
+#ifdef USE_CLASSIC_HEAP
         if (addr >= var_act_base_addr) {  // Variable activity request
             order_heap->handleMem(req);
-        } else if (addr >= clauses_cmd_base_addr) {  // Clauses request
+        } else
+#endif
+        if (addr >= clauses_cmd_base_addr) {  // Clauses request
             worker_id = reorder_buffer.lookUpWorkerId(read_resp->getID());
             clauses.handleMem(req);
             if (worker_id >= 0 && state != STEP) {
@@ -843,7 +864,13 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
                 saved_state = state;
                 state = STEP;
             }
-        } else order_heap->handleMem(req);  // Heap request
+        }
+#ifdef USE_CLASSIC_HEAP
+        else order_heap->handleMem(req);  // Heap request
+#else
+        else sst_assert(false, CALL_INFO, -1,
+            "Unexpected memory response for 0x%lx on the solver interface\n", addr);
+#endif
 
         // Activate appropriate workers based on worker_id range.
         // Two-part guard:
@@ -872,15 +899,21 @@ void SATSolver::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req)
         if (WRITE_BUFFER) {
             // for popping write queue
             uint64_t addr = write_resp->pAddr;
+#ifdef USE_CLASSIC_HEAP
             if (addr >= var_act_base_addr) {  // Variable activity request
                 order_heap->handleMem(req);
-            } else if (addr >= clauses_cmd_base_addr) {  // Clauses request
+            } else
+#endif
+            if (addr >= clauses_cmd_base_addr) {  // Clauses request
                 clauses.handleMem(req);
             } else if (addr >= watches_base_addr) {  // Watches request
                 watches.handleMem(req);
             } else if (addr >= variables_base_addr) {  // Variables request
                 variables.handleMem(req);
-            } else order_heap->handleMem(req);  // Heap request
+            }
+#ifdef USE_CLASSIC_HEAP
+            else order_heap->handleMem(req);  // Heap request
+#endif
         }
     }
     delete req;
@@ -1548,6 +1581,19 @@ void SATSolver::execReduce() {
 void SATSolver::execRestart() {
     output.verbose(CALL_INFO, 4, 0, "RESTART: Executing restart #%d\n", curr_restarts);
     if (tracer_) tracer_->emitRestart(curr_restarts);
+
+#ifndef USE_CLASSIC_HEAP
+    // Rebuild the heap when garbage exceeds the live set: stale copies deepen
+    // every percolation and, unchecked, grow without bound on bump-heavy
+    // instances (observed overflowing the 2^24 capacity). Threshold
+    // staleCount > num_vars keeps the heap within ~2x its minimal size (at
+    // most +1 percolation level); a rebuild costs ~num_vars insert cycles and
+    // can only fire after >= num_vars stale creations, so the amortized
+    // overhead is <= ~1 cycle per stale-creating op at any instance size.
+    bool rebuild_heap = order_heap->staleCount() > (size_t)num_vars;
+    if (rebuild_heap) suppress_heap_inserts_ = true;
+#endif
+
     backtrack(0);
     conflictC = 0;
     curr_restarts++;
@@ -1559,6 +1605,20 @@ void SATSolver::execRestart() {
         insertVarOrder(var(spec_literal));  // decide with spec_literal
         spec_literal = lit_Undef;
     }
+
+#ifndef USE_CLASSIC_HEAP
+    if (rebuild_heap) {
+        suppress_heap_inserts_ = false;
+        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::REBUILD));
+        // Reinsert every unassigned decision var with its current activity
+        // (level-0 assignments stay out). The heap consumes these at
+        // 1/cycle; FIFO order + the REMOVE_MAX drain gate make the rebuild
+        // synchronous with respect to the next decision.
+        for (Var v = 1; v <= (Var)num_vars; v++)
+            if (!var_assigned[v]) insertVarOrder(v);
+        output.verbose(CALL_INFO, 3, 0, "RESTART: heap rebuild triggered\n");
+    }
+#endif
 
     // Update the restart limit using Luby sequence or geometric progression
     double rest_base = luby_restart ? luby(restart_inc, curr_restarts) : pow(restart_inc, curr_restarts);
@@ -2620,9 +2680,14 @@ void SATSolver::detachClause(Cref clause_addr) {
 // Decision Heuristics
 //-----------------------------------------------------------------------------------
 Lit SATSolver::chooseBranchVariable() {
+    // Bring-up probe: verify heap invariants before every decision (slow;
+    // one full activity-array burst per decision). Note heap_resp_cnt++ is
+    // required or handleHeapResponse underflows the counter.
     // order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::DEBUG_HEAP));
+    // heap_resp_cnt++;
     // (*yield_ptr)();
-    // sst_assert(heap_resp == 0, CALL_INFO, -1, "Heap corrupted\n");
+    // sst_assert(heap_resp == 0, CALL_INFO, -1,
+    //     "Heap corrupted: DEBUG_HEAP reported %d errors\n", heap_resp);
 
     Var next = var_Undef;
     if (!order_heap->empty() && drand(random_seed) < random_var_freq) {
@@ -2667,6 +2732,9 @@ Lit SATSolver::peekBranchVariable() {
 }
 
 void SATSolver::insertVarOrder(Var v) {
+    // Suppressed during a rebuild-restart's trail unwind: the post-REBUILD
+    // full reinsert loop covers every unassigned decision var.
+    if (suppress_heap_inserts_) return;
     if (decision[v]) {
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INSERT, v));
 #ifdef USE_CLASSIC_HEAP

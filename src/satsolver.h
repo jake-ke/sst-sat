@@ -295,6 +295,7 @@ private:
 #endif
     bool in_decision;                // Whether the heap has been unstalled
     int heap_resp_cnt;                  // Number of unstalled heap responses to receive
+    bool suppress_heap_inserts_;        // Rebuild-restart: skip trail-unwind inserts
 
     // external memory controller for struct Variable
     Variables variables;                // Replaces std::vector<Variable> variables

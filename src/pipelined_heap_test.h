@@ -23,9 +23,7 @@ public:
     virtual void complete(unsigned int phase) override;
     virtual void finish() override;
     bool tick(SST::Cycle_t cycle);
-    void handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req);
 
-    
     // SST Component Registration Info
     SST_ELI_REGISTER_COMPONENT(
         PipelinedHeapTest,
@@ -35,54 +33,58 @@ public:
         "Test component for PipelinedHeap",
         COMPONENT_CATEGORY_UNCATEGORIZED
     )
-    
+
     SST_ELI_DOCUMENT_PARAMS(
         {"verbose", "Verbosity level (0-10)", "1"},
         {"clock", "Clock frequency", "1GHz"},
         {"var_inc", "Value added to activity on bump operations", "1.0"},
         {"script_path", "Path to external script describing heap operations", ""}
     )
-    
+
     SST_ELI_DOCUMENT_PORTS(
-        {"global_mem_link", "Connection to global memory", {"memHierarchy.MemEventBase"}},
         {"heap_port", "Port to communicate with heap", {"HeapReqEvent"}}
     )
-    
+
     SST_ELI_DOCUMENT_SUBCOMPONENT_SLOTS(
-        {"global_memory", "Memory interface for Heap and Variables", "SST::Interfaces::StandardMem"},
-        {"heap", "Pipelined heap subcomponent", "PipelinedHeap"}
+        {"heap", "Pipelined heap subcomponent (owns its memory interface)", "PipelinedHeap"}
     )
-    
+
 private:
     struct Step {
-        enum class Type { Insert, Remove, Bump };
+        enum class Type { Insert, Remove, Bump, Debug, Wait, Rebuild };
         Type type;
-        int var;
+        int var;   // var id for Insert/Bump; wait cycles for Wait
     };
 
-    enum class ResponseKind { Insert, Remove };
+    enum class ResponseKind { Remove, Debug };
 
     // Output for logging
     SST::Output output;
     int verbose;
-    SST::Interfaces::StandardMem* global_memory;
     PipelinedHeap* heap;
     SST::Link* heap_link;
 
-    // Verification state
+    // Script state
     std::string script_path;
     std::vector<Step> script;
     size_t script_index;
+    uint64_t wait_cycles;
     std::queue<ResponseKind> pending_responses;
-    int pending_insert_responses;
-    std::unordered_map<int, double> activities;
-    std::unordered_set<int> active_vars;
     std::vector<int> tracked_vars;
     double var_inc_value;
-    uint64_t var_mem_base_addr;
     bool script_completed;
     bool sim_finish_requested;
     uint64_t resp_cnt;
+
+    // Golden model mirroring the inheap-bit design: a multiset of
+    // (var, activity-at-insert) copies plus a per-var inheap bit. The heap
+    // may autonomously drop stale (bit=0) copies at any time (tail-trim /
+    // root-peek purge), so REMOVE checks accept any result r whose max
+    // stored copy dominates every remaining FRESH copy; stale copies above
+    // it are reconciled as purged.
+    std::unordered_map<int, double> activities;          // authoritative act per var
+    std::vector<std::pair<int, double>> golden_copies;   // (var, stored act)
+    std::unordered_set<int> golden_inheap;
 
     // Statistics
     uint64_t stat_successful_ops;
@@ -94,6 +96,8 @@ private:
     void issueInsert(int var);
     void issueBump(int var);
     void issueRemove();
+    void issueDebug();
+    void checkRemoveResponse(int result);
     void finalizeIfDone();
     void loadScriptFromFile(const std::string& path);
 };

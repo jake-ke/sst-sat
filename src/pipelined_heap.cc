@@ -5,33 +5,57 @@
 #include <cmath>
 
 PipelinedHeap::PipelinedHeap(
-    SST::ComponentId_t id, SST::Params& params,
-    SST::Interfaces::StandardMem* mem, uint64_t var_ptr_base_addr
+    SST::ComponentId_t id, SST::Params& params
 ) : SST::SubComponent(id),
-    memory(mem),
     line_size(64),
-    var_ptr_base_addr(var_ptr_base_addr),
+    num_vars(0),
     heap_size(0),
     var_inc_ptr(nullptr),
-    bump_active(false),
-    bump_mem_inflight(false),
+    assigned_ref_(nullptr),
+    inheap_count_(0),
     active_inserts(0),
     rescale(false),
+    rescale_sweep_started_(false),
+    rescale_offchip_done_(false),
+    rescale_onchip_cycles_(0),
     rescale_pending_reads(0),
+    purge_suppress_(false),
     debug_heap_pending(false),
     debug_heap_errors(0) {
 
     output.init("PHEAP-> ", params.find<int>("verbose", 0), 0, SST::Output::STDOUT);
+
+    var_ptr_base_addr = std::stoull(params.find<std::string>("var_act_base_addr", "0x1C0000000"), nullptr, 0);
 
     registerClock(params.find<std::string>("clock", "1GHz"),
                  new SST::Clock::Handler2<PipelinedHeap, &PipelinedHeap::tick>(this));
     maybe_active_ = false;
 
     response_port = configureLink("response");
-    sst_assert(response_port != nullptr, CALL_INFO, -1, 
+    sst_assert(response_port != nullptr, CALL_INFO, -1,
               "Error: 'response_port' is not connected to a link\n");
 
-    output.verbose(CALL_INFO, 1, 0, "var ptr address: 0x%lx\n", var_ptr_base_addr);
+    // Dedicated memory interface: activity traffic never touches the
+    // solver's cache hierarchy.
+    memory = loadUserSubComponent<SST::Interfaces::StandardMem>(
+        "memory",
+        SST::ComponentInfo::SHARE_NONE,
+        getTimeConverter(params.find<std::string>("clock", "1GHz")),
+        new SST::Interfaces::StandardMem::Handler2<PipelinedHeap, &PipelinedHeap::handleMem>(this));
+    sst_assert(memory != nullptr, CALL_INFO, -1,
+              "Unable to load StandardMem subcomponent on the 'memory' slot\n");
+
+    output.verbose(CALL_INFO, 1, 0, "var act address: 0x%lx\n", var_ptr_base_addr);
+
+    stat_insert_skips    = registerStatistic<uint64_t>("heap_insert_skips");
+    stat_stale_created   = registerStatistic<uint64_t>("heap_stale_created");
+    stat_stale_pops      = registerStatistic<uint64_t>("heap_stale_pops");
+    stat_tail_trims      = registerStatistic<uint64_t>("heap_tail_trims");
+    stat_purge_pops      = registerStatistic<uint64_t>("heap_purge_pops");
+    stat_bump_unassigned = registerStatistic<uint64_t>("heap_bump_unassigned");
+    stat_rebuilds        = registerStatistic<uint64_t>("heap_rebuilds");
+    stat_size_sample     = registerStatistic<uint64_t>("heap_size_sample");
+    stat_stale_sample    = registerStatistic<uint64_t>("heap_stale_sample");
 
     // Initialize heap memories for each level
     for (int level = 0; level < MAX_HEAP_LEVELS; level++) {
@@ -44,9 +68,31 @@ PipelinedHeap::PipelinedHeap(
     for (int level = 0; level < MAX_HEAP_LEVELS; level++) {
         for (int stage = 0; stage < PIPELINE_DEPTH; stage++) {
             stages[level][stage].reset();
-            bypass_data[level].reset();
         }
     }
+}
+
+void PipelinedHeap::init(unsigned int phase) {
+    memory->init(phase);
+}
+
+void PipelinedHeap::setup() {
+    memory->setup();
+    line_size = std::max(memory->getLineSize(), (uint64_t)64);
+    output.verbose(CALL_INFO, 1, 0, "Activity cache line size: %zu bytes\n", line_size);
+}
+
+void PipelinedHeap::complete(unsigned int phase) {
+    memory->complete(phase);
+}
+
+void PipelinedHeap::finish() {
+    memory->finish();
+}
+
+void PipelinedHeap::sampleOccupancy() {
+    stat_size_sample->addData(heap_size);
+    stat_stale_sample->addData(staleCount());
 }
 
 uint32_t bit_reverse(uint32_t x) {
@@ -71,17 +117,38 @@ uint32_t priority_encoder(uint32_t x) {
     return cnt;
 }
 
-bool PipelinedHeap::tick(SST::Cycle_t cycle) {
-    // output.verbose(CALL_INFO, 7, 0, "=============== Tick %lu =============== \n", cycle);
+void PipelinedHeap::lastSlot(uint32_t& level, uint32_t& idx) const {
+    uint32_t heap_r = bit_reverse(heap_size);
+    uint32_t heap_one_hot = bit_reverse(heap_r & ~(heap_r - 1));
+    idx = heap_size & (~heap_one_hot);
+    level = priority_encoder(heap_size);
+}
 
+bool PipelinedHeap::tailTrimOne() {
+    if (heap_size == 0) return false;
+    uint32_t last_level, last_idx;
+    lastSlot(last_level, last_idx);
+    Var w = heap_vars[last_level][last_idx];
+    if (w == var_Undef || inheap_[w]) return false;
+    setVar(last_level, last_idx, var_Undef);
+    setActivity(last_level, last_idx, -1.0);
+    heap_size--;
+    stat_tail_trims->addData(1);
+    sampleOccupancy();
+    output.verbose(CALL_INFO, 6, 0, "TAIL-TRIM: dropped stale var %d at L%d idx %d\n",
+                   w, last_level, last_idx);
+    return true;
+}
+
+bool PipelinedHeap::tick(SST::Cycle_t cycle) {
     // Fast path: nothing queued and pipeline empty (set at the end of the
     // previous tick; handleRequest/handleMem set maybe_active_ on new work).
     if (!maybe_active_) return false;
 
     if (!insert_queue.empty() && canStartOperation(HEAP_OP_INSERT) && !rescale) {
         InsReq& op = insert_queue.front();
-        if (!op.bump) active_inserts++;
-        startOperation(HEAP_OP_INSERT, op.arg, op.activity, op.bump, op.dest);
+        active_inserts++;
+        startOperation(HEAP_OP_INSERT, op.arg, op.activity);
         insert_queue.pop_front();
     }
 
@@ -97,52 +164,97 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                 break;
             }
             case HeapReqEvent::BUMP: {
-                // can only start with an empty pipeline
-                if (!bump_active && !rescale && req_to_op.empty() && isPipelineIdle()) {
-                    bump_active = true;
-                    getVarMem(pending.arg, true);
+                // Off-chip RMW only; never touches the pipeline. Same-var
+                // RMWs serialize via bumps_inflight_. Also hold off while a
+                // DEBUG_HEAP snapshot is in flight: a bump would mutate the
+                // bitmap/memory mid-snapshot and produce false errors.
+                if (!rescale && !debug_heap_pending
+                    && bumps_inflight_.find(pending.arg) == bumps_inflight_.end()) {
+                    Var v = pending.arg;
+                    bumps_inflight_.insert(v);
+                    if (inheap_[v]) {
+                        // Resident copy keeps its old activity: it is stale now.
+                        inheap_[v] = false;
+                        inheap_count_--;
+                        stat_stale_created->addData(1);
+                        sampleOccupancy();
+                    }
+                    getAct(v, true);
                     request_queue.pop_front();
                 }
                 break;
             }
             case HeapReqEvent::INSERT: {
-                // can fetch var mem when not bump or bump has started
-                if (!bump_active && !rescale){
-                    // discards the requests for vars already in progress
-                    if (in_progress_vars.find(pending.arg) == in_progress_vars.end()) {
-                        in_progress_vars.insert(pending.arg);
-                        getVarMem(pending.arg, false);
+                if (!rescale && !debug_heap_pending) {
+                    Var v = pending.arg;
+                    // Stall behind an outstanding bump of the same var so the
+                    // activity read sees the bumped value (freshness lemma).
+                    if (bumps_inflight_.find(v) != bumps_inflight_.end()) break;
+                    if (inheap_[v]) {
+                        // Fresh copy already resident: drop with zero traffic.
+                        stat_insert_skips->addData(1);
+                    } else {
+                        inheap_[v] = true;
+                        inheap_count_++;
+                        getAct(v, false);
                     }
                     request_queue.pop_front();
                 }
                 break;
             }
             case HeapReqEvent::REMOVE_MAX: {
-                // after previous insert/bump have started
-                if (!bump_active && (active_inserts == 0) && req_to_op.empty()
-                    && canStartOperation(HEAP_OP_REPLACE)) {
-                    startOperation(HEAP_OP_REPLACE, 0, 0, 0, 0);
+                // after previous inserts/bumps have fully drained
+                if (!rescale && active_inserts == 0 && req_to_op.empty()
+                    && insert_queue.empty() && canStartOperation(HEAP_OP_REPLACE)) {
+                    startOperation(HEAP_OP_REPLACE, 0, 0);
+                    request_queue.pop_front();
+                }
+                break;
+            }
+            case HeapReqEvent::REBUILD: {
+                // Wipe the tree and the bitmap once fully quiescent (modeled
+                // as a flash-clear of per-level valid bits + the bitmap). The
+                // solver reinserts all unassigned decision vars right after;
+                // those INSERTs queue behind this request, and the next
+                // REMOVE_MAX queues behind them, so no partial-heap decision
+                // is possible.
+                if (!rescale && !debug_heap_pending && active_inserts == 0
+                    && req_to_op.empty() && insert_queue.empty() && isPipelineIdle()) {
+                    for (int level = 0; level < MAX_HEAP_LEVELS; level++) {
+                        size_t level_base = ((size_t)1 << level) - 1;
+                        if (heap_size <= level_base) break;
+                        size_t occupied = std::min((size_t)1 << level, heap_size - level_base);
+                        std::fill_n(heap_vars[level].begin(), occupied, var_Undef);
+                        std::fill_n(heap_activities[level].begin(), occupied, -1.0);
+                    }
+                    output.verbose(CALL_INFO, 2, 0,
+                        "REBUILD: wiped %zu entries (%zu live, %zu stale)\n",
+                        heap_size, inheap_count_, staleCount());
+                    heap_size = 0;
+                    std::fill(inheap_.begin(), inheap_.end(), false);
+                    inheap_count_ = 0;
+                    stat_rebuilds->addData(1);
+                    sampleOccupancy();
                     request_queue.pop_front();
                 }
                 break;
             }
             case HeapReqEvent::DEBUG_HEAP: {
                 // Wait for all previous requests and pipeline to finish
-                if (active_inserts == 0 && !bump_active && req_to_op.empty() && isPipelineIdle() && !rescale) {
-                // if (active_inserts == 0 && !bump_active && req_to_op.empty() && isPipelineIdle() && store_queue.empty() && !rescale) {
+                if (active_inserts == 0 && req_to_op.empty() && insert_queue.empty()
+                    && isPipelineIdle() && !rescale) {
                     // Start debug heap check
                     debug_heap_pending = true;
                     debug_heap_errors = 0;
-                    debug_heap_varmem.clear();
-                    debug_heap_varmem.reserve(num_vars + 1);  // Reserve enough space for all variables
-                    
-                    // Use readBurstAll to read all VarMem entries
-                    if (heap_size == 0) {
+                    debug_heap_acts.clear();
+                    debug_heap_acts.reserve(num_vars + 1);
+
+                    if (heap_size == 0 && inheap_count_ == 0) {
                         sendResp(0);
                         debug_heap_pending = false;
                     } else {
                         output.verbose(CALL_INFO, 6, 0, "DEBUG_HEAP: Reading memory for heap verification\n");
-                        readBurstAll(var_ptr_base_addr, (num_vars + 1) * sizeof(VarMem));
+                        readBurstAll(var_ptr_base_addr, (num_vars + 1) * sizeof(double));
                     }
                     request_queue.pop_front();
                 }
@@ -153,6 +265,38 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                 break;
             }
         }
+    } else if (!rescale && !debug_heap_pending && insert_queue.empty()
+               && req_to_op.empty() && active_inserts == 0 && isPipelineIdle()) {
+        // Idle-time cleanup: requests always take priority (this branch only
+        // runs with an empty request queue and a fully drained heap).
+        if (!tailTrimOne() && heap_size > 0) {
+            Var root = getVar(0, 0);
+            if (root != var_Undef && !inheap_[root] && canStartOperation(HEAP_OP_REPLACE)) {
+                // Stale copy at the root: discard it with a self-consumed pop.
+                purge_suppress_ = true;
+                startOperation(HEAP_OP_REPLACE, 0, 0);
+            }
+        }
+    }
+
+    // Rescale drain point: every pre-trigger read has returned AND the
+    // pipeline has fully drained. In-flight percolations carry activities in
+    // stage registers that the sweep cannot scale; letting one settle after
+    // the sweep would write a pre-scale (1e100x) value into a scaled heap.
+    // Deadlock-free: rescale blocks all new dispatch (including queued
+    // insert_queue starts), so the pipeline empties in bounded time.
+    if (rescale && !rescale_sweep_started_ && req_to_op.empty()
+        && active_inserts == 0 && isPipelineIdle()) {
+        startRescaleSweep();
+    }
+
+    // Charge wall time for the on-chip level-SRAM sweep (values were scaled
+    // atomically at sweep start; nothing can observe them while rescale
+    // blocks dispatch, so only the duration is modeled). Overlaps the
+    // off-chip burst; rescale completes when both are done.
+    if (rescale && rescale_sweep_started_ && rescale_onchip_cycles_ > 0) {
+        rescale_onchip_cycles_--;
+        if (rescale_onchip_cycles_ == 0) maybeFinishRescale();
     }
 
     advancePipeline();
@@ -169,9 +313,19 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
 
 bool PipelinedHeap::allIdle() const {
     return request_queue.empty() && insert_queue.empty() && req_to_op.empty()
-        && !bump_active && !rescale && !debug_heap_pending
-        && active_inserts == 0 && in_progress_vars.empty()
-        && isPipelineIdle();
+        && bumps_inflight_.empty() && !rescale && !debug_heap_pending
+        && active_inserts == 0 && isPipelineIdle()
+        && !idleWorkAvailable();
+}
+
+bool PipelinedHeap::idleWorkAvailable() const {
+    if (heap_size == 0) return false;
+    uint32_t last_level, last_idx;
+    lastSlot(last_level, last_idx);
+    Var w = heap_vars[last_level][last_idx];
+    if (w != var_Undef && !inheap_[w]) return true;
+    Var root = heap_vars[0][0];
+    return root != var_Undef && !inheap_[root];
 }
 
 void PipelinedHeap::advancePipeline() {
@@ -191,31 +345,29 @@ bool PipelinedHeap::canStartOperation(HeapOpType op) {
 
     // Check if the first stage (READ) of the first level is ready to receive new data
     if (!stages[0][STAGE_READ].ready) return false;
-    
+
     if (op == HEAP_OP_REPLACE) {
-        uint32_t last_level = priority_encoder(heap_size);
         // Check if the previous operation in the READ stage is also a REPLACE
         if ((stages[0][STAGE_COMPARE].valid && stages[0][STAGE_COMPARE].op_type == HEAP_OP_REPLACE))
             return false;
     }
-    
+
     return true;
 }
 
-void PipelinedHeap::startOperation(HeapOpType op, Var arg, double activity, bool bump, int dest) {
+void PipelinedHeap::startOperation(HeapOpType op, Var arg, double activity) {
     // Initialize READ stage at level 0 with the new operation
     stages[0][STAGE_READ].op_type = op;
-    
+
     if (op == HEAP_OP_INSERT) {
-        if (!bump) {
-            // insertion at the last position
-            heap_size++;
-            sst_assert(heap_size <= num_vars, CALL_INFO, -1, 
-                "Failed to insert var %d: heap size exceeds number of variables\n", arg);
-            sst_assert(heap_size <= (size_t) MAX_HEAP_SIZE, CALL_INFO, -1, 
-                "Failed to insert var %d: heap size overflow\n", arg);
-            dest = heap_size;
-        } 
+        // insertion at the last position
+        heap_size++;
+        sampleOccupancy();
+        // Stale copies count toward occupancy, so heap_size may exceed
+        // num_vars; only physical capacity bounds it.
+        sst_assert(heap_size <= (size_t) MAX_HEAP_SIZE, CALL_INFO, -1,
+            "Failed to insert var %d: heap size overflow\n", arg);
+        uint32_t dest = heap_size;
 
         uint32_t target_level = priority_encoder(dest);
         // need to pass down depth for termination condition
@@ -225,33 +377,33 @@ void PipelinedHeap::startOperation(HeapOpType op, Var arg, double activity, bool
         stages[0][STAGE_READ].path = path << 1;  // remove the leading 1 bit
 
         output.verbose(CALL_INFO, 6, 0,
-            "Start INSERT: heap_size=%lu, var %d (%.2f), idx=%u, path=0x%x, depth=%d, bump=%d\n", 
-            heap_size, arg, activity, dest, path, target_level, bump);
-
-        if (bump) {
-            sst_assert(dest <= heap_size, CALL_INFO, -1, "var %d's idx %d > heap size %lu\n", arg, dest, heap_size);
-            Var v = getVar(target_level, ~(1 << target_level) & dest);
-            sst_assert(v == arg, CALL_INFO, -1, "bump var %d is not located at idx %d which has var %d\n", arg, dest, v);
-        }
+            "Start INSERT: heap_size=%lu, var %d (%.2f), idx=%u, path=0x%x, depth=%d\n",
+            heap_size, arg, activity, dest, path, target_level);
     } else if (op == HEAP_OP_REPLACE) {
+        // Drop a stale copy sitting at the tail before using it as the
+        // replacement: one bit-check per pop cycle, and only when no
+        // in-flight stage could hold the tail. Deeper trailing garbage is
+        // handled by the idle-time trim at the same 1-per-cycle rate.
+        if (isPipelineIdle()) {
+            tailTrimOne();
+        }
         if (heap_size == 0) {
-            sendResp(var_Undef);
+            if (purge_suppress_) purge_suppress_ = false;
+            else sendResp(var_Undef);
             return;
         }
 
         // determine the last level and node idx
-        uint32_t heap_r = bit_reverse(heap_size);
-        uint32_t heap_one_hot = bit_reverse(heap_r & ~(heap_r - 1));
-        uint32_t last_node_idx = (heap_size) & (~heap_one_hot);
-        uint32_t last_level = priority_encoder(heap_size);
+        uint32_t last_level, last_node_idx;
+        lastSlot(last_level, last_node_idx);
 
         // determine the replacement var
-        if (stages[last_level][STAGE_WRITE].valid && last_node_idx == stages[last_level][STAGE_WRITE].node_idx) {
+        if (stages[last_level][STAGE_WRITE].valid && (int)last_node_idx == stages[last_level][STAGE_WRITE].node_idx) {
             // bypass the WRITE_STAGE node if match
             arg = stages[last_level][STAGE_WRITE].var;
             activity = stages[last_level][STAGE_WRITE].act;
             stages[last_level][STAGE_WRITE].reset();
-        } else if (stages[last_level][STAGE_COMPARE].valid && last_node_idx == stages[last_level][STAGE_COMPARE].node_idx) {
+        } else if (stages[last_level][STAGE_COMPARE].valid && (int)last_node_idx == stages[last_level][STAGE_COMPARE].node_idx) {
             // bypass the COMP_STAGE node if match
             arg = stages[last_level][STAGE_COMPARE].var;
             activity = stages[last_level][STAGE_COMPARE].act;
@@ -268,14 +420,13 @@ void PipelinedHeap::startOperation(HeapOpType op, Var arg, double activity, bool
         // removes the last node from the heap
         setVar(last_level, last_node_idx, var_Undef);
         output.verbose(CALL_INFO, 6, 0, "set last level %d, idx %d, addr %d, to var_Undef\n", last_level, last_node_idx, (1 << last_level) | last_node_idx);
-        if (last_node_idx > 1)
-            output.verbose(CALL_INFO, 6, 0, "current last level %d, idx %d, addr %d, is var %d\n", last_level, last_node_idx - 1, (1 << last_level) | (last_node_idx - 1), getVar(last_level, last_node_idx - 1));
         output.verbose(CALL_INFO, 6, 0, "Start REPLACE: heap_size=%lu, last var %d (%.2f)\n",
             heap_size, arg, activity);
 
         heap_size--;
+        sampleOccupancy();
     }
-    
+
     assert(arg != var_Undef);
     stages[0][STAGE_READ].var = arg;
     stages[0][STAGE_READ].act = activity;
@@ -355,15 +506,10 @@ void PipelinedHeap::handleStageInsert(int level, int stage) {
         }
 
         case STAGE_COMPARE: {
-            // this level's node either from memory 
+            // this level's node either from memory
             // or implicit bypass from this level's WRITE stage (previous operation)
             int curr_var = getVar(level, node_idx);
             double curr_act = getActivity(level, node_idx);
-            // or bypass if write stage is writing back but not yet visible in memory
-            // if (bypass_data[level].valid && bypass_data[level].node_idx == node_idx) {
-            //     curr_var = bypass_data[level].var;
-            //     curr_act = bypass_data[level].act;
-            // }
 
             int new_var = curr_stage.var;
             double new_act = curr_stage.act;
@@ -398,35 +544,22 @@ void PipelinedHeap::handleStageInsert(int level, int stage) {
                 stages[level+1][STAGE_COMPARE].ready = true;
             }
 
-            // bypass the write back var for the next operation if needed
-            // bypass_data[level].valid = true;
-            // bypass_data[level].node_idx = node_idx;
-            // bypass_data[level].var = curr_var;
-            // bypass_data[level].act = curr_act;
-
             stages[level][stage].reset();
             break;
         }
 
         case STAGE_WRITE: {
             // always ready for new operations
-            // Update the memory with the new value and activity
+            // Update the on-chip level arrays (no off-chip index writes)
             setVar(level, node_idx, curr_stage.var);
             setActivity(level, node_idx, curr_stage.act);
-            setVarMem(curr_stage.var, VarMem((1 << level) | node_idx, curr_stage.act));
             output.verbose(CALL_INFO, 6, 0, "INSERT[L%d-WRITE]: Write back node %d: var=%d (%.2f)\n",
                            level, node_idx, curr_stage.var, curr_stage.act);
 
-            if (in_progress_vars.find(curr_stage.var) != in_progress_vars.end())
-                in_progress_vars.erase(curr_stage.var);
-
-            // If this is the root level, we've completed the operation
+            // If this is the destination level, we've completed the operation
             if (level == curr_stage.depth) {
-                if (bump_active) bump_active = false;
-                else {
-                    active_inserts--;
-                    sst_assert(active_inserts >= 0, CALL_INFO, -1, "active_inserts became negative\n");
-                }
+                active_inserts--;
+                sst_assert(active_inserts >= 0, CALL_INFO, -1, "active_inserts became negative\n");
             }
 
             stages[level][stage].reset();
@@ -447,8 +580,24 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
                 // could be replaced if it is the only node left
                 if (heap_size == 0) root = curr_stage.var;
                 assert(root != var_Undef);
-                sendResp(root);
-                setVarMem(root, VarMem(0, getActivity(0, 0)));
+                if (purge_suppress_) {
+                    purge_suppress_ = false;
+                    stat_purge_pops->addData(1);
+                    sampleOccupancy();
+                    output.verbose(CALL_INFO, 6, 0, "PURGE[L0-READ]: discarding stale root %d\n", root);
+                } else {
+                    sendResp(root);
+                    // Popping any copy of a var clears its bit: if this was
+                    // the fresh copy the var is no longer (freshly) resident;
+                    // if the bit was already clear, a stale copy got cleaned.
+                    if (inheap_[root]) {
+                        inheap_[root] = false;
+                        inheap_count_--;
+                    } else {
+                        stat_stale_pops->addData(1);
+                    }
+                    sampleOccupancy();
+                }
                 output.verbose(CALL_INFO, 6, 0, "REPLACE[L%d-READ]: removing Min %d\n", level, root);
                 if (heap_size == 0) {
                     // If heap will be empty after removal, skip compare stage
@@ -506,7 +655,7 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
             stages[level][stage].reset();
             break;
         }
-            
+
         case STAGE_COMPARE: {
             Var repl_var = curr_stage.var;
             double repl_act = curr_stage.act;
@@ -537,7 +686,7 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
             Var max_child = use_right ? right_child : left_child;
             double max_act = use_right ? right_act : left_act;
             int max_child_idx = use_right ? (lchild_idx + 1) : lchild_idx;
-            
+
             // Check if we need to swap
             if (max_act > repl_act && max_child != var_Undef) {
                 // Pass maximum child to WRITE stage
@@ -567,7 +716,7 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
                 stages[level][STAGE_WRITE].act = repl_act;
                 stages[level][STAGE_WRITE].valid = true;
                 stages[level][STAGE_WRITE].ready = true;
-                
+
                 // Replacement ends here, invalidate speculative operations
                 if (level < MAX_HEAP_LEVELS - 1) {
                     stages[level+1][STAGE_READ].ready = true;
@@ -578,7 +727,7 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
                     stages[level+2][STAGE_READ].valid = false;
                     stages[level+2][STAGE_READ].ready = true;
                 }
-                
+
                 output.verbose(CALL_INFO, 6, 0, "REPLACE[L%d-COMP]: repl_var %d (%.2f) >= both children, ends here\n",
                     level, repl_var, repl_act);
             }
@@ -587,12 +736,11 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
             stages[level][stage].reset();
             break;
         }
-            
+
         case STAGE_WRITE: {
-            // Update the memory with the replacement value
+            // Update the on-chip level arrays (no off-chip index writes)
             setVar(level, node_idx, curr_stage.var);
             setActivity(level, node_idx, curr_stage.act);
-            setVarMem(curr_stage.var, VarMem((1 << level) | node_idx, curr_stage.act));
 
             output.verbose(CALL_INFO, 6, 0, "REPLACE[L%d-WRITE]: Write back node %d: var=%d (%.2f)\n",
                          level, node_idx, curr_stage.var, curr_stage.act);
@@ -605,14 +753,22 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
 }
 
 void PipelinedHeap::handleRequest(HeapReqEvent* req) {
-    output.verbose(CALL_INFO, 6, 0, "Received request: op=%d, arg=%d\n", 
+    output.verbose(CALL_INFO, 6, 0, "Received request: op=%d, arg=%d\n",
                    req->op, req->arg);
 
-    // Assert var is valid
-    sst_assert(req->arg != var_Undef || (req->op != HeapReqEvent::INSERT || req->op != HeapReqEvent::BUMP),
-        CALL_INFO, -1, "Attempting to insert undefined variable");
-    sst_assert(req->arg <= num_vars, CALL_INFO, -1,
-        "Attempting to insert var %d which exceeds num_vars %zu", req->arg, num_vars);
+    // Assert var is valid. READ args are heap positions, which can exceed
+    // num_vars once stale copies inflate heap_size, so only bound var ops.
+    if (req->op == HeapReqEvent::INSERT || req->op == HeapReqEvent::BUMP) {
+        sst_assert(req->arg != var_Undef && req->arg >= 1 && req->arg <= (int)num_vars,
+            CALL_INFO, -1, "Invalid var %d for insert/bump (num_vars %zu)", req->arg, num_vars);
+    }
+    // Freshness-lemma guard, sampled at enqueue time: the solver must only
+    // bump assigned vars. (Dispatch-time sampling would false-positive on
+    // benign FIFO interleavings where a stalled bump dispatches after the
+    // solver already backtracked.)
+    if (req->op == HeapReqEvent::BUMP && assigned_ref_
+        && req->arg < (int)assigned_ref_->size() && !(*assigned_ref_)[req->arg])
+        stat_bump_unassigned->addData(1);
     request_queue.emplace_back(req->op, req->arg);
     delete req;
     maybe_active_ = true;
@@ -620,6 +776,79 @@ void PipelinedHeap::handleRequest(HeapReqEvent* req) {
 
 void PipelinedHeap::sendResp(int result) {
     response_port->send(new HeapRespEvent(result));
+}
+
+void PipelinedHeap::completeInsertFetch(Var v, double act) {
+    insert_queue.emplace_back(v, act);
+}
+
+void PipelinedHeap::completeBump(Var v, double act) {
+    if (act + *var_inc_ptr > 1e100) {
+        // Trigger rescale. Stash the bump unwritten: it completes after the
+        // sweep so the sweep cannot re-scale its result (the old code wrote
+        // first and the sweep double-scaled the triggering var).
+        output.verbose(CALL_INFO, 2, 0, "Rescaling variable activities (trigger var %d)\n", v);
+        rescale = true;
+        rescale_sweep_started_ = false;
+        rescale_stash_.push_back({v, act});
+        maybe_active_ = true;
+        return;  // v stays in bumps_inflight_ until the post-sweep completion
+    }
+    setAct(v, act + *var_inc_ptr);
+    bumps_inflight_.erase(v);
+}
+
+void PipelinedHeap::startRescaleSweep() {
+    // All pre-trigger reads have drained; writes from bumps that completed
+    // during the drain are already in flight ahead of the sweep reads, so the
+    // sweep scales them too.
+    *var_inc_ptr *= 1e-100;
+    for (int level = 0; level < MAX_HEAP_LEVELS; level++) {
+        for (int i = 0; i < (1 << level); i++) {
+            if (heap_activities[level][i] > 0)
+                heap_activities[level][i] *= 1e-100;
+        }
+    }
+    // Queued-but-unstarted inserts carry pre-scale activities.
+    for (auto& e : insert_queue) e.activity *= 1e-100;
+
+    // On-chip sweep wall time: per-level SRAMs scale their occupied entries
+    // in parallel at 1 entry/cycle, so the duration is the largest occupied
+    // level (the partial last level or the full level above it).
+    rescale_onchip_cycles_ = 0;
+    for (int level = 0; level < MAX_HEAP_LEVELS; level++) {
+        size_t level_base = ((size_t)1 << level) - 1;   // slots before this level
+        if (heap_size <= level_base) break;
+        size_t occupied = std::min((size_t)1 << level, heap_size - level_base);
+        rescale_onchip_cycles_ = std::max(rescale_onchip_cycles_, occupied);
+    }
+
+    rescale_sweep_started_ = true;
+    rescale_offchip_done_ = false;
+    readBurstAll(var_ptr_base_addr, (num_vars + 1) * sizeof(double));
+    output.verbose(CALL_INFO, 2, 0, "Rescale sweep started, var_inc now %g (on-chip %zu cycles)\n",
+                   *var_inc_ptr, rescale_onchip_cycles_);
+}
+
+void PipelinedHeap::maybeFinishRescale() {
+    if (rescale_sweep_started_ && rescale_offchip_done_ && rescale_onchip_cycles_ == 0)
+        finishRescale();
+}
+
+void PipelinedHeap::finishRescale() {
+    // All sweep writes are in flight; complete the stashed trigger bump(s)
+    // with pre-scale reads scaled manually (their memory entries were swept,
+    // and these writes are issued after the sweep writes, so they land last).
+    for (auto& s : rescale_stash_) {
+        double act = s.act * 1e-100 + *var_inc_ptr;
+        setAct(s.var, act);
+        bumps_inflight_.erase(s.var);
+    }
+    rescale_stash_.clear();
+    rescale = false;
+    rescale_sweep_started_ = false;
+    rescale_offchip_done_ = false;
+    output.verbose(CALL_INFO, 2, 0, "Rescale complete\n");
 }
 
 void PipelinedHeap::handleMem(SST::Interfaces::StandardMem::Request* req) {
@@ -631,75 +860,63 @@ void PipelinedHeap::handleMem(SST::Interfaces::StandardMem::Request* req) {
         PendingMemOp pending = it->second;
         req_to_op.erase(it);
 
-        if (pending.type == PendingMemOpType::INSERT_FETCH) {
-            VarMem data;
-            sst_assert(read_resp->data.size() >= sizeof(VarMem), CALL_INFO, -1,
+        if (pending.type == PendingMemOpType::INSERT_FETCH
+            || pending.type == PendingMemOpType::BUMP_RMW) {
+            double act;
+            sst_assert(read_resp->data.size() >= sizeof(double), CALL_INFO, -1,
                 "Memory response data size too small: %zu\n", read_resp->data.size());
-                      
-            memcpy(&data, read_resp->data.data(), sizeof(VarMem));
+            memcpy(&act, read_resp->data.data(), sizeof(double));
 
-            InsReq op = pending.insert_req;
-            op.dest = data.addr;
-            op.activity = data.act;
-
-            if (bump_active) {
-                if (data.act + *(var_inc_ptr) > 1e100)
-                    rescaleAct(op.arg, data);
-                data.act += *(var_inc_ptr);
-                op.activity = data.act;
-                if (data.addr != 0)  // bump and var in the heap
-                    insert_queue.emplace_back(op);
-                else {
-                    if (!rescale) setVarMem(op.arg, data);  // update the varmem with bumped activity
-                    bump_active = false;
-                }
-            } else {
-                if (data.addr == 0)  // insert if var not in heap
-                    insert_queue.emplace_back(op);
-                else if (in_progress_vars.find(op.arg) != in_progress_vars.end())
-                    in_progress_vars.erase(op.arg);
-            }
+            if (pending.type == PendingMemOpType::BUMP_RMW) completeBump(pending.var, act);
+            else completeInsertFetch(pending.var, act);
         } else if (pending.type == PendingMemOpType::RESCALE) {
             const size_t chunk_size = pending.size;
-            const size_t entry_size = sizeof(VarMem);
+            const size_t entry_size = sizeof(double);
             sst_assert(chunk_size % entry_size == 0, CALL_INFO, -1,
-                       "Rescale chunk size %zu is not aligned to VarMem size %zu",
+                       "Rescale chunk size %zu is not aligned to activity size %zu",
                        chunk_size, entry_size);
 
-            const VarMem* resp_entries = reinterpret_cast<const VarMem*>(read_resp->data.data());
-            std::vector<VarMem> scaled_entries(resp_entries, resp_entries + (chunk_size / entry_size));
+            const double* resp_entries = reinterpret_cast<const double*>(read_resp->data.data());
+            std::vector<double> scaled_entries(resp_entries, resp_entries + (chunk_size / entry_size));
             for (auto& entry : scaled_entries) {
-                entry.act *= 1e-100;
+                entry *= 1e-100;
             }
 
             std::vector<uint8_t> write_data(chunk_size);
             memcpy(write_data.data(), scaled_entries.data(), chunk_size);
 
             uint64_t write_addr = read_resp->pAddr;
+            if (WRITE_BUFFER) {
+                // Sweep writes enter the store queue too: a later read must
+                // forward the scaled value, never an older pre-sweep entry.
+                store_queue.push_back(StoreQueueEntry(write_addr, chunk_size, write_data));
+            }
             if (tracer_) tracer_->emitMem(true, write_addr, (uint32_t)chunk_size);
             memory->send(new SST::Interfaces::StandardMem::Write(write_addr, chunk_size, write_data));
 
             if (rescale_pending_reads > 0) {
                 rescale_pending_reads--;
-                if (rescale_pending_reads == 0) rescale = false;
+                if (rescale_pending_reads == 0) {
+                    rescale_offchip_done_ = true;
+                    maybeFinishRescale();
+                }
             }
         } else if (pending.type == PendingMemOpType::DEBUG) {
-            // Handle debug heap verification - collect all VarMem data first
+            // Handle debug heap verification - collect all activities first
             const size_t chunk_size = pending.size;
-            const size_t entry_size = sizeof(VarMem);
+            const size_t entry_size = sizeof(double);
             sst_assert(chunk_size % entry_size == 0, CALL_INFO, -1,
-                       "Chunk size %zu is not aligned to VarMem size %zu",
+                       "Chunk size %zu is not aligned to activity size %zu",
                        chunk_size, entry_size);
 
             // Get base address to calculate var indices
             uint64_t base_offset = read_resp->pAddr - var_ptr_base_addr;
             size_t start_idx = base_offset / entry_size;
 
-            // Store all VarMem entries in debug_heap_varmem
-            const VarMem* resp_entries = reinterpret_cast<const VarMem*>(read_resp->data.data());
+            const double* resp_entries = reinterpret_cast<const double*>(read_resp->data.data());
             for (size_t i = 0; i < (chunk_size / entry_size); i++) {
                 Var curr_var = start_idx + i;
-                debug_heap_varmem[curr_var] = resp_entries[i];
+                debug_heap_acts[curr_var] = resp_entries[i];
             }
 
             // Check if we're done with all reads for debug
@@ -712,17 +929,18 @@ void PipelinedHeap::handleMem(SST::Interfaces::StandardMem::Request* req) {
         }
     } else if (auto* write_resp = dynamic_cast<SST::Interfaces::StandardMem::WriteResp*>(req)) {
         assert(!write_resp->getFail() && "Write response should not fail");
-        if (!WRITE_BUFFER) return;
-
-        uint64_t addr = write_resp->pAddr;
-        // Find and remove the oldest matching store queue entry by address (front of queue)
-        for (auto it = store_queue.begin(); it != store_queue.end(); ++it) {
-            if (it->addr == addr) {
-                store_queue.erase(it);
-                break;
+        if (WRITE_BUFFER) {
+            uint64_t addr = write_resp->pAddr;
+            // Find and remove the oldest matching store queue entry by address (front of queue)
+            for (auto it = store_queue.begin(); it != store_queue.end(); ++it) {
+                if (it->addr == addr) {
+                    store_queue.erase(it);
+                    break;
+                }
             }
         }
     }
+    delete req;
 }
 
 bool PipelinedHeap::isPipelineIdle() const {
@@ -734,11 +952,6 @@ bool PipelinedHeap::isPipelineIdle() const {
         }
     }
 
-    // Verify that no variables are left in progress when pipeline is idle
-    sst_assert(in_progress_vars.empty(), CALL_INFO, -1, 
-        "in_progress_vars [%d,...] not empty when pipeline is idle\n",
-        in_progress_vars.size() > 0 ? *in_progress_vars.begin() : 0);
-
     // Verify active_inserts is consistent
     sst_assert(active_inserts == 0, CALL_INFO, -1, "active_inserts not 0 when pipeline is idle\n");
 
@@ -746,7 +959,9 @@ bool PipelinedHeap::isPipelineIdle() const {
 }
 
 void PipelinedHeap::initHeap(uint64_t random_seed) {
-    in_progress_vars.clear();
+    bumps_inflight_.clear();
+    inheap_.assign(num_vars + 1, false);
+    inheap_count_ = 0;
     // Capacity is 2^MAX_HEAP_LEVELS - 1 (levels 0..MAX_HEAP_LEVELS-1, 1-indexed
     // tree): must match the INSERT-path bound in startOperation, and must stay
     // an sst_assert so it cannot be compiled out.
@@ -755,11 +970,12 @@ void PipelinedHeap::initHeap(uint64_t random_seed) {
         heap_size, MAX_HEAP_SIZE, MAX_HEAP_LEVELS);
     // Collect all decision variables first
     std::vector<Var> decision_vars;
-    for (Var v = 1; v <= (Var)heap_size; v++) {
+    for (Var v = 1; v <= (Var)num_vars; v++) {
         if (decision[v]) {
             decision_vars.push_back(v);
         }
     }
+    heap_size = decision_vars.size();
 
     // Randomize if a seed is provided
     if (random_seed != 0) {
@@ -768,35 +984,33 @@ void PipelinedHeap::initHeap(uint64_t random_seed) {
         std::shuffle(decision_vars.begin(), decision_vars.end(), rng);
     }
 
-    // initialize var memory
-    std::vector<VarMem> values((heap_size + 1), VarMem(0, 0.0));
+    // initialize var activity memory
+    std::vector<double> values((num_vars + 1), 0.0);
 
     // Build heap level by level
-    int added = 0;
-    for (int level = 0; level < MAX_HEAP_LEVELS; level++) {
+    size_t added = 0;
+    for (int level = 0; level < MAX_HEAP_LEVELS && added < heap_size; level++) {
         int level_size = 1 << level;
         for (int i = 0; i < level_size; i++) {
             heap_vars[level][i] = decision_vars[added];
             heap_activities[level][i] = 0.0;
-            values[decision_vars[added]].addr = added + 1;  // heap index starts from 1
+            inheap_[decision_vars[added]] = true;
             added++;
-            if (added >= heap_size) {
-                level = MAX_HEAP_LEVELS;  // to break outer loop
-                break;
-            }
+            if (added >= heap_size) break;
         }
     }
+    inheap_count_ = added;
 
-    std::vector<uint8_t> buffer((heap_size + 1) * sizeof(VarMem));
+    std::vector<uint8_t> buffer((num_vars + 1) * sizeof(double));
     memcpy(buffer.data(), values.data(), buffer.size());
     memory->sendUntimedData(new SST::Interfaces::StandardMem::Write(
-        varMemAddr(0), buffer.size(), buffer,
-        true, 0x1));  // posted, and not cacheable
+        actAddr(0), buffer.size(), buffer, true,
+        static_cast<uint32_t>(SST::Interfaces::StandardMem::Request::Flag::F_NONCACHEABLE)));
 
-    output.verbose(CALL_INFO, 1, 0, "Heap Size: %lu variables and activities, %lu bytes\n",
-                   (heap_size + 1), (heap_size + 1) * (sizeof(Var) + sizeof(double)));
-    output.verbose(CALL_INFO, 1, 0, "Var Mem Size: %zu, %zu bytes\n",
-                   (heap_size + 1), (heap_size + 1) * sizeof(VarMem));
+    output.verbose(CALL_INFO, 1, 0, "Heap Size: %lu entries\n", heap_size);
+    output.verbose(CALL_INFO, 1, 0, "Var Act Size: %zu entries, %zu bytes\n",
+                   (num_vars + 1), (num_vars + 1) * sizeof(double));
+    output.verbose(CALL_INFO, 1, 0, "Inheap bitmap: %zu bits\n", num_vars + 1);
 }
 
 // Helper methods
@@ -826,13 +1040,13 @@ void PipelinedHeap::setVar(int level, int idx, Var value) {
     heap_vars[level][idx] = value;
 }
 
-void PipelinedHeap::setVarMem(Var v, VarMem p) {
-    // update the var_act memory copy
-    sst_assert(p.act <= 1e100, CALL_INFO, -1, "activity out of bound\n");
-    size_t size = sizeof(VarMem);
-    uint64_t addr = varMemAddr(v);
+void PipelinedHeap::setAct(Var v, double act) {
+    // update the authoritative off-chip activity
+    sst_assert(act <= 1e100, CALL_INFO, -1, "activity out of bound\n");
+    size_t size = sizeof(double);
+    uint64_t addr = actAddr(v);
     std::vector<uint8_t> data(size);
-    memcpy(data.data(), &p, size);
+    memcpy(data.data(), &act, size);
     if (WRITE_BUFFER) {
         // Always add a new entry to the store queue
         StoreQueueEntry entry(addr, size, data);
@@ -843,61 +1057,29 @@ void PipelinedHeap::setVarMem(Var v, VarMem p) {
     memory->send(new SST::Interfaces::StandardMem::Write(addr, size, data));
 }
 
-void PipelinedHeap::getVarMem(Var v, bool bump) {
-    output.verbose(CALL_INFO, 6, 0, "Get VarMem: var %d, bump=%d\n", v, bump);
-    size_t size = sizeof(VarMem);
-    uint64_t addr = varMemAddr(v);
+void PipelinedHeap::getAct(Var v, bool bump) {
+    output.verbose(CALL_INFO, 6, 0, "Get act: var %d, bump=%d\n", v, bump);
+    size_t size = sizeof(double);
+    uint64_t addr = actAddr(v);
     if (WRITE_BUFFER) {
-        // forward from store queue if possible
+        // forward from store queue if possible (entry may be a full line
+        // from the rescale sweep, so honor the offset within it)
         int idx = findStoreQueueEntry(addr, size);
         if (idx >= 0) {
-            assert(size == store_queue[idx].size);
-            VarMem data;
-            memcpy(&data, store_queue[idx].data.data(), size);
-            if (bump_active) {
-                if (data.act + *(var_inc_ptr) > 1e100)
-                    rescaleAct(v, data);
-                data.act += *(var_inc_ptr);
-                if (data.addr != 0)  // bump and var in the heap
-                    insert_queue.emplace_back(InsReq(v, data.act, bump, data.addr));
-                else {
-                    if (!rescale) setVarMem(v, data);  // update the varmem with bumped activity
-                    bump_active = false;
-                }
-            } else {
-                if (data.addr == 0)  // insert if var not in heap
-                    insert_queue.emplace_back(InsReq(v, data.act, bump, data.addr));
-                else if (in_progress_vars.find(v) != in_progress_vars.end())
-                    in_progress_vars.erase(v);
-            }
+            double act;
+            memcpy(&act, store_queue[idx].data.data() + (addr - store_queue[idx].addr), size);
+            if (bump) completeBump(v, act);
+            else completeInsertFetch(v, act);
             return;
         }
     }
 
-    // read from memory and handleMem will push to insert_queue
+    // read from memory; handleMem completes the bump/insert
     auto req = new SST::Interfaces::StandardMem::Read(addr, size);
-    req_to_op[req->getID()] = PendingMemOp(InsReq(v, 0.0, bump, 0));
+    req_to_op[req->getID()] = PendingMemOp(
+        bump ? PendingMemOpType::BUMP_RMW : PendingMemOpType::INSERT_FETCH, v);
     if (tracer_) tracer_->emitMem(false, addr, (uint32_t)size);
     memory->send(req);
-}
-
-void PipelinedHeap::rescaleAct(Var v, VarMem& vmem) {
-    output.verbose(CALL_INFO, 2, 0, "Rescaling variable activities\n");
-    rescale = true;
-    *var_inc_ptr *= 1e-100;
-    vmem.act *= 1e-100;
-
-    VarMem bumped = vmem;
-    bumped.act += *(var_inc_ptr);
-    setVarMem(v, bumped);
-    for (int level = 0; level < MAX_HEAP_LEVELS; level++) {
-        for (int i = 0; i < (1 << level); i++){
-            heap_activities[level][i] *= 1e-100;
-        }
-        assert(req_to_op.empty());
-    }
-    readBurstAll(var_ptr_base_addr, (num_vars + 1) * sizeof(VarMem));
-    output.verbose(CALL_INFO, 2, 0, "Rescaled Var Inc %f\n", *var_inc_ptr);
 }
 
 int PipelinedHeap::findStoreQueueEntry(uint64_t addr, size_t size) {
@@ -937,73 +1119,119 @@ void PipelinedHeap::readBurstAll(uint64_t start_addr, size_t total_size) {
 
 void PipelinedHeap::verifyDebugHeap() {
     output.verbose(CALL_INFO, 6, 0, "DEBUG_HEAP: Verifying heap consistency...\n");
-    
-    // Create a set of all variables that exist in the heap for quick lookup
-    std::unordered_map<Var, std::pair<int, int>> heap_var_locations;
+
+    // Collect per-var copy counts and per-var max stored activity, checking
+    // structural invariants along the way.
+    std::unordered_map<Var, int> copies;
+    std::unordered_map<Var, double> max_stored;
+    size_t occupied = 0;
+
     for (int level = 0; level < MAX_HEAP_LEVELS; ++level) {
-        for (int idx = 0; idx < heap_vars[level].size(); ++idx) {
+        for (size_t idx = 0; idx < heap_vars[level].size(); ++idx) {
             Var var = heap_vars[level][idx];
+            uint32_t slot = (1u << level) | idx;
+            bool in_range = slot <= heap_size;
             if (var != var_Undef) {
-                sst_assert(heap_var_locations.find(var) == heap_var_locations.end(), CALL_INFO, -1,
-                    "DEBUG_HEAP ERROR: Duplicate var %d found in heap at (L%d,i%d)\n", var, level, idx);
-                heap_var_locations[var] = std::make_pair(level, idx);
+                if (!in_range) {
+                    output.verbose(CALL_INFO, 0, 0,
+                        "DEBUG_HEAP ERROR: occupied slot %u (var %d) beyond heap_size %zu\n",
+                        slot, var, heap_size);
+                    debug_heap_errors++;
+                    continue;
+                }
+                occupied++;
+                double act = heap_activities[level][idx];
+                copies[var]++;
+                auto it = max_stored.find(var);
+                if (it == max_stored.end() || act > it->second) max_stored[var] = act;
+
+                // Heap property: parent stored act >= child stored act
+                if (level > 0) {
+                    double parent_act = heap_activities[level-1][idx >> 1];
+                    if (parent_act < act) {
+                        output.verbose(CALL_INFO, 0, 0,
+                            "DEBUG_HEAP ERROR: heap property violated at (L%d,i%zu): "
+                            "parent %.12g < child %.12g (var %d)\n",
+                            level, idx, parent_act, act, var);
+                        debug_heap_errors++;
+                    }
+                }
+            } else if (in_range) {
+                output.verbose(CALL_INFO, 0, 0,
+                    "DEBUG_HEAP ERROR: empty slot %u within heap_size %zu\n", slot, heap_size);
+                debug_heap_errors++;
             }
         }
     }
-    
-    // Check all variables in memory against the heap
-    for (const auto& [var, mem_data] : debug_heap_varmem) {
-        if (var == 0) continue;  // Skip the dummy var 0
-        
-        auto it = heap_var_locations.find(var);
-        if (it != heap_var_locations.end()) {
-            // Variable exists in heap - verify addr and activity match
-            int level = it->second.first;
-            int idx = it->second.second;
-            
-            int expected_addr = (1 << level) | idx;
-            double expected_act = heap_activities[level][idx];
-            
-            // Check for address mismatch
-            if ((int)mem_data.addr != expected_addr) {
-                output.verbose(CALL_INFO, 0, 0, 
-                    "DEBUG_HEAP ERROR: Var %d: addr mismatch: heap=(L%d,i%d) expect=%d mem=%d\n",
-                    var, level, idx, expected_addr, (int)mem_data.addr);
-                debug_heap_errors++;
-            }
-            
-            // Check for activity mismatch
-            if (std::abs(mem_data.act - expected_act) > 1e-8) {
-                output.verbose(CALL_INFO, 0, 0, 
-                    "DEBUG_HEAP ERROR: Var %d: activity mismatch: heap=%.12g mem=%.12g\n",
-                    var, expected_act, mem_data.act);
-                debug_heap_errors++;
-            }
-        } else if (mem_data.addr != 0) {
-            // Variable exists in memory but not in heap
-            output.verbose(CALL_INFO, 0, 0, 
-                "DEBUG_HEAP ERROR: Var %d exists in memory with addr=%d but not in heap\n",
-                var, (int)mem_data.addr);
-            debug_heap_errors++;
-        }
+
+    if (occupied != heap_size) {
+        output.verbose(CALL_INFO, 0, 0,
+            "DEBUG_HEAP ERROR: %zu occupied slots but heap_size is %zu\n", occupied, heap_size);
+        debug_heap_errors++;
     }
-    
-    // Check for variables in heap but not in memory
-    for (const auto& [var, location] : heap_var_locations) {
-        if (debug_heap_varmem.find(var) == debug_heap_varmem.end()) {
-            int level = location.first;
-            int idx = location.second;
+
+    // Bitmap consistency
+    size_t bit_count = 0;
+    for (Var v = 1; v <= (Var)num_vars; v++) {
+        if (!inheap_[v]) continue;
+        bit_count++;
+        // Freshness lemma: bit set => a copy is resident and the max stored
+        // activity equals the authoritative memory activity.
+        auto it = copies.find(v);
+        if (it == copies.end()) {
             output.verbose(CALL_INFO, 0, 0,
-                "DEBUG_HEAP ERROR: Var %d exists in heap at (L%d,i%d) but not in memory\n",
-                var, level, idx);
+                "DEBUG_HEAP ERROR: inheap[%d]=1 but no copy resident\n", v);
+            debug_heap_errors++;
+            continue;
+        }
+        double mem_act = debug_heap_acts.count(v) ? debug_heap_acts[v] : -1.0;
+        double stored = max_stored[v];
+        double tol = std::max(1e-8, std::abs(mem_act) * 1e-12);
+        if (std::abs(stored - mem_act) > tol) {
+            output.verbose(CALL_INFO, 0, 0,
+                "DEBUG_HEAP ERROR: var %d fresh copy act %.12g != mem act %.12g\n",
+                v, stored, mem_act);
             debug_heap_errors++;
         }
     }
-    
-    output.verbose(CALL_INFO, 6, 0, "DEBUG_HEAP: Verification complete, found %d errors\n", debug_heap_errors);
-    
+    if (bit_count != inheap_count_) {
+        output.verbose(CALL_INFO, 0, 0,
+            "DEBUG_HEAP ERROR: inheap bitmap popcount %zu != inheap_count %zu\n",
+            bit_count, inheap_count_);
+        debug_heap_errors++;
+    }
+
+    // Stale copies never exceed the authoritative activity
+    for (const auto& [var, stored] : max_stored) {
+        double mem_act = debug_heap_acts.count(var) ? debug_heap_acts[var] : -1.0;
+        double tol = std::max(1e-8, std::abs(mem_act) * 1e-12);
+        if (stored > mem_act + tol) {
+            output.verbose(CALL_INFO, 0, 0,
+                "DEBUG_HEAP ERROR: var %d stored act %.12g exceeds mem act %.12g\n",
+                var, stored, mem_act);
+            debug_heap_errors++;
+        }
+    }
+
+    // Soundness: every unassigned decision var has at least one copy resident
+    if (assigned_ref_) {
+        for (Var v = 1; v <= (Var)num_vars; v++) {
+            if (v < (Var)decision.size() && decision[v]
+                && v < (Var)assigned_ref_->size() && !(*assigned_ref_)[v]
+                && copies.find(v) == copies.end()) {
+                output.verbose(CALL_INFO, 0, 0,
+                    "DEBUG_HEAP ERROR: unassigned decision var %d has no copy in heap\n", v);
+                debug_heap_errors++;
+            }
+        }
+    }
+
+    output.verbose(CALL_INFO, 6, 0,
+        "DEBUG_HEAP: Verification complete, %d errors (occupancy %zu, live %zu, stale %zu)\n",
+        debug_heap_errors, heap_size, inheap_count_, staleCount());
+
     // Send the response and clear the debug state
     sendResp(debug_heap_errors);
     debug_heap_pending = false;
-    debug_heap_varmem.clear();
+    debug_heap_acts.clear();
 }

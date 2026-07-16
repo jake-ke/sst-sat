@@ -129,7 +129,7 @@ public:
 // Events for heap operations
 class HeapReqEvent : public SST::Event {
 public:
-    enum OpType { INSERT, REMOVE_MAX, READ, BUMP, DEBUG_HEAP };
+    enum OpType { INSERT, REMOVE_MAX, READ, BUMP, DEBUG_HEAP, REBUILD };
     OpType op;
     int arg;
     HeapReqEvent() : op(HeapReqEvent::INSERT), arg(0) {}

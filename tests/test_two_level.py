@@ -234,7 +234,7 @@ watches_base_addr       = 0x030000000   # 2.25GiB: 64 B/literal metadata
 watch_nodes_base_addr   = 0x0C0000000   # 1GiB, ends exactly at 4GiB
 clauses_cmd_base_addr   = 0x100000000   # 1GiB: 4 B/clause
 clauses_base_addr       = 0x140000000   # 2GiB: clause data + learnt headroom
-var_act_base_addr       = 0x1C0000000   # 512MiB: 16 B/var (VarMem)
+var_act_base_addr       = 0x1C0000000   # 512MiB: 8 B/var activity (pipelined heap's private cache path)
 
 mem_size_str   = "8GiB"
 addr_range_end = "0x1FFFFFFFF"
@@ -284,7 +284,8 @@ else:
     heap = solver.setSubComponent("order_heap", "satsolver.PipelinedHeap")
 heap.addParams({
     "verbose" : str(args.verbose),
-    # The classic Heap reads var_act_base_addr from its OWN params (not the
+    "clock" : args.freq,
+    # The heap reads var_act_base_addr from its OWN params (not the
     # solver's); without this it falls back to a default and misroutes
     # var-activity traffic under a non-default address map.
     "var_act_base_addr" : hex(var_act_base_addr),
@@ -422,9 +423,52 @@ cpu_to_cache_link.connect((global_iface, "lowlink", "1ns"), (global_cache, "high
 l1_to_l2_link = sst.Link("l1_to_l2_link")
 l1_to_l2_link.connect((global_cache, "lowlink", "1ns"), (global_l2cache, "highlink", "1ns"))
 
-# Connect L2 cache to mem
-l2_to_mem_link = sst.Link("l2_to_mem_link")
-l2_to_mem_link.connect((global_l2cache, "lowlink", "1ns"), (global_memctrl, "highlink", "1ns"))
+# Connect L2 cache to mem. The pipelined heap gets a dedicated small
+# activity cache on its own memory interface, joined to the single memory
+# controller through a bus alongside L2 (one controller keeps DRAM bandwidth
+# contention between the two streams modeled; the heap is the sole issuer of
+# var_act addresses so the branches never share a line). Link latencies are
+# tuned below (1ns cache->bus + 50ps bus->mem) to keep the shared L2->memory
+# round trip cycle-identical to the pre-bus 1ns/1ns direct link.
+if args.classic_heap:
+    l2_to_mem_link = sst.Link("l2_to_mem_link")
+    l2_to_mem_link.connect((global_l2cache, "lowlink", "1ns"), (global_memctrl, "highlink", "1ns"))
+else:
+    # Heap's own memory interface + private activity cache.
+    # Fixed constants (no CLI args): 16KiB, 8-way, 64B lines, 32 MSHRs;
+    # access latency reuses --l1-latency (actL1 is an L1-class structure).
+    act_iface = heap.setSubComponent("memory", "memHierarchy.standardInterface")
+    act_l1cache = sst.Component("act_l1cache", "memHierarchy.Cache")
+    act_l1cache.addParams({
+        "cache_frequency"    : args.freq,
+        "cache_size"         : "16KiB",
+        "cache_line_size"    : "64",
+        "associativity"      : "8",
+        "access_latency_cycles" : args.l1_latency,
+        "mshr_num_entries"   : "32",
+        "request_link_width" : "64B",
+        "response_link_width" : "64B",
+        "L1"                 : "1",
+        "replacement_policy" : "lru",
+        "coherence_protocol" : "MSI",
+        "statistics" : "1",
+        "collect_stats" : "1"
+    })
+    heap_to_actl1_link = sst.Link("heap_to_actl1_link")
+    heap_to_actl1_link.connect((act_iface, "lowlink", "50ps"), (act_l1cache, "highlink", "50ps"))
+
+    mem_bus = sst.Component("mem_bus", "memHierarchy.Bus")
+    mem_bus.addParams({"bus_frequency": args.freq})
+    # 1ns cache->bus + 50ps bus->mem keeps the L2->memory round trip
+    # cycle-identical to the baseline 1ns/1ns direct link (the bus forwards
+    # on 2x-frequency edges, so 50ps everywhere would be ~2 cycles faster
+    # per L2 miss and bias comparisons against the old topology).
+    l2_to_bus_link = sst.Link("l2_to_bus_link")
+    l2_to_bus_link.connect((global_l2cache, "lowlink", "1ns"), (mem_bus, "highlink0", "1ns"))
+    actl1_to_bus_link = sst.Link("actl1_to_bus_link")
+    actl1_to_bus_link.connect((act_l1cache, "lowlink", "1ns"), (mem_bus, "highlink1", "1ns"))
+    bus_to_mem_link = sst.Link("bus_to_mem_link")
+    bus_to_mem_link.connect((mem_bus, "lowlink0", "50ps"), (global_memctrl, "highlink", "50ps"))
 
 # Enable statistics - different types for different stats
 sst.setStatisticLoadLevel(7)
@@ -492,6 +536,23 @@ if args.enable_histograms:
     # Time-weighted average stalled workers per cycle: accumulator fed via
     # addDataNTimes(Δcycles, blocked), so Mean = Sum/Count = avg stalled/cycle.
     sst.enableStatisticsForComponentName("solver", ["stalled_per_cycle"], {
+        "type": "sst.AccumulatorStatistic",
+        "rate": "1s"
+    })
+
+# Pipelined heap statistics (stale-copy accounting, cleanup, occupancy peaks)
+if not args.classic_heap:
+    sst.enableStatisticsForComponentType("satsolver.PipelinedHeap", [
+        "heap_insert_skips",
+        "heap_stale_created",
+        "heap_stale_pops",
+        "heap_tail_trims",
+        "heap_purge_pops",
+        "heap_bump_unassigned",
+        "heap_rebuilds",
+        "heap_size_sample",
+        "heap_stale_sample",
+    ], {
         "type": "sst.AccumulatorStatistic",
         "rate": "1s"
     })

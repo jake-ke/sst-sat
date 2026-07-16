@@ -44,18 +44,28 @@ std::string to_lower_copy(std::string value) {
     return value;
 }
 
+long parse_positive_long(const std::string& token, size_t line_number, const std::string& path,
+                         SST::Output& output) {
+    char* endptr = nullptr;
+    long parsed = std::strtol(token.c_str(), &endptr, 0);
+    if (endptr == token.c_str() || *endptr != '\0' || parsed <= 0) {
+        output.fatal(CALL_INFO, -1, "Invalid numeric token '%s' on line %zu of '%s'\n",
+                     token.c_str(), line_number, path.c_str());
+    }
+    return parsed;
+}
+
 } // namespace
 
 PipelinedHeapTest::PipelinedHeapTest(SST::ComponentId_t id, SST::Params& params) :
     SST::Component(id),
     script_path(params.find<std::string>("script_path", "")),
     script_index(0),
+    wait_cycles(0),
     var_inc_value(params.find<double>("var_inc", 1.0)),
-    var_mem_base_addr(0x70000000),
     script_completed(false),
     sim_finish_requested(false),
     resp_cnt(0),
-    pending_insert_responses(0),
     stat_successful_ops(0),
     stat_failed_ops(0) {
 
@@ -69,22 +79,14 @@ PipelinedHeapTest::PipelinedHeapTest(SST::ComponentId_t id, SST::Params& params)
     registerClock(params.find<std::string>("clock", "1GHz"),
                   new SST::Clock::Handler2<PipelinedHeapTest, &PipelinedHeapTest::tick>(this));
 
-    global_memory = loadUserSubComponent<SST::Interfaces::StandardMem>(
-        "global_memory",
-        SST::ComponentInfo::SHARE_NONE,
-        getTimeConverter("1GHz"),
-        new SST::Interfaces::StandardMem::Handler2<PipelinedHeapTest, &PipelinedHeapTest::handleGlobalMemEvent>(this));
-    sst_assert(global_memory != nullptr, CALL_INFO, -1,
-               "Unable to load StandardMem subcomponent for global memory\n");
-
     heap_link = configureLink("heap_port",
         new SST::Event::Handler2<PipelinedHeapTest, &PipelinedHeapTest::handleHeapResponse>(this));
     sst_assert(heap_link != nullptr, CALL_INFO, -1, "Failed to configure heap_port\n");
 
+    // The heap owns its memory interface (loaded on its "memory" slot).
     heap = loadUserSubComponent<PipelinedHeap>(
         "heap",
-        SST::ComponentInfo::SHARE_PORTS | SST::ComponentInfo::SHARE_STATS,
-        global_memory, var_mem_base_addr);
+        SST::ComponentInfo::SHARE_PORTS | SST::ComponentInfo::SHARE_STATS);
     sst_assert(heap != nullptr, CALL_INFO, -1, "Unable to load PipelinedHeap subcomponent\n");
 
     loadScriptFromFile(script_path);
@@ -95,8 +97,8 @@ PipelinedHeapTest::PipelinedHeapTest(SST::ComponentId_t id, SST::Params& params)
 }
 
 void PipelinedHeapTest::init(unsigned int phase) {
-    global_memory->init(phase);
-    
+    heap->init(phase);
+
     if (phase == 0) {
         std::vector<bool> decision_flags;
         if (!tracked_vars.empty()) {
@@ -111,46 +113,48 @@ void PipelinedHeapTest::init(unsigned int phase) {
         heap->setVarIncPtr(&var_inc_value);
         heap->initHeap();
 
-        active_vars.clear();
         activities.clear();
+        golden_copies.clear();
+        golden_inheap.clear();
         for (int var : tracked_vars) {
             activities[var] = 0.0;
-            active_vars.insert(var);
+            golden_copies.emplace_back(var, 0.0);
+            golden_inheap.insert(var);
         }
     }
 }
 
 void PipelinedHeapTest::setup() {
-    global_memory->setup();
-
-    size_t line_size = global_memory->getLineSize();
-    line_size = std::max(line_size, static_cast<size_t>(64));
-    output.verbose(CALL_INFO, 1, 0, "Cache line size: %zu bytes\n", line_size);
-    heap->setLineSize(line_size);
+    heap->setup();
 }
 
 void PipelinedHeapTest::complete(unsigned int phase) {
-    global_memory->complete(phase);
+    heap->complete(phase);
 }
 
 void PipelinedHeapTest::finish() {
-    global_memory->finish();
+    heap->finish();
     output.verbose(CALL_INFO, 1, 0, "Manual test finished. Successful: %lu, Failed: %lu\n",
                    stat_successful_ops, stat_failed_ops);
 }
 
-void PipelinedHeapTest::handleGlobalMemEvent(SST::Interfaces::StandardMem::Request* req) {
-    heap->handleMem(req);
-}
-
 bool PipelinedHeapTest::tick(SST::Cycle_t) {
-    if (script_index < script.size()) {
-        const Step& next_step = script[script_index];
-        // if (next_step.type == Step::Type::Remove && pending_insert_responses > 0) {
-        //     finalizeIfDone();
-        //     return false;
-        // }
+    if (wait_cycles > 0) {
+        wait_cycles--;
+        finalizeIfDone();
+        return false;
+    }
 
+    // Stall the script on outstanding remove/debug responses so the golden
+    // state at response time matches the request prefix the heap has seen
+    // (mirrors the solver, which yields per REMOVE_MAX). Inserts and bumps
+    // still stream at one per tick.
+    if (!pending_responses.empty()) {
+        finalizeIfDone();
+        return false;
+    }
+
+    if (script_index < script.size()) {
         executeStep(script[script_index]);
         script_index++;
         if (script_index == script.size()) {
@@ -173,28 +177,51 @@ void PipelinedHeapTest::executeStep(const Step& step) {
         case Step::Type::Remove:
             issueRemove();
             break;
+        case Step::Type::Debug:
+            issueDebug();
+            break;
+        case Step::Type::Wait:
+            wait_cycles = step.var;
+            output.verbose(CALL_INFO, 2, 0, "Waiting %d cycles (idle-time cleanup window)\n", step.var);
+            break;
+        case Step::Type::Rebuild:
+            // Mimic the solver's rebuild-restart: wipe, then reinsert every
+            // tracked var (the harness has no assignment state, so all vars
+            // count as unassigned). Golden model resets the same way.
+            heap->handleRequest(new HeapReqEvent(HeapReqEvent::REBUILD));
+            golden_copies.clear();
+            golden_inheap.clear();
+            for (int var : tracked_vars) {
+                issueInsert(var);
+            }
+            output.verbose(CALL_INFO, 2, 0, "Issued REBUILD + %zu reinserts\n", tracked_vars.size());
+            break;
     }
 }
 
 void PipelinedHeapTest::issueInsert(int var) {
     sst_assert(activities.count(var) > 0, CALL_INFO, -1, "Insert requested for untracked var %d\n", var);
 
-    if (active_vars.count(var) == 0)
-        active_vars.insert(var);
+    // Golden model: skipped when the bit is set (fresh copy resident),
+    // otherwise a new copy with the current authoritative activity.
+    if (golden_inheap.count(var) == 0) {
+        golden_copies.emplace_back(var, activities[var]);
+        golden_inheap.insert(var);
+    }
 
     heap->handleRequest(new HeapReqEvent(HeapReqEvent::INSERT, var));
-    // pending_responses.push(ResponseKind::Insert);
-    // pending_insert_responses++;
     output.verbose(CALL_INFO, 2, 0, "Issued INSERT for var %d\n", var);
 }
 
 void PipelinedHeapTest::issueBump(int var) {
-    if (active_vars.count(var) > 0)
-        activities[var] += var_inc_value;
+    sst_assert(activities.count(var) > 0, CALL_INFO, -1, "Bump requested for untracked var %d\n", var);
+
+    // Golden model: authoritative activity increases; any resident copy is
+    // now stale, marked by clearing the bit. Copies keep their stored act.
+    activities[var] += var_inc_value;
+    golden_inheap.erase(var);
 
     heap->handleRequest(new HeapReqEvent(HeapReqEvent::BUMP, var));
-    // pending_responses.push(ResponseKind::Insert);
-    // pending_insert_responses++;
     output.verbose(CALL_INFO, 2, 0, "Issued BUMP for var %d (activity now %.2f)\n", var, activities[var]);
 }
 
@@ -202,6 +229,80 @@ void PipelinedHeapTest::issueRemove() {
     heap->handleRequest(new HeapReqEvent(HeapReqEvent::REMOVE_MAX));
     pending_responses.push(ResponseKind::Remove);
     output.verbose(CALL_INFO, 5, 0, "Issued REMOVE_MAX\n");
+}
+
+void PipelinedHeapTest::issueDebug() {
+    heap->handleRequest(new HeapReqEvent(HeapReqEvent::DEBUG_HEAP));
+    pending_responses.push(ResponseKind::Debug);
+    output.verbose(CALL_INFO, 2, 0, "Issued DEBUG_HEAP\n");
+}
+
+void PipelinedHeapTest::checkRemoveResponse(int result) {
+    const double eps = 1e-9;
+    bool success = false;
+
+    if (golden_copies.empty()) {
+        success = (result == var_Undef);
+        if (!success)
+            output.verbose(CALL_INFO, 0, 0, "REMOVE returned %d but golden heap is empty\n", result);
+    } else if (result == var_Undef) {
+        // The heap may have purged every remaining copy only if all of them
+        // were stale; losing a fresh copy is a real bug.
+        success = true;
+        for (const auto& [v, act] : golden_copies) {
+            if (golden_inheap.count(v)) {
+                output.verbose(CALL_INFO, 0, 0,
+                    "REMOVE returned var_Undef but fresh copy of var %d (%.2f) remains\n", v, act);
+                success = false;
+            }
+        }
+        if (success) golden_copies.clear();
+    } else {
+        // Find the returned var's max stored copy
+        double r_act = std::numeric_limits<double>::lowest();
+        bool r_found = false;
+        for (const auto& [v, act] : golden_copies) {
+            if (v == result) { r_found = true; r_act = std::max(r_act, act); }
+        }
+        if (!r_found) {
+            output.verbose(CALL_INFO, 0, 0, "REMOVE returned var %d with no golden copy\n", result);
+            success = false;
+        } else {
+            // Every golden copy above the returned one must be stale (the heap
+            // is allowed to purge stale copies at any time; skipping a fresh
+            // copy would violate max-ordering).
+            success = true;
+            for (const auto& [v, act] : golden_copies) {
+                if (act > r_act + eps && golden_inheap.count(v)) {
+                    output.verbose(CALL_INFO, 0, 0,
+                        "REMOVE returned var %d (%.2f) but fresh var %d (%.2f) is higher\n",
+                        result, r_act, v, act);
+                    success = false;
+                }
+            }
+            if (success) {
+                // Reconcile: copies above r_act were purged stales; one copy
+                // of the result pops; any pop of the var clears its bit.
+                std::vector<std::pair<int, double>> next;
+                bool popped = false;
+                for (const auto& [v, act] : golden_copies) {
+                    if (act > r_act + eps) continue;                       // purged stale
+                    if (!popped && v == result && act >= r_act - eps) {    // the popped copy
+                        popped = true;
+                        continue;
+                    }
+                    next.emplace_back(v, act);
+                }
+                golden_copies.swap(next);
+                golden_inheap.erase(result);
+            }
+        }
+    }
+
+    output.verbose(CALL_INFO, 1, 0, "Heap response %lu (remove): got %d -> %s\n",
+                   resp_cnt, result, success ? "PASS" : "FAIL");
+    if (success) stat_successful_ops++;
+    else stat_failed_ops++;
 }
 
 void PipelinedHeapTest::handleHeapResponse(SST::Event* ev) {
@@ -219,41 +320,15 @@ void PipelinedHeapTest::handleHeapResponse(SST::Event* ev) {
     ResponseKind kind = pending_responses.front();
     pending_responses.pop();
 
-    const int result = resp->result;
-    bool success = false;
-
-    if (kind == ResponseKind::Insert) {
-        success = (result == 1);
-        pending_insert_responses--;
-        sst_assert(pending_insert_responses >= 0, CALL_INFO, -1,
-                   "Negative pending insert/bump response count\n");
-        output.verbose(CALL_INFO, 1, 0, "Heap response %lu (insert/bump): got %d -> %s\n",
-                       resp_cnt, result, success ? "PASS" : "FAIL");
-    } else { // Remove response
-        if (active_vars.empty()) {
-            success = (result == var_Undef);
-        } else if (result != var_Undef) {
-            double best_activity = std::numeric_limits<double>::lowest();
-            for (int var : active_vars) {
-                best_activity = std::max(best_activity, activities[var]);
-            }
-            double result_activity = activities[result];
-            double diff = std::fabs(result_activity - best_activity);
-            const double eps = 1e-9;
-            success = (diff <= eps);
-            printf("result act %.2f, best act %.2f\n", result_activity, best_activity);
-        }
-
-        output.verbose(CALL_INFO, 1, 0, "Heap response %lu (remove): got %d -> %s\n",
-                       resp_cnt, result, success ? "PASS" : "FAIL");
-
-        if (success && result != var_Undef) {
-            active_vars.erase(result);
-        }
+    if (kind == ResponseKind::Remove) {
+        checkRemoveResponse(resp->result);
+    } else { // Debug response: error count must be zero
+        bool success = (resp->result == 0);
+        output.verbose(CALL_INFO, 1, 0, "Heap response %lu (debug): %d errors -> %s\n",
+                       resp_cnt, resp->result, success ? "PASS" : "FAIL");
+        if (success) stat_successful_ops++;
+        else stat_failed_ops++;
     }
-
-    if (success) stat_successful_ops++;
-    else stat_failed_ops++;
 
     resp_cnt++;
     delete resp;
@@ -264,9 +339,8 @@ void PipelinedHeapTest::handleHeapResponse(SST::Event* ev) {
 void PipelinedHeapTest::finalizeIfDone() {
     if (sim_finish_requested) return;
     if (!script_completed) return;
+    if (wait_cycles > 0) return;
     if (!pending_responses.empty()) return;
-    if (pending_insert_responses != 0) return;
-    // if (!active_vars.empty()) return;
 
     sim_finish_requested = true;
     output.verbose(CALL_INFO, 1, 0, "Manual verification sequence complete. Ending simulation.\n");
@@ -317,12 +391,8 @@ void PipelinedHeapTest::loadScriptFromFile(const std::string& path) {
                 count_token = first_token;
             }
 
-            char* header_end = nullptr;
-            long parsed_count = std::strtol(count_token.c_str(), &header_end, 0);
-            sst_assert(header_end != count_token.c_str() && *header_end == '\0', CALL_INFO, -1,
-                       "Invalid tracked variable count '%s' on line %zu of '%s'\n",
-                       count_token.c_str(), line_number, path.c_str());
-            sst_assert(parsed_count > 0 && parsed_count <= std::numeric_limits<int>::max(), CALL_INFO, -1,
+            long parsed_count = parse_positive_long(count_token, line_number, path, output);
+            sst_assert(parsed_count <= std::numeric_limits<int>::max(), CALL_INFO, -1,
                        "Tracked variable count out of range on line %zu of '%s'\n", line_number, path.c_str());
 
             tracked_var_count = static_cast<size_t>(parsed_count);
@@ -347,39 +417,18 @@ void PipelinedHeapTest::loadScriptFromFile(const std::string& path) {
 
         Step step{};
 
-        if (cmd_lower == "insert" || cmd_lower == "ins") {
+        if (cmd_lower == "insert" || cmd_lower == "ins" || cmd_lower == "bump") {
             std::string var_token;
             if (!(iss >> var_token)) {
                 sst_assert(false, CALL_INFO, -1,
-                           "Missing variable id for INSERT on line %zu of '%s'\n", line_number, path.c_str());
+                           "Missing variable id for %s on line %zu of '%s'\n",
+                           command.c_str(), line_number, path.c_str());
             }
-            char* endptr = nullptr;
-            long parsed = std::strtol(var_token.c_str(), &endptr, 0);
-            sst_assert(endptr != var_token.c_str() && *endptr == '\0', CALL_INFO, -1,
-                       "Invalid variable id '%s' on line %zu of '%s'\n", var_token.c_str(), line_number, path.c_str());
-            sst_assert(parsed > 0 && parsed <= std::numeric_limits<int>::max(), CALL_INFO, -1,
-                       "Variable id out of range on line %zu of '%s'\n", line_number, path.c_str());
+            long parsed = parse_positive_long(var_token, line_number, path, output);
             sst_assert(tracked_var_count != 0 && static_cast<size_t>(parsed) <= tracked_var_count, CALL_INFO, -1,
                        "Variable id %ld exceeds tracked variable count %zu on line %zu of '%s'\n",
                        parsed, tracked_var_count, line_number, path.c_str());
-            step.type = Step::Type::Insert;
-            step.var = static_cast<int>(parsed);
-        } else if (cmd_lower == "bump") {
-            std::string var_token;
-            if (!(iss >> var_token)) {
-                sst_assert(false, CALL_INFO, -1,
-                           "Missing variable id for BUMP on line %zu of '%s'\n", line_number, path.c_str());
-            }
-            char* endptr = nullptr;
-            long parsed = std::strtol(var_token.c_str(), &endptr, 0);
-            sst_assert(endptr != var_token.c_str() && *endptr == '\0', CALL_INFO, -1,
-                       "Invalid variable id '%s' on line %zu of '%s'\n", var_token.c_str(), line_number, path.c_str());
-            sst_assert(parsed > 0 && parsed <= std::numeric_limits<int>::max(), CALL_INFO, -1,
-                       "Variable id out of range on line %zu of '%s'\n", line_number, path.c_str());
-            sst_assert(tracked_var_count != 0 && static_cast<size_t>(parsed) <= tracked_var_count, CALL_INFO, -1,
-                       "Variable id %ld exceeds tracked variable count %zu on line %zu of '%s'\n",
-                       parsed, tracked_var_count, line_number, path.c_str());
-            step.type = Step::Type::Bump;
+            step.type = (cmd_lower == "bump") ? Step::Type::Bump : Step::Type::Insert;
             step.var = static_cast<int>(parsed);
         } else if (cmd_lower == "remove" || cmd_lower == "rem") {
             std::string extra;
@@ -387,6 +436,21 @@ void PipelinedHeapTest::loadScriptFromFile(const std::string& path) {
                        "Unexpected token '%s' for REMOVE on line %zu of '%s'\n", extra.c_str(), line_number, path.c_str());
             step.type = Step::Type::Remove;
             step.var = 0;
+        } else if (cmd_lower == "debug") {
+            step.type = Step::Type::Debug;
+            step.var = 0;
+        } else if (cmd_lower == "rebuild") {
+            step.type = Step::Type::Rebuild;
+            step.var = 0;
+        } else if (cmd_lower == "wait") {
+            std::string count_token;
+            if (!(iss >> count_token)) {
+                sst_assert(false, CALL_INFO, -1,
+                           "Missing cycle count for WAIT on line %zu of '%s'\n", line_number, path.c_str());
+            }
+            long parsed = parse_positive_long(count_token, line_number, path, output);
+            step.type = Step::Type::Wait;
+            step.var = static_cast<int>(parsed);
         } else {
             sst_assert(false, CALL_INFO, -1,
                        "Unrecognized command '%s' on line %zu of '%s'\n", command.c_str(), line_number, path.c_str());
@@ -394,7 +458,7 @@ void PipelinedHeapTest::loadScriptFromFile(const std::string& path) {
 
         script.push_back(step);
 
-        if (step.type != Step::Type::Remove) {
+        if (step.type == Step::Type::Insert || step.type == Step::Type::Bump) {
             unique_vars.insert(step.var);
         }
     }
@@ -406,4 +470,3 @@ void PipelinedHeapTest::loadScriptFromFile(const std::string& path) {
                    "Loaded %zu steps with %zu tracked vars (%zu touched) from script '%s'\n",
                    script.size(), tracked_vars.size(), unique_vars.size(), path.c_str());
 }
-
