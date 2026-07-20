@@ -97,6 +97,7 @@ public:
         {"db_reductions", "Number of clause database reductions", "count", 1},
         {"minimized_literals", "Number of literals removed by clause minimization", "count", 1},
         {"restarts", "Number of restarts", "count", 1},
+        {"midsearch_rebuilds", "Heap rebuilds triggered between restarts by the stale threshold", "count", 1},
         {"watcher_occ", "Number of watchers residing in watch lists", "count", 1},
         {"watcher_blocks", "Number of blocks visited during watcher insertions", "count", 1},
         {"para_watchers", "Number of watchers inspected per propagation", "count", 1},
@@ -191,6 +192,8 @@ public:
     Lit chooseBranchVariable();
     Lit peekBranchVariable();
     void insertVarOrder(Var v);   // Insert variable into order heap
+    bool heapRebuildDue() const;  // Stale pile worth a rebuild (off-chip only)
+    void fireHeapRebuild();       // Wipe + reinsert-unassigned wave
     void varDecayActivity();       // Decay all variable activities
     void varBumpActivity(Var v);   // Bump a variable's activity
     
@@ -370,6 +373,7 @@ private:
     Statistic<uint64_t>* stat_db_reductions;
     Statistic<uint64_t>* stat_minimized_literals;
     Statistic<uint64_t>* stat_restarts;
+    Statistic<uint64_t>* stat_midsearch_rebuilds;
     Statistic<uint64_t>* stat_watcher_occ;
     Statistic<uint64_t>* stat_watcher_blocks;
     Statistic<uint64_t>* stat_para_watchers;

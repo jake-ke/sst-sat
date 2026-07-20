@@ -242,6 +242,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_db_reductions = registerStatistic<uint64_t>("db_reductions");
     stat_minimized_literals = registerStatistic<uint64_t>("minimized_literals");
     stat_restarts = registerStatistic<uint64_t>("restarts");
+    stat_midsearch_rebuilds = registerStatistic<uint64_t>("midsearch_rebuilds");
     stat_watcher_occ = registerStatistic<uint64_t>("watcher_occ");
     stat_watcher_blocks = registerStatistic<uint64_t>("watcher_blocks");
     stat_para_watchers = registerStatistic<uint64_t>("para_watchers");
@@ -1531,7 +1532,21 @@ void SATSolver::execMinimize() {
 }
 
 void SATSolver::execBacktrack() {
+    // Conflict-site rebuild check: stales are minted only by the bump waves
+    // conflict analysis enqueues, so checking once per conflict is a complete
+    // cover (between conflicts staleCount only falls; overshoot is bounded by
+    // the one just-enqueued wave, caught at the next conflict). Deciding
+    // BEFORE the unwind lets its inserts fold into the post-wipe wave.
+    bool rebuild_heap = heapRebuildDue();
+    if (rebuild_heap) suppress_heap_inserts_ = true;
+
     backtrack(bt_level);
+
+    if (rebuild_heap) {
+        fireHeapRebuild();
+        stat_midsearch_rebuilds->addData(1);
+        output.verbose(CALL_INFO, 3, 0, "BACKTRACK: mid-search heap rebuild triggered\n");
+    }
 
     // Conflict learning statistics
     stat_learnt_length->addDataNTimes(learnt_clause.size(), 1);
@@ -1617,17 +1632,8 @@ void SATSolver::execRestart() {
     output.verbose(CALL_INFO, 4, 0, "RESTART: Executing restart #%d\n", curr_restarts);
     if (tracer_) tracer_->emitRestart(curr_restarts);
 
-#ifndef USE_CLASSIC_HEAP
-    // Rebuild the heap when garbage exceeds the live set: stale copies deepen
-    // every percolation and, unchecked, grow without bound on bump-heavy
-    // instances (observed overflowing the 2^24 capacity). Threshold
-    // staleCount > num_vars keeps the heap within ~2x its minimal size (at
-    // most +1 percolation level); a rebuild costs ~num_vars insert cycles and
-    // can only fire after >= num_vars stale creations, so the amortized
-    // overhead is <= ~1 cycle per stale-creating op at any instance size.
-    bool rebuild_heap = order_heap->staleCount() > (size_t)num_vars;
+    bool rebuild_heap = heapRebuildDue();
     if (rebuild_heap) suppress_heap_inserts_ = true;
-#endif
 
     backtrack(0);
     conflictC = 0;
@@ -1641,19 +1647,10 @@ void SATSolver::execRestart() {
         spec_literal = lit_Undef;
     }
 
-#ifndef USE_CLASSIC_HEAP
     if (rebuild_heap) {
-        suppress_heap_inserts_ = false;
-        order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::REBUILD));
-        // Reinsert every unassigned decision var with its current activity
-        // (level-0 assignments stay out). The heap consumes these at
-        // 1/cycle; FIFO order + the REMOVE_MAX drain gate make the rebuild
-        // synchronous with respect to the next decision.
-        for (Var v = 1; v <= (Var)num_vars; v++)
-            if (!var_assigned[v]) insertVarOrder(v);
+        fireHeapRebuild();
         output.verbose(CALL_INFO, 3, 0, "RESTART: heap rebuild triggered\n");
     }
-#endif
 
     // Update the restart limit using Luby sequence or geometric progression
     double rest_base = luby_restart ? luby(restart_inc, curr_restarts) : pow(restart_inc, curr_restarts);
@@ -2972,8 +2969,11 @@ Lit SATSolver::chooseBranchVariable() {
     // sst_assert(heap_resp == 0, CALL_INFO, -1,
     //     "Heap corrupted: DEBUG_HEAP reported %d errors\n", heap_resp);
 
+    // Skip the random probe while a rebuild is still queued: the probe
+    // indexes by the solver-side (pre-wipe) size and would race the wipe.
     Var next = var_Undef;
-    if (!order_heap->empty() && drand(random_seed) < random_var_freq) {
+    if (!order_heap->rebuildQueued() && !order_heap->empty()
+        && drand(random_seed) < random_var_freq) {
         int rand_idx = irand(random_seed, order_heap->size());
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::READ, rand_idx));
         heap_resp_cnt++;
@@ -3014,9 +3014,37 @@ Lit SATSolver::peekBranchVariable() {
     return mkLit(next, polarity[next]);
 }
 
+// A rebuild pays only when the heap extends off-chip (there are crossings and
+// deep stale-discard pops to remove); on-chip stale copies cost at most one
+// extra percolation level, never worth a full rebuild's tie-break reshuffle.
+// staleCount > num_vars preserves the amortization: a rebuild costs ~num_vars
+// inserts and can only fire after >= num_vars stale creations, i.e. <= ~1
+// cycle per stale-creating op at any instance size. rebuildQueued() blocks
+// re-fires while a queued wipe is undispatched (solver-side staleCount()
+// reads the pre-wipe value until then). Inert for the classic heap, whose
+// in-place updates never create stales.
+bool SATSolver::heapRebuildDue() const {
+    return !order_heap->rebuildQueued()
+        && order_heap->staleCount() > (size_t)num_vars
+        && order_heap->isOffChip();
+}
+
+// Completes a rebuild armed before a backtrack: ends the suppression window
+// (the unwind's inserts fold into the wave), wipes, and reinserts the
+// now-current unassigned set; trail vars re-enter through later backtracks
+// with their bumped activities. Heap FIFO order plus the REMOVE_MAX drain
+// gate make the rebuild synchronous with the next decision, and the wave
+// drains under the intervening propagation.
+void SATSolver::fireHeapRebuild() {
+    suppress_heap_inserts_ = false;
+    order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::REBUILD));
+    for (Var v = 1; v <= (Var)num_vars; v++)
+        if (!var_assigned[v]) insertVarOrder(v);
+}
+
 void SATSolver::insertVarOrder(Var v) {
-    // Suppressed during a rebuild-restart's trail unwind: the post-REBUILD
-    // full reinsert loop covers every unassigned decision var.
+    // Suppressed during a rebuild's trail unwind: the post-REBUILD wave
+    // covers every unassigned decision var.
     if (suppress_heap_inserts_) return;
     if (decision[v]) {
         order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::INSERT, v));

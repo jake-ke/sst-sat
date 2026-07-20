@@ -78,6 +78,8 @@ def parse_args():
     parser.add_argument('--spec', dest='enable_speculative',
                         action='store_true', default=False,
                         help='Enable speculative propagation')
+    parser.add_argument('--onchip-levels', dest='onchip_levels', type=int, default=14,
+                        help='Heap levels in on-chip SRAM (0 = all on-chip, no OLC)')
     parser.add_argument('--classic-heap', dest='classic_heap',
                         action='store_true', default=False,
                         help='Use classic heap implementation instead of pipelined heap')
@@ -289,6 +291,11 @@ heap.addParams({
     # solver's); without this it falls back to a default and misroutes
     # var-activity traffic under a non-default address map.
     "var_act_base_addr" : hex(var_act_base_addr),
+    # Heap-owned region [acts | nodes]: var_act_base to the end of the 8GiB
+    # map. Off-chip heap levels (>= onchip_levels) live in the node partition
+    # behind the OLC.
+    "heap_region_end" : hex(int(addr_range_end, 16) + 1),
+    "onchip_levels" : str(args.onchip_levels),
 })
 print()
 
@@ -487,6 +494,7 @@ solver_stats = [
     "db_reductions",
     "minimized_literals",
     "restarts",
+    "midsearch_rebuilds",
     "learnt_length",
     "learnt_units",
     "learnt_lbd",
@@ -552,6 +560,13 @@ if not args.classic_heap:
         "heap_rebuilds",
         "heap_size_sample",
         "heap_stale_sample",
+        "olc_node_reads",
+        "olc_node_writes",
+        "olc_boundary_crossings",
+        "olc_insert_ctx_sample",
+        "olc_sift_parked_sample",
+        "olc_tail_refills",
+        "olc_tail_stalls",
     ], {
         "type": "sst.AccumulatorStatistic",
         "rate": "1s"

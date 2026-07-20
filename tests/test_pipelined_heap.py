@@ -12,6 +12,9 @@ parser.add_argument('--var-inc', type=float, default=1.0,
 default_script = os.path.join(os.path.dirname(__file__), "..", "examples", "pipelined_heap_test.txt")
 parser.add_argument('--script', type=str, default=default_script,
                     help='Path to the script describing heap operations')
+parser.add_argument('--onchip-levels', type=int, default=3,
+                    help='On-chip heap levels K (0 = all on-chip). The harness '
+                         'default of 3 exercises the OLC on tiny heaps.')
 args = parser.parse_args()
 
 var_act_base_addr = 0x70000000
@@ -30,6 +33,11 @@ heap = test_component.setSubComponent("heap", "satsolver.PipelinedHeap")
 heap.addParams({
     "verbose" : str(args.verbose),
     "var_act_base_addr" : hex(var_act_base_addr),
+    # [acts | nodes] partition: 1 MiB region leaves ~64K node slots, far more
+    # than any harness script needs, while keeping addresses inside the
+    # memory controller's range.
+    "heap_region_end" : hex(var_act_base_addr + 0x100000),
+    "onchip_levels" : str(args.onchip_levels),
 })
 
 # Connect test component to heap
@@ -63,6 +71,14 @@ heap_to_mem.connect((memory, "lowlink", "1ns"), (memctrl, "highlink", "1ns"))
 
 # Set statistics output
 sst.setStatisticOutput("sst.statOutputConsole")
+sst.enableStatisticsForComponentType("satsolver.PipelinedHeap", [
+    "heap_insert_skips", "heap_stale_created", "heap_stale_pops",
+    "heap_tail_trims", "heap_purge_pops", "heap_rebuilds",
+    "heap_size_sample", "heap_stale_sample",
+    "olc_node_reads", "olc_node_writes", "olc_boundary_crossings",
+    "olc_insert_ctx_sample", "olc_sift_parked_sample",
+    "olc_tail_refills", "olc_tail_stalls",
+], {"type": "sst.AccumulatorStatistic", "rate": "0ns"})
 
 print("Running PipelinedHeap manual test (verbose={}, var_inc={})".format(
     args.verbose, args.var_inc))

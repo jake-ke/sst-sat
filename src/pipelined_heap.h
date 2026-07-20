@@ -13,10 +13,13 @@
 #include "structs.h"
 #include "trace_writer.h"
 
-// Define maximum number of heap levels and corresponding parameters
-#define MAX_HEAP_LEVELS 24
-#define MAX_HEAP_SIZE ((1u << MAX_HEAP_LEVELS) - 1)
-#define PIPELINE_DEPTH 3  // Number of stages per level (read, compare, write)
+// Levels 0..onchip_levels_-1 live in per-level SRAM with the 3-stage pipeline;
+// levels >= onchip_levels_ live in the DRAM node region behind the off-chip
+// level controller (OLC). Configured by the "onchip_levels" param (default 14;
+// 0 means every level is on-chip, i.e. the OLC never engages).
+// Total-depth bound: path bits are uint32 and lastSlot() uses 32-bit tricks.
+constexpr int MAX_TOTAL_HEAP_LEVELS = 30;
+constexpr int PIPELINE_DEPTH = 3;  // stages per level (read, compare, write)
 
 // Operation types for pipeline stages
 enum HeapOpType {
@@ -60,9 +63,10 @@ struct PipelineStageOp {
     bool ready;                   // Whether this stage is ready to receive new data
     int depth;                    // Current depth in the heap (number of levels to go)
     uint32_t path;                // Normalized path bits with leading 1 at leftmost position
+    uint64_t dest;                // INSERT only: global destination slot (for OLC handoff)
 
     PipelineStageOp() : op_type(HEAP_OP_NONE), node_idx(0), var(0),
-                        act(0.0), valid(false), ready(true), depth(0), path(0) {}
+                        act(0.0), valid(false), ready(true), depth(0), path(0), dest(0) {}
 
     void reset() {
         op_type = HEAP_OP_NONE;
@@ -73,7 +77,88 @@ struct PipelineStageOp {
         ready = true;
         depth = 0;
         path = 0;
+        dest = 0;
     }
+};
+
+// ---------------- Off-chip level controller (OLC) types ----------------
+
+// A heap node as stored off-chip: 16 B {int32 var, 4 B pad, double act}.
+struct OlcNode {
+    Var var;
+    double act;
+    OlcNode() : var(var_Undef), act(-1.0) {}
+    OlcNode(Var v, double a) : var(v), act(a) {}
+};
+
+// One 64 B line of the tail buffer's sliding window (4 node slots).
+struct TailLine {
+    uint64_t line;                // node-region line index (0 = first off-chip line)
+    bool dirty;
+    bool slot_valid[4];
+    OlcNode node[4];
+    TailLine(uint64_t l = 0) : line(l), dirty(false) {
+        for (int i = 0; i < 4; i++) slot_valid[i] = false;
+    }
+};
+
+// Per-level state of an OLC insert context's pre-issued path read.
+struct OlcPathRead {
+    uint64_t slot;
+    bool ready;          // data available
+    bool issued;         // read sent (or served instantly); false = waiting on
+                         // the OLC read budget, retried each tick
+    bool conflict;       // slot shared with an older context's path: discard the
+                         // parallel read and re-issue once the older has passed
+    bool reissued;
+    uint32_t gen;        // read generation; stale responses (gen mismatch) dropped
+    OlcNode data;
+    OlcPathRead() : slot(0), ready(false), issued(false), conflict(false),
+                    reissued(false), gen(0) {}
+};
+
+// INSERT context: path slots known a priori, all reads issued in parallel,
+// compare chain consumes them in level order (globally ordered across contexts).
+struct OlcInsertCtx {
+    uint64_t id;                  // stable id for response routing
+    uint64_t dest;                // global destination slot
+    int dest_level;
+    Var var;                      // carried (descending) value
+    double act;
+    int progress;                 // next level to consume (starts at onchip_levels_)
+    bool retired;
+    std::vector<OlcPathRead> path;  // index: level - onchip_levels_, for levels < dest_level
+};
+
+// SIFT context (one in flight, v1): current slot's children line + the single
+// aligned grandchildren line fetched together -> two levels per round trip.
+struct OlcSiftCtx {
+    bool active = false;
+    uint64_t slot = 0;            // current slot (starts at the K-1 boundary slot)
+    Var var = var_Undef;          // carried value
+    double act = -1.0;
+    bool boundary_write_pending = false;  // K-1 slot write not yet performed
+    bool children_ready = false;
+    bool grand_ready = false;     // also true when no grandchildren line was needed
+    bool grand_needed = false;
+    uint64_t hs_at_issue = 0;     // heap_size snapshot at read issue: slots that
+                                  // appeared after are unwritten reservations
+    uint32_t gen = 0;             // step generation for response routing
+    OlcNode child[2];             // slots 2s, 2s+1 (validity re-checked vs heap_size)
+    OlcNode grand[4];             // slots 4s..4s+3
+};
+
+// OLC memory traffic bookkeeping (kept separate from req_to_op so the
+// solver-facing gates on req_to_op keep meaning "act traffic only").
+enum class OlcMemType { INSERT_PATH, SIFT_CHILDREN, SIFT_GRAND, TAIL_REFILL, READ_PEEK };
+struct OlcPendingRead {
+    OlcMemType type;
+    uint64_t ctx_id;   // insert ctx id, or sift/refill generation, or peek slot
+    int level;         // insert path level
+    uint32_t gen;
+    OlcPendingRead() : type(OlcMemType::INSERT_PATH), ctx_id(0), level(0), gen(0) {}
+    OlcPendingRead(OlcMemType t, uint64_t c, int l, uint32_t g)
+        : type(t), ctx_id(c), level(l), gen(g) {}
 };
 
 class PipelinedHeap : public SST::SubComponent {
@@ -90,7 +175,9 @@ public:
     SST_ELI_DOCUMENT_PARAMS(
         {"clock", "Clock frequency", "1GHz"},
         {"verbose", "Verbosity level", "0"},
-        {"var_act_base_addr", "Base address of the per-variable activity array", "0x1C0000000"}
+        {"var_act_base_addr", "Base address of the per-variable activity array", "0x1C0000000"},
+        {"heap_region_end", "End of the heap-owned memory region ([acts | nodes] partition)", "0x200000000"},
+        {"onchip_levels", "Heap levels held in on-chip SRAM (K); 0 = all levels on-chip (no OLC)", "14"}
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -110,7 +197,14 @@ public:
         {"heap_bump_unassigned", "Bumps of unassigned variables (freshness-lemma guard)", "count", 1},
         {"heap_rebuilds", "Heap wipes triggered by stale-copy buildup (solver reinserts after)", "count", 1},
         {"heap_size_sample", "Heap occupancy sampled on every change (Max = peak)", "count", 1},
-        {"heap_stale_sample", "Stale-copy count sampled on every change (Max = peak)", "count", 1}
+        {"heap_stale_sample", "Stale-copy count sampled on every change (Max = peak)", "count", 1},
+        {"olc_node_reads", "Off-chip node region reads issued by the OLC", "count", 1},
+        {"olc_node_writes", "Off-chip node region writes issued by the OLC", "count", 1},
+        {"olc_boundary_crossings", "Ops handed off from the on-chip pipeline to the OLC", "count", 1},
+        {"olc_insert_ctx_sample", "OLC insert contexts in use, sampled per handoff (Max = peak)", "count", 1},
+        {"olc_sift_parked_sample", "Active + pipeline-parked sifts, sampled per park event (Max = peak)", "count", 1},
+        {"olc_tail_refills", "Tail buffer slide-down line refills", "count", 1},
+        {"olc_tail_stalls", "Cycles a pop/trim waited on the tail buffer or sift subtree gate", "count", 1}
     )
 
     PipelinedHeap(SST::ComponentId_t id, SST::Params& params);
@@ -133,6 +227,14 @@ public:
     // Clamped: between an INSERT's dispatch (bit set) and its pipeline start
     // (heap_size++), inheap_count_ transiently exceeds heap_size.
     size_t staleCount() const { return heap_size > inheap_count_ ? heap_size - inheap_count_ : 0; }
+    // Any slot >= 2^K lives off-chip. A rebuild only earns its trajectory
+    // perturbation when there are crossings/deep discard-pops to remove, i.e.
+    // when the heap is actually off-chip; on-chip stale cost is <= +1 level.
+    bool isOffChip() const { return heap_size >= firstOffchipSlot(); }
+    // True from a REBUILD's enqueue until its wipe dispatches. Solver-side
+    // staleCount() reads the pre-wipe value inside that window, so rebuild
+    // triggers must hold off (one 1-bit wire in hardware).
+    bool rebuildQueued() const { return rebuild_queued_; }
 
     // Setters for SAT solver integration
     void setDecisionFlags(const std::vector<bool>& dec) { decision = dec; }
@@ -152,6 +254,9 @@ private:
     SST::Interfaces::StandardMem* memory;
     size_t line_size;
     uint64_t var_ptr_base_addr;
+    uint64_t heap_region_end_;
+    int onchip_levels_;     // K: levels in SRAM ("onchip_levels" param; 0 maps
+                            // to MAX_TOTAL_HEAP_LEVELS, i.e. all on-chip)
     size_t num_vars;
 
     // Heap state
@@ -166,17 +271,120 @@ private:
     std::vector<bool> inheap_;
     size_t inheap_count_;
 
-    // Heap memory - arrays for variables and activities at each level
-    std::vector<Var> heap_vars[MAX_HEAP_LEVELS];
-    std::vector<double> heap_activities[MAX_HEAP_LEVELS];
+    // Heap memory - arrays for variables and activities at each ON-CHIP level
+    std::vector<Var> heap_vars[MAX_TOTAL_HEAP_LEVELS];
+    std::vector<double> heap_activities[MAX_TOTAL_HEAP_LEVELS];
 
-    // Pipeline state - 2D arrays with [level][stage]
-    PipelineStageOp stages[MAX_HEAP_LEVELS][PIPELINE_DEPTH];
+    // Pipeline state - 2D arrays with [level][stage], on-chip levels only
+    PipelineStageOp stages[MAX_TOTAL_HEAP_LEVELS][PIPELINE_DEPTH];
+
+    // ---------------- OLC state ----------------
+    static const int OLC_INSERT_CTXS = 8;     // insert context table size
+    static const int TAIL_WINDOW_LINES = 16;  // sliding window: 16 lines = 64 slots
+    static const int TAIL_REFILL_MARGIN = 8;  // refill when runway (lines) < margin
+    static const int TAIL_REFILLS_MAX = 2;    // refill line reads in flight
+    // Outstanding node reads+writes cap: keeps the OLC from flooding the act
+    // cache's MSHRs (a real controller has finite request slots too; in sim a
+    // chronically full MSHR also re-processes stalled events every cycle).
+    // Sift reads bypass the cap (<=2, top priority); everything else queues.
+    static const int OLC_MEM_BUDGET = 12;
+    // Outstanding act reads (bump RMWs + insert fetches) cap: bump bursts
+    // dispatch 1/cycle and, when node traffic thrashes the act cache, their
+    // misses alone can fill the MSHR. Combined with OLC_MEM_BUDGET this stays
+    // below the 32-entry MSHR. Dispatch stalls at the queue head when full
+    // (finite request queue), draining as responses return.
+    static const int ACT_READS_MAX = 16;
+    // olcMemBudgetOk reserve tiers: headroom left under OLC_MEM_BUDGET for
+    // higher-priority traffic. Standard reads (insert paths, peeks, the
+    // re-anchor) leave room for the sift's exempt line pair; refills are the
+    // lowest-priority prefetches and leave half the budget free.
+    static const int OLC_RESERVE_SIFT = 2;
+    static const int OLC_RESERVE_PREFETCH = 6;
+
+    uint64_t nodes_base_;                     // 64-aligned start of the node region
+    uint64_t heap_capacity_;                  // total slots: 2^K-1 + node region slots
+
+    std::deque<OlcInsertCtx> insert_ctxs_;    // arrival order (front = oldest)
+    uint64_t next_ctx_id_;
+    OlcSiftCtx sift_;
+    std::unordered_map<uint64_t, OlcPendingRead> olc_pending;  // mem req id -> OLC read
+    int node_writes_inflight_;                // node-region writes awaiting WriteResp
+    int tail_refills_inflight_;
+    uint32_t refill_gen_;
+    // Budget check for non-sift node reads; `reserve` keeps headroom for
+    // higher-priority traffic (sift, reanchor).
+    bool olcMemBudgetOk(int reserve) const {
+        return (int)olc_pending.size() + node_writes_inflight_ < OLC_MEM_BUDGET - reserve;
+    }
+    void olcIssuePendingReads();
+    // Refill responses may return out of order; installed only when adjacent
+    // to the window bottom (contiguity invariant).
+    std::unordered_map<uint64_t, std::vector<uint8_t>> refill_done_;
+    // Parked refill snapshots go stale if a node write lands between the
+    // refill response and its install; every node-region writer must patch
+    // them (<= TAIL_REFILLS_MAX+1 entries: a fixed comparator bank in HW).
+    void patchParkedRefill(uint64_t line, int slot_off, const uint8_t* src16);
+
+    // Tail buffer: contiguous window of node-region lines [front.line, back.line]
+    // locked to heap_size (back covers the tail). Empty while heap_size < 2^K.
+    std::deque<TailLine> tail_win_;
+
+    // Slot/address helpers for the node region
+    inline uint64_t firstOffchipSlot() const { return 1ull << onchip_levels_; }
+    inline uint64_t nodeAddr(uint64_t slot) const {
+        return nodes_base_ + (slot - firstOffchipSlot()) * 16;
+    }
+    inline uint64_t lineOf(uint64_t slot) const { return (slot - firstOffchipSlot()) >> 2; }
+    inline uint64_t lineBaseSlot(uint64_t line) const { return firstOffchipSlot() + (line << 2); }
+    inline uint64_t lineAddr(uint64_t line) const { return nodes_base_ + (line << 6); }
+
+    // OLC core
+    void olcTick();
+    bool olcIdle() const;
+    bool olcCanAcceptInsert() const;
+    bool olcCanAcceptSift() const;
+    void olcStartInsert(Var v, double act, uint64_t dest);
+    void olcStartSift(uint64_t boundary_slot, Var v, double act);
+    void olcProcessInserts();
+    void olcIssueInsertRead(OlcInsertCtx& ctx, int level);
+    void olcSiftIssueReads();
+    void olcCompleteSiftStep();
+    void olcRetireSift();
+    void olcHandleMem(SST::Interfaces::StandardMem::ReadResp* resp, const OlcPendingRead& p);
+    void sampleSiftParked();
+    void siftWriteSlot(uint64_t slot, Var v, double act);
+    bool siftBlocks(uint64_t slot) const;   // slot within the active sift's subtree
+
+    // Node access through the single ordering point: tail buffer -> store
+    // queue -> memory. Instant-read results: 1 = data in out now, 0 = issue a
+    // memory read, 2 = buffered but not yet available (retry later).
+    int nodeReadInstant(uint64_t slot, OlcNode& out);
+    int lineReadInstant(uint64_t line, OlcNode* out4);
+    void nodeWrite(uint64_t slot, Var v, double act);
+    bool lineInWindow(uint64_t line) const;
+    TailLine* tailLineFor(uint64_t slot);
+    void tailComposeTo(uint64_t slot);                   // grow window to cover slot
+    void tailDropAbove(uint64_t new_heap_size);          // shrink: drop dead top lines
+    void tailEvictBottomIfOver();
+    bool tailSlotReady(uint64_t slot);
+    OlcNode tailGrab(uint64_t slot);                     // read+clear the tail slot
+    void tailRefillTick();
+    void installRefills();
+    void tailScaleActs();                                // rescale: scale resident lines
+    void tailWipe();                                     // rebuild: drop everything
+    bool popGateOk();                                    // off-chip tail: ready + subtree gate
+
+    // 16 B node <-> memory bytes
+    static void packNode(const OlcNode& n, std::vector<uint8_t>& out);
+    static OlcNode unpackNode(const uint8_t* p);
+    void overlayStoreQueue(uint64_t addr, std::vector<uint8_t>& data) const;
 
     // DEBUG_HEAP state
     bool debug_heap_pending = false;
     int debug_heap_errors = 0;
-    std::unordered_map<Var, double> debug_heap_acts;  // Off-chip activities read for verification
+    std::unordered_map<Var, double> debug_heap_acts;      // Off-chip activities read for verification
+    std::unordered_map<uint64_t, OlcNode> debug_nodes_;   // Off-chip nodes read for verification
+    bool debugNodeAt(uint64_t slot, OlcNode& out) const;  // buffer/queue/snapshot accessor
 
     struct PendingRequest {
         HeapReqEvent::OpType op;
@@ -217,6 +425,13 @@ private:
     bool rescale_offchip_done_;
     size_t rescale_onchip_cycles_;
     size_t rescale_pending_reads;
+    // Sweep bursts (rescale/debug) stream through a fixed window instead of
+    // issuing every chunk at once: an unbounded burst (up to millions of line
+    // reads with a deep node region) floods the act cache's MSHR.
+    static const int BURST_WINDOW = 16;
+    std::deque<std::pair<uint64_t, size_t>> burst_queue_;  // (addr, size) chunks
+    int burst_inflight_;
+    void issueBurstReads();
     struct StashedBump { Var var; double act; };
     std::vector<StashedBump> rescale_stash_;
     void maybeFinishRescale();
@@ -224,6 +439,7 @@ private:
     // Idle root-peek purge: REPLACE launched by the heap itself; suppress the
     // root response toward the solver.
     bool purge_suppress_;
+    bool rebuild_queued_;               // REBUILD enqueued, wipe not yet dispatched
 
     // Statistics
     SST::Statistics::Statistic<uint64_t>* stat_insert_skips;
@@ -235,6 +451,13 @@ private:
     SST::Statistics::Statistic<uint64_t>* stat_rebuilds;
     SST::Statistics::Statistic<uint64_t>* stat_size_sample;
     SST::Statistics::Statistic<uint64_t>* stat_stale_sample;
+    SST::Statistics::Statistic<uint64_t>* stat_olc_node_reads;
+    SST::Statistics::Statistic<uint64_t>* stat_olc_node_writes;
+    SST::Statistics::Statistic<uint64_t>* stat_olc_boundary_crossings;
+    SST::Statistics::Statistic<uint64_t>* stat_olc_insert_ctx_sample;
+    SST::Statistics::Statistic<uint64_t>* stat_olc_sift_parked_sample;
+    SST::Statistics::Statistic<uint64_t>* stat_olc_tail_refills;
+    SST::Statistics::Statistic<uint64_t>* stat_olc_tail_stalls;
     void sampleOccupancy();
 
     // Idle fast path: true when queues/pipeline may hold work. Recomputed at

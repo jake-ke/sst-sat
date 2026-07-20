@@ -24,6 +24,7 @@ const int LEARNERS = 8;  // Number of learners for clause learning
 const int HEAPLANES = 8;  // Number of heap lanes for parallel execution
 const int MINIMIZERS = 4;  // Number of minimizers
 const int REDUCE_WORKERS = 16;  // Parallel workers for the reduceDB streaming pass
+
 const bool OVERLAP_HEAP_INSERT = true;  // overlaps heap insertions (backtracking) with propagation
 const bool OVERLAP_HEAP_BUMP = true;  // overlaps heap bumping with clause minimization and find bt level
 const bool WRITE_BUFFER = true;  // enables write request buffering for improved performance

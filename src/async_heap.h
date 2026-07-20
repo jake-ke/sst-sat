@@ -27,7 +27,8 @@ public:
         {"clock", "Clock frequency", "1GHz"},
         {"heap_addr", "Base address for heap array (unused: passed via constructor)", "0x00000000"},
         {"indices_addr", "Base address for indices array (unused: passed via constructor)", "0x08000000"},
-        {"var_act_base_addr", "Base address for variable activity array", "0x1C0000000"}
+        {"var_act_base_addr", "Base address for variable activity array", "0x1C0000000"},
+        {"onchip_levels", "Accepted for interface parity; the classic heap is entirely off-chip", "0"}
     )
 
     SST_ELI_DOCUMENT_SUBCOMPONENT_SLOTS(
@@ -56,6 +57,14 @@ public:
     }
     size_t size() const { return heap_size; }
     bool empty() const { return heap_size == 0; }
+    // Same query surface as PipelinedHeap so the solver's rebuild logic is
+    // heap-agnostic. This in-place external-memory heap tracks positions in
+    // the indices array and percolates in place: stale copies never exist,
+    // so the rebuild triggers are inert by construction. The entire heap
+    // lives in DRAM, i.e. it is off-chip whenever nonempty.
+    size_t staleCount() const { return 0; }
+    bool rebuildQueued() const { return false; }
+    bool isOffChip() const { return heap_size > 0; }
     
     enum State { IDLE, WAIT, STEP };
     State state;
