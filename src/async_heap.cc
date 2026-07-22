@@ -217,6 +217,12 @@ void Heap::handleMem(SST::Interfaces::StandardMem::Request* req) {
 }
 
 void Heap::handleRequest(HeapReqEvent* req) {
+    if (req->op == HeapReqEvent::CLEAN_HINT) {
+        // Scheduling hint for the pipelined heap's targeted clean; the
+        // classic in-place heap has no stale copies, so it is a no-op.
+        delete req;
+        return;
+    }
     output.verbose(CALL_INFO, 7, 0, "HandleReq: op %d, arg %d\n", req->op, req->arg);
     sst_assert(state == IDLE || req->op == HeapReqEvent::INSERT || req->op == HeapReqEvent::BUMP || req->op == HeapReqEvent::DEBUG_HEAP,
         CALL_INFO, -1, "Heap is in %d with %ld workers, cannot handle request %d\n", state, heap_sources.size(), req->op);

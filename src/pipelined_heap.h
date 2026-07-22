@@ -25,7 +25,10 @@ constexpr int PIPELINE_DEPTH = 3;  // stages per level (read, compare, write)
 enum HeapOpType {
     HEAP_OP_NONE = 0,
     HEAP_OP_INSERT = 1,
-    HEAP_OP_REPLACE = 2
+    HEAP_OP_REPLACE = 2,
+    // Targeted clean: an insert-descent aimed at a verified stale slot that
+    // morphs into a replace-descent there (the overwrite is the deletion).
+    HEAP_OP_CLEAN = 3
 };
 
 struct InsReq {
@@ -64,9 +67,11 @@ struct PipelineStageOp {
     int depth;                    // Current depth in the heap (number of levels to go)
     uint32_t path;                // Normalized path bits with leading 1 at leftmost position
     uint64_t dest;                // INSERT only: global destination slot (for OLC handoff)
+    bool from_clean;              // op originated as a targeted clean (stats)
 
     PipelineStageOp() : op_type(HEAP_OP_NONE), node_idx(0), var(0),
-                        act(0.0), valid(false), ready(true), depth(0), path(0), dest(0) {}
+                        act(0.0), valid(false), ready(true), depth(0), path(0), dest(0),
+                        from_clean(false) {}
 
     void reset() {
         op_type = HEAP_OP_NONE;
@@ -78,6 +83,7 @@ struct PipelineStageOp {
         depth = 0;
         path = 0;
         dest = 0;
+        from_clean = false;
     }
 };
 
@@ -204,7 +210,12 @@ public:
         {"olc_insert_ctx_sample", "OLC insert contexts in use, sampled per handoff (Max = peak)", "count", 1},
         {"olc_sift_parked_sample", "Active + pipeline-parked sifts, sampled per park event (Max = peak)", "count", 1},
         {"olc_tail_refills", "Tail buffer slide-down line refills", "count", 1},
-        {"olc_tail_stalls", "Cycles a pop/trim waited on the tail buffer or sift subtree gate", "count", 1}
+        {"olc_tail_stalls", "Cycles a pop/trim waited on the tail buffer or sift subtree gate", "count", 1},
+        {"heap_rescales", "Activity rescale sweeps performed", "count", 1},
+        {"heap_cleans", "Targeted cleans launched (stale copies removed pre-pop)", "count", 1},
+        {"heap_clean_crossings", "Targeted cleans whose descent crossed to the OLC", "count", 1},
+        {"heap_clean_search_misses", "Mint-buffer entries dropped after a full search sweep found no copy", "count", 1},
+        {"heap_mint_drops", "Mint-buffer entries dropped on overflow", "count", 1}
     )
 
     PipelinedHeap(SST::ComponentId_t id, SST::Params& params);
@@ -231,6 +242,15 @@ public:
     // perturbation when there are crossings/deep discard-pops to remove, i.e.
     // when the heap is actually off-chip; on-chip stale cost is <= +1 level.
     bool isOffChip() const { return heap_size >= firstOffchipSlot(); }
+    // Anti-churn floor for mid-search rebuilds: a pile below ~capacity/8
+    // adds at most a level or two to percolations and cannot approach the
+    // boundary -- not worth a wipe's tie-break reshuffle. Clamped at the
+    // K=14 reference budget so oversized K (onchip_levels=0 maps to 30)
+    // keeps a finite floor instead of disabling rebuilds outright.
+    size_t rebuildStaleFloor() const {
+        int k = onchip_levels_ < 14 ? onchip_levels_ : 14;
+        return ((size_t)1 << k) >> 3;
+    }
     // True from a REBUILD's enqueue until its wipe dispatches. Solver-side
     // staleCount() reads the pre-wipe value inside that window, so rebuild
     // triggers must hold off (one 1-bit wire in hardware).
@@ -300,6 +320,12 @@ private:
     // lowest-priority prefetches and leave half the budget free.
     static const int OLC_RESERVE_SIFT = 2;
     static const int OLC_RESERVE_PREFETCH = 6;
+    // Targeted clean: corpses recorded at their bump-mint, searched in the
+    // top on-chip levels (VSIDS locality puts hot corpses there; deeper ones
+    // never obstruct pops and fall to the rebuild backstop).
+    static const int MINT_BUFFER_CAP = 32;    // (var, pre-bump act) entries
+    static const int MINT_CMP_WIDTH = 8;      // buffer entries matched per sweep
+    static const int CLEAN_SEARCH_LEVELS = 8; // levels 0..7: 511 slots, <=32 cycles
 
     uint64_t nodes_base_;                     // 64-aligned start of the node region
     uint64_t heap_capacity_;                  // total slots: 2^K-1 + node region slots
@@ -320,6 +346,28 @@ private:
     // Refill responses may return out of order; installed only when adjacent
     // to the window bottom (contiguity invariant).
     std::unordered_map<uint64_t, std::vector<uint8_t>> refill_done_;
+
+    // ---------------- targeted clean ----------------
+    std::deque<std::pair<Var, double>> mint_buffer_;  // (var, pre-bump act)
+    std::unordered_set<Var> minted_pending_;  // bump minted; act arrives at completeBump
+    bool clean_enabled_;        // set by CLEAN_HINT dispatch, cleared by tree arrivals
+    bool hit_pending_;          // search hit awaiting launch (same idle window)
+    uint64_t hit_slot_;
+    Var clean_var_;             // corpse identity for the launch verify and
+    double clean_act_;          // the at-depth assert
+    // Launch->morph window: a pop flowing behind the clean must not grab the
+    // clean's target slot as its filler (the one frontend action that can
+    // touch a deep slot ahead of the level-ordered pipeline). One comparator
+    // on the pop gate; cleared the moment the corpse is overwritten.
+    bool clean_target_armed_;
+    uint32_t search_row_;       // per-level parallel sweep cursor (4 slots/row)
+    void mintPush(Var v, double act);
+    bool treeIdle() const;
+    bool cleanWorkPending() const {
+        return clean_enabled_ && (hit_pending_ || !mint_buffer_.empty());
+    }
+    void cleanTick();
+    void launchClean();
     // Parked refill snapshots go stale if a node write lands between the
     // refill response and its install; every node-region writer must patch
     // them (<= TAIL_REFILLS_MAX+1 entries: a fixed comparator bank in HW).
@@ -446,6 +494,11 @@ private:
     SST::Statistics::Statistic<uint64_t>* stat_stale_created;
     SST::Statistics::Statistic<uint64_t>* stat_stale_pops;
     SST::Statistics::Statistic<uint64_t>* stat_tail_trims;
+    SST::Statistics::Statistic<uint64_t>* stat_rescales;
+    SST::Statistics::Statistic<uint64_t>* stat_cleans;
+    SST::Statistics::Statistic<uint64_t>* stat_clean_crossings;
+    SST::Statistics::Statistic<uint64_t>* stat_clean_search_misses;
+    SST::Statistics::Statistic<uint64_t>* stat_mint_drops;
     SST::Statistics::Statistic<uint64_t>* stat_purge_pops;
     SST::Statistics::Statistic<uint64_t>* stat_bump_unassigned;
     SST::Statistics::Statistic<uint64_t>* stat_rebuilds;

@@ -49,22 +49,22 @@ def parse_args():
                         default="stats.csv",
                         help='Output file for statistics')
     parser.add_argument('--l1-size', dest='l1_size',
-                        type=str, default="64KiB",
+                        type=str, default="128KiB",
                         help='L1 cache size')
     parser.add_argument('--l1-latency', dest='l1_latency',
                         type=str, default="1",
                         help='L1 cache latency cycles (1GHz)')
     parser.add_argument('--l1-bw', dest='l1_bw',
-                        type=str, default="-1",
+                        type=str, default="4",
                         help='L1 cache bandwidth (max requests per cycle)')
     parser.add_argument('--l2-size', dest='l2_size',
                         type=str, default="24MiB",
                         help='L2 cache size')
     parser.add_argument('--l2-latency', dest='l2_latency',
-                        type=str, default="100",
+                        type=str, default="32",
                         help='L2 cache latency cycles (1GHz)')
     parser.add_argument('--l2-bw', dest='l2_bw',
-                        type=str, default="2",
+                        type=str, default="8",
                         help='L2 cache bandwidth (max requests per cycle)')
     parser.add_argument('--l2-width', dest='l2_width',
                         type=str, default="64B",
@@ -567,6 +567,11 @@ if not args.classic_heap:
         "olc_sift_parked_sample",
         "olc_tail_refills",
         "olc_tail_stalls",
+    "heap_rescales",
+    "heap_cleans",
+    "heap_clean_crossings",
+    "heap_clean_search_misses",
+    "heap_mint_drops",
     ], {
         "type": "sst.AccumulatorStatistic",
         "rate": "1s"

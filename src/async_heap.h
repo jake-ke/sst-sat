@@ -63,6 +63,8 @@ public:
     // so the rebuild triggers are inert by construction. The entire heap
     // lives in DRAM, i.e. it is off-chip whenever nonempty.
     size_t staleCount() const { return 0; }
+    size_t liveCount() const { return heap_size; }  // every copy is live
+    size_t rebuildStaleFloor() const { return 0; }
     bool rebuildQueued() const { return false; }
     bool isOffChip() const { return heap_size > 0; }
     

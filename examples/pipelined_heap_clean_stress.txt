@@ -1,0 +1,167 @@
+vars 40
+# Targeted-clean stress. Commands: insert/bump <var>, remove, debug,
+# wait <cycles>, hint, rebuild. All 40 vars start resident at act 0.
+# Cleans launch only after a hint and only in tree-idle windows; DEBUG_HEAP
+# verifies invariants after every clean storm.
+
+# --- round 1: mint a burst of corpses, then open a cleaning window ---
+bump 3
+bump 5
+bump 7
+bump 11
+bump 13
+bump 17
+hint
+wait 120
+debug
+
+# Reinsert the bumped vars: fresh twins join any corpses the cleans missed.
+insert 3
+insert 5
+insert 7
+insert 11
+insert 13
+insert 17
+hint
+wait 120
+debug
+
+# --- round 2: corpses of vars with fresh twins (act disambiguation) ---
+bump 3
+bump 5
+insert 3
+insert 5
+bump 3
+insert 3
+hint
+wait 200
+debug
+
+# Pops interleaved with cleaning windows: pops must still return the max
+# fresh copies; cleans must never touch a live node.
+remove
+remove
+hint
+wait 100
+remove
+remove
+debug
+
+# --- round 3: deep churn, many corpses, cleans + trims + purges mixed ---
+bump 2
+bump 4
+bump 6
+bump 8
+bump 10
+bump 12
+bump 14
+bump 16
+bump 18
+bump 20
+hint
+wait 60
+insert 2
+insert 4
+insert 6
+insert 8
+insert 10
+insert 12
+insert 14
+insert 16
+insert 18
+insert 20
+bump 2
+bump 4
+bump 6
+hint
+wait 300
+debug
+
+# Immediate pop after a short window: a launched clean must coexist with the
+# pop (rolling bubble), never corrupt it.
+bump 22
+bump 24
+hint
+wait 8
+remove
+remove
+remove
+wait 60
+debug
+
+# --- round 4: rebuild wipes corpses and the mint buffer ---
+bump 26
+bump 28
+bump 30
+rebuild
+hint
+wait 150
+debug
+
+# --- round 5: overflow the mint buffer (cap 32) ---
+insert 22
+insert 24
+insert 26
+insert 28
+insert 30
+bump 1
+bump 2
+bump 3
+bump 4
+bump 5
+bump 6
+bump 7
+bump 8
+bump 9
+bump 10
+bump 11
+bump 12
+bump 13
+bump 14
+bump 15
+bump 16
+bump 17
+bump 18
+bump 19
+bump 20
+bump 21
+bump 22
+bump 23
+bump 24
+bump 25
+bump 26
+bump 27
+bump 28
+bump 29
+bump 30
+bump 31
+bump 32
+bump 33
+bump 34
+bump 35
+bump 36
+hint
+wait 500
+debug
+
+# Drain everything: pops discard whatever corpses remain; the golden model
+# treats cleaned copies as purged-any-time.
+insert 1
+insert 2
+insert 3
+insert 4
+insert 5
+hint
+wait 100
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+wait 100
+debug

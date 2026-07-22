@@ -51,7 +51,7 @@ public:
 
 private:
     struct Step {
-        enum class Type { Insert, Remove, Bump, Debug, Wait, Rebuild };
+        enum class Type { Insert, Remove, Bump, Debug, Wait, Rebuild, Hint };
         Type type;
         int var;   // var id for Insert/Bump; wait cycles for Wait
     };

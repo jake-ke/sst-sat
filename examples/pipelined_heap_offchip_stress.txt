@@ -1,0 +1,272 @@
+vars 100
+# Off-chip level controller stress (build with -DONCHIP_HEAP_LEVELS=3).
+# 100 vars: slots 8..100+ live off-chip; heap grows past 24 node lines
+# (window W=16) so eviction/refill trigger; pop storms chase sifts;
+# mixed phases exercise sift<->insert exclusion and parking.
+
+# A: bump 20 resident vars -> stale copies pile up, many off-chip
+bump 1
+bump 2
+bump 3
+bump 4
+bump 5
+bump 6
+bump 7
+bump 8
+bump 9
+bump 10
+bump 11
+bump 12
+bump 13
+bump 14
+bump 15
+bump 16
+bump 17
+bump 18
+bump 19
+bump 20
+wait 60
+debug
+
+# B: reinsert burst -> duplicates deepen the heap (ctx pipelining)
+insert 1
+insert 2
+insert 3
+insert 4
+insert 5
+insert 6
+insert 7
+insert 8
+insert 9
+insert 10
+insert 11
+insert 12
+insert 13
+insert 14
+insert 15
+insert 16
+insert 17
+insert 18
+insert 19
+insert 20
+wait 80
+debug
+
+# C: 45 back-to-back pops -> sift chains + tail shrink + refills
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+wait 120
+debug
+
+# D: interleaved bump/insert/remove churn (phase transitions)
+bump 6
+insert 6
+bump 11
+insert 11
+bump 16
+insert 16
+remove
+bump 21
+insert 21
+bump 26
+insert 26
+insert 36
+bump 31
+insert 31
+remove
+bump 36
+insert 36
+bump 41
+insert 41
+bump 46
+insert 46
+remove
+bump 51
+insert 51
+insert 71
+bump 56
+insert 56
+bump 61
+insert 61
+remove
+bump 66
+insert 66
+bump 71
+insert 71
+bump 76
+insert 76
+remove
+insert 6
+wait 100
+debug
+
+# E: rebuild wipe + full reinsert wave over the boundary
+rebuild
+wait 200
+debug
+
+# F: drain everything (crossing back on-chip), then empty pops
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+wait 60
+debug
+remove
+remove
+wait 20
+debug

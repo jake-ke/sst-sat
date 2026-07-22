@@ -1619,6 +1619,9 @@ void SATSolver::execBacktrack() {
         next_state = PROPAGATE;
     }
 #endif
+    // Unwind inserts (and any rebuild wave) are enqueued: propagation of the
+    // learnt follows, so the tree goes quiet once they drain.
+    order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::CLEAN_HINT));
 }
 
 void SATSolver::execReduce() {
@@ -1667,6 +1670,7 @@ void SATSolver::execRestart() {
         next_state = PROPAGATE;
     }
 #endif
+    order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::CLEAN_HINT));
 }
 
 void SATSolver::execDecide() {
@@ -1685,6 +1689,9 @@ void SATSolver::execDecide() {
         return;
     }
     in_decision = false;
+    // Decision accepted: propagation follows, the heap tree goes quiet. The
+    // hint rides the FIFO, so it dispatches once this decide's pops drained.
+    order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::CLEAN_HINT));
     state = PROPAGATE;
 }
 
@@ -3014,19 +3021,24 @@ Lit SATSolver::peekBranchVariable() {
     return mkLit(next, polarity[next]);
 }
 
-// A rebuild pays only when the heap extends off-chip (there are crossings and
-// deep stale-discard pops to remove); on-chip stale copies cost at most one
-// extra percolation level, never worth a full rebuild's tie-break reshuffle.
-// staleCount > num_vars preserves the amortization: a rebuild costs ~num_vars
-// inserts and can only fire after >= num_vars stale creations, i.e. <= ~1
-// cycle per stale-creating op at any instance size. rebuildQueued() blocks
-// re-fires while a queued wipe is undispatched (solver-side staleCount()
-// reads the pre-wipe value until then). Inert for the classic heap, whose
-// in-place updates never create stales.
+// Two-term trigger, each with a distinct job:
+//  - staleCount > liveCount (instance-relative): fire only when garbage
+//    outweighs the live set, so every percolation is carrying majority-dead
+//    weight and the wave (one insert per live var) costs less than the
+//    garbage it wipes -- scale-free amortization, governs on big instances.
+//  - staleCount > rebuildStaleFloor() (~capacity/8, architectural): piles
+//    far below the SRAM budget add at most a level or two and cannot reach
+//    the boundary; skip the reshuffle. A fractional floor, NOT a boundary
+//    test: an isOffChip() gate here created a pile-pinned-at-the-boundary
+//    attractor (equilibrium ~15k stales, sporadic crossings) because no
+//    trigger could fire below 2^K.
+// rebuildQueued() blocks re-fires while a queued wipe is undispatched
+// (solver-side staleCount() reads the pre-wipe value until then). Inert for
+// the classic heap: in-place updates never create stales.
 bool SATSolver::heapRebuildDue() const {
     return !order_heap->rebuildQueued()
-        && order_heap->staleCount() > (size_t)num_vars
-        && order_heap->isOffChip();
+        && order_heap->staleCount() > order_heap->liveCount()
+        && order_heap->staleCount() > order_heap->rebuildStaleFloor();
 }
 
 // Completes a rebuild armed before a backtrack: ends the suppression window

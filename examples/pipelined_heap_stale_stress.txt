@@ -1,0 +1,90 @@
+vars 12
+# Stale-copy stress for the inheap-bit design.
+# Commands: insert <var>, bump <var>, remove, debug, wait <cycles>
+# All 12 vars start in the heap with activity 0 and inheap=1.
+
+# Bump resident vars: each clears its bit and orphans a stale copy at act 0.
+bump 3
+bump 5
+bump 7
+wait 20
+debug
+
+# Re-insert bumped vars: fresh copies (act 1) join their stale copies (act 0).
+insert 3
+insert 5
+insert 7
+wait 20
+debug
+
+# Pops must return the fresh copies (act 1) before anything stale.
+remove
+remove
+remove
+wait 20
+debug
+
+# Repeated bump/insert cycles pile up duplicates for one var.
+insert 3
+bump 3
+insert 3
+bump 3
+insert 3
+wait 20
+debug
+
+# Bump-then-insert same var back-to-back: insert must stall behind the bump
+# RMW and read the post-bump activity.
+bump 9
+insert 9
+bump 9
+insert 9
+wait 20
+debug
+
+# Idle window: tail-trim and root-peek purge get time to clean stale copies.
+# Var 3 holds the highest activity (the root); bumping it makes the root
+# stale, which the idle purge must discard.
+bump 1
+bump 2
+bump 4
+bump 3
+wait 200
+debug
+
+# Rebuild: manufacture stale copies, wipe + reinsert all vars with current
+# activities, then verify invariants and max-ordering afterward.
+bump 5
+bump 7
+insert 5
+bump 5
+rebuild
+wait 40
+debug
+remove
+remove
+insert 1
+insert 2
+
+# Drain everything; empty heap must respond var_Undef.
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+remove
+wait 50
+debug
+remove

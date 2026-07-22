@@ -138,7 +138,12 @@ public:
 // Events for heap operations
 class HeapReqEvent : public SST::Event {
 public:
-    enum OpType { INSERT, REMOVE_MAX, READ, BUMP, DEBUG_HEAP, REBUILD };
+    enum OpType { INSERT, REMOVE_MAX, READ, BUMP, DEBUG_HEAP, REBUILD,
+                  // Scheduling hint, sent by the solver on entering
+                  // propagation; rides the FIFO so it dispatches exactly when
+                  // the preceding burst has drained. Enables targeted-clean
+                  // launches; any tree request arrival disables them.
+                  CLEAN_HINT };
     OpType op;
     int arg;
     HeapReqEvent() : op(HeapReqEvent::INSERT), arg(0) {}

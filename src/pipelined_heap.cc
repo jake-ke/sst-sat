@@ -29,6 +29,13 @@ PipelinedHeap::PipelinedHeap(
     burst_inflight_(0),
     purge_suppress_(false),
     rebuild_queued_(false),
+    clean_enabled_(false),
+    hit_pending_(false),
+    hit_slot_(0),
+    clean_var_(var_Undef),
+    clean_act_(-1.0),
+    clean_target_armed_(false),
+    search_row_(0),
     debug_heap_pending(false),
     debug_heap_errors(0) {
 
@@ -66,6 +73,11 @@ PipelinedHeap::PipelinedHeap(
     stat_stale_created   = registerStatistic<uint64_t>("heap_stale_created");
     stat_stale_pops      = registerStatistic<uint64_t>("heap_stale_pops");
     stat_tail_trims      = registerStatistic<uint64_t>("heap_tail_trims");
+    stat_rescales        = registerStatistic<uint64_t>("heap_rescales");
+    stat_cleans          = registerStatistic<uint64_t>("heap_cleans");
+    stat_clean_crossings = registerStatistic<uint64_t>("heap_clean_crossings");
+    stat_clean_search_misses = registerStatistic<uint64_t>("heap_clean_search_misses");
+    stat_mint_drops      = registerStatistic<uint64_t>("heap_mint_drops");
     stat_purge_pops      = registerStatistic<uint64_t>("heap_purge_pops");
     stat_bump_unassigned = registerStatistic<uint64_t>("heap_bump_unassigned");
     stat_rebuilds        = registerStatistic<uint64_t>("heap_rebuilds");
@@ -255,6 +267,10 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                         inheap_[v] = false;
                         inheap_count_--;
                         stat_stale_created->addData(1);
+                        // Record the mint; the corpse's frozen act (needed to
+                        // tell it from a later-reinserted fresh twin) arrives
+                        // with the bump's RMW at completeBump.
+                        minted_pending_.insert(v);
                         sampleOccupancy();
                     }
                     getAct(v, true);
@@ -290,7 +306,8 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                 // slot the grab will take.
                 if (!rescale && active_inserts == 0 && req_to_op.empty()
                     && insert_queue.empty() && canStartOperation(HEAP_OP_REPLACE)
-                    && popGateOk()) {
+                    && popGateOk()
+                    && !(clean_target_armed_ && heap_size == hit_slot_)) {
                     startOperation(HEAP_OP_REPLACE, 0, 0);
                     request_queue.pop_front();
                 }
@@ -326,6 +343,9 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                     std::fill(inheap_.begin(), inheap_.end(), false);
                     inheap_count_ = 0;
                     rebuild_queued_ = false;
+                    mint_buffer_.clear();  // every corpse just vanished
+                    hit_pending_ = false;
+                    clean_target_armed_ = false;
                     stat_rebuilds->addData(1);
                     sampleOccupancy();
                     request_queue.pop_front();
@@ -361,6 +381,13 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                     }
                     request_queue.pop_front();
                 }
+                break;
+            }
+            case HeapReqEvent::CLEAN_HINT: {
+                // The hint dispatching means every request the solver sent
+                // before it has drained past this point: the burst is over.
+                clean_enabled_ = true;
+                request_queue.pop_front();
                 break;
             }
             default: {
@@ -407,6 +434,8 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
         if (rescale_onchip_cycles_ == 0) maybeFinishRescale();
     }
 
+    if (cleanWorkPending()) cleanTick();
+
     advancePipeline();
 
     // Cache the idle state so the (dominant) idle ticks cost O(1) instead of
@@ -423,7 +452,7 @@ bool PipelinedHeap::allIdle() const {
     return request_queue.empty() && insert_queue.empty() && req_to_op.empty()
         && bumps_inflight_.empty() && !rescale && !debug_heap_pending
         && active_inserts == 0 && isPipelineIdle() && olcIdle()
-        && !idleWorkAvailable();
+        && !idleWorkAvailable() && !cleanWorkPending();
 }
 
 bool PipelinedHeap::idleWorkAvailable() const {
@@ -576,7 +605,10 @@ void PipelinedHeap::startOperation(HeapOpType op, Var arg, double activity) {
 }
 
 void PipelinedHeap::executeStageOp(int level, int stage) {
-    if (stages[level][stage].op_type == HEAP_OP_INSERT) {
+    if (stages[level][stage].op_type == HEAP_OP_INSERT
+        || stages[level][stage].op_type == HEAP_OP_CLEAN) {
+        // A clean is an insert-descent toward its corpse slot until it
+        // arrives; handleStageInsert morphs it into a replace there.
         handleStageInsert(level, stage);
     } else if (stages[level][stage].op_type == HEAP_OP_REPLACE) {
         handleStageReplace(level, stage);
@@ -629,6 +661,7 @@ void PipelinedHeap::handleStageInsert(int level, int stage) {
                 stages[level+1][STAGE_READ].depth = curr_stage.depth;
                 stages[level+1][STAGE_READ].path = next_path;
                 stages[level+1][STAGE_READ].dest = curr_stage.dest;
+                stages[level+1][STAGE_READ].from_clean = curr_stage.from_clean;
                 stages[level+1][STAGE_READ].valid = true;
                 stages[level+1][STAGE_READ].ready = false;
                 output.verbose(CALL_INFO, 6, 0, "INSERT[L%d-READ]: inducing L%d node %d, %s child\n",
@@ -642,6 +675,7 @@ void PipelinedHeap::handleStageInsert(int level, int stage) {
             stages[level][STAGE_COMPARE].depth = curr_stage.depth;
             stages[level][STAGE_COMPARE].path = curr_stage.path;
             stages[level][STAGE_COMPARE].dest = curr_stage.dest;
+            stages[level][STAGE_COMPARE].from_clean = curr_stage.from_clean;
             if (level == 0) {
                 // for root level, always valid
                 stages[level][STAGE_COMPARE].valid = true;
@@ -657,6 +691,24 @@ void PipelinedHeap::handleStageInsert(int level, int stage) {
         }
 
         case STAGE_COMPARE: {
+            if (curr_stage.op_type == HEAP_OP_CLEAN && level == curr_stage.depth) {
+                // Arrived at the corpse slot. Same-window launch + in-order
+                // pipeline (younger ops stay above) guarantee it is still
+                // here; overwriting it IS the deletion. Continue as a
+                // replace-descent from this slot (compare-chain only: no
+                // speculative READs exist below a morph, and the replace
+                // compare reads children directly).
+                sst_assert(getVar(level, node_idx) == clean_var_
+                           && getActivity(level, node_idx) == clean_act_,
+                    CALL_INFO, -1,
+                    "CLEAN verify failed at L%d idx %d: found var %d (%.17g), expected var %d (%.17g)\n",
+                    level, node_idx, getVar(level, node_idx),
+                    getActivity(level, node_idx), clean_var_, clean_act_);
+                clean_target_armed_ = false;
+                curr_stage.op_type = HEAP_OP_REPLACE;
+                handleStageReplace(level, stage);
+                break;
+            }
             bool descends = level < curr_stage.depth;
             bool offchip_next = descends && level == onchip_levels_ - 1;
 
@@ -834,6 +886,7 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
                 // node_idx, var and activity will be updated in COMPARE stage
                 stages[level+1][STAGE_READ].op_type = curr_stage.op_type;
                 stages[level+1][STAGE_READ].node_idx = child_idx;
+                stages[level+1][STAGE_READ].from_clean = curr_stage.from_clean;
                 stages[level+1][STAGE_READ].valid = true;
                 stages[level+1][STAGE_READ].ready = false;
                 output.verbose(CALL_INFO, 6, 0, "REPLACE[L%d-READ]: inducing L%d children of node %d\n",
@@ -907,6 +960,7 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
                         sampleSiftParked();
                         break;
                     }
+                    if (curr_stage.from_clean) stat_clean_crossings->addData(1);
                     olcStartSift(s, repl_var, repl_act);
                     output.verbose(CALL_INFO, 6, 0,
                         "REPLACE[L%d-COMP]: handing off slot %lu var %d (%.2f) to OLC\n",
@@ -963,7 +1017,11 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
                 stages[level][STAGE_WRITE].valid = true;
                 stages[level][STAGE_WRITE].ready = true;
 
-                // Continue replacement to next level with the child that was chosen
+                // Continue replacement to next level with the child that was
+                // chosen. op_type/from_clean are copied explicitly: below a
+                // morphed clean no induced READ pre-staged this compare.
+                stages[level+1][STAGE_COMPARE].op_type = curr_stage.op_type;
+                stages[level+1][STAGE_COMPARE].from_clean = curr_stage.from_clean;
                 stages[level+1][STAGE_COMPARE].node_idx = max_child_idx;
                 stages[level+1][STAGE_COMPARE].var = repl_var;
                 stages[level+1][STAGE_COMPARE].act = repl_act;
@@ -1035,6 +1093,11 @@ void PipelinedHeap::handleRequest(HeapReqEvent* req) {
         && req->arg < (int)assigned_ref_->size() && !(*assigned_ref_)[req->arg])
         stat_bump_unassigned->addData(1);
     if (req->op == HeapReqEvent::REBUILD) rebuild_queued_ = true;
+    // Any tree request closes the cleaning window (bumps and the hint do not).
+    if (req->op != HeapReqEvent::BUMP && req->op != HeapReqEvent::CLEAN_HINT) {
+        clean_enabled_ = false;
+        hit_pending_ = false;
+    }
     request_queue.emplace_back(req->op, req->arg);
     delete req;
     maybe_active_ = true;
@@ -1062,6 +1125,7 @@ void PipelinedHeap::completeBump(Var v, double act) {
     }
     setAct(v, act + *var_inc_ptr);
     bumps_inflight_.erase(v);
+    if (minted_pending_.erase(v)) mintPush(v, act);
 }
 
 void PipelinedHeap::startRescaleSweep() {
@@ -1082,6 +1146,9 @@ void PipelinedHeap::startRescaleSweep() {
     // Parked refill snapshots hold pre-scale acts the DRAM sweep cannot
     // reach; installing one post-sweep would resurrect unscaled values.
     refill_done_.clear();
+    // Mint entries mirror corpse acts, which the sweep scales.
+    for (auto& m : mint_buffer_) m.second *= 1e-100;
+    stat_rescales->addData(1);
     // Queued-but-unstarted inserts carry pre-scale activities.
     for (auto& e : insert_queue) e.activity *= 1e-100;
 
@@ -1122,6 +1189,8 @@ void PipelinedHeap::finishRescale() {
         double act = s.act * 1e-100 + *var_inc_ptr;
         setAct(s.var, act);
         bumps_inflight_.erase(s.var);
+        // The corpse in the heap was swept to act*1e-100; record that value.
+        if (minted_pending_.erase(s.var)) mintPush(s.var, s.act * 1e-100);
     }
     rescale_stash_.clear();
     rescale = false;
@@ -2001,6 +2070,162 @@ int PipelinedHeap::lineReadInstant(uint64_t line, OlcNode* out4) {
         return 1;
     }
     return 0;
+}
+
+// ---------------- targeted clean ----------------
+
+void PipelinedHeap::mintPush(Var v, double act) {
+    if (mint_buffer_.size() >= (size_t)MINT_BUFFER_CAP) {
+        mint_buffer_.pop_front();  // drop-oldest: newest mints are the hottest
+        stat_mint_drops->addData(1);
+    }
+    mint_buffer_.emplace_back(v, act);
+}
+
+// Tree-idle: nothing that touches the heap tree is queued or in flight. Bump
+// machinery (RMWs, the mint buffer, the bitmap) is deliberately excluded --
+// bumps and cleans share no state, so cleaning windows span propagation,
+// analyze and minimize.
+bool PipelinedHeap::treeIdle() const {
+    // active_inserts first: isPipelineIdle()'s internal consistency assert
+    // (empty stages => no active inserts) only holds once OLC insert
+    // contexts are excluded, same as every other call site.
+    if (active_inserts != 0 || !insert_queue.empty()) return false;
+    if (rescale || debug_heap_pending) return false;
+    if (!isPipelineIdle() || !olcIdle()) return false;
+    for (const auto& kv : req_to_op)
+        if (kv.second.type == PendingMemOpType::INSERT_FETCH) return false;
+    for (const auto& r : request_queue)
+        if (r.op != HeapReqEvent::BUMP && r.op != HeapReqEvent::CLEAN_HINT) return false;
+    return true;
+}
+
+// One cycle of the clean engine: either try to launch a pending hit, or
+// advance the per-level parallel sweep one row (4 slots per level per cycle
+// on the existing wide SRAM rows, all levels in parallel). Search state
+// mutates nothing, so tree activity simply resets it.
+void PipelinedHeap::cleanTick() {
+    if (!treeIdle()) {
+        search_row_ = 0;
+        hit_pending_ = false;  // same-window rule: never launch a stale hit
+        return;
+    }
+    if (hit_pending_) {
+        launchClean();
+        return;
+    }
+
+    int max_level = std::min(CLEAN_SEARCH_LEVELS, onchip_levels_);
+    int cmp_width = std::min((size_t)MINT_CMP_WIDTH, mint_buffer_.size());
+    bool any_rows_left = false;
+    for (int level = 0; level < max_level; level++) {
+        size_t level_base = ((size_t)1 << level) - 1;
+        if (heap_size <= level_base) break;
+        size_t occupied = std::min((size_t)1 << level, heap_size - level_base);
+        size_t idx0 = (size_t)search_row_ * 4;
+        if (idx0 >= occupied) continue;
+        if (idx0 + 4 < occupied) any_rows_left = true;
+        size_t idx_end = std::min(idx0 + 4, occupied);
+        for (size_t i = idx0; i < idx_end; i++) {
+            Var w = heap_vars[level][i];
+            if (w == var_Undef) continue;
+            for (int m = 0; m < cmp_width; m++) {
+                if (mint_buffer_[m].first == w
+                    && mint_buffer_[m].second == heap_activities[level][i]) {
+                    hit_pending_ = true;
+                    hit_slot_ = ((uint64_t)1 << level) | i;
+                    clean_var_ = w;
+                    clean_act_ = mint_buffer_[m].second;
+                    mint_buffer_.erase(mint_buffer_.begin() + m);
+                    search_row_ = 0;
+                    return;  // one hit per sweep; launch next cycle
+                }
+            }
+        }
+    }
+    search_row_++;
+    if (!any_rows_left) {
+        // Sweep complete, no hit: none of the matched entries has a copy in
+        // the searched region (gone, migrated deeper, or displaced). Drop
+        // them; the pop-discard / trim / rebuild backstops own the rest.
+        for (int m = 0; m < cmp_width; m++) mint_buffer_.pop_front();
+        stat_clean_search_misses->addData(cmp_width);
+        search_row_ = 0;
+    }
+}
+
+void PipelinedHeap::launchClean() {
+    hit_pending_ = false;
+    // Launch-time verify (cheap read): idle-time purge/trim may have removed
+    // or moved the corpse between hit and launch. Post-launch the corpse is
+    // untouchable until the clean reaches it (younger ops stay above), so the
+    // at-depth check is an assert.
+    int level = priority_encoder((uint32_t)hit_slot_);
+    int idx = (int)(hit_slot_ & ~((uint64_t)1 << level));
+    if (hit_slot_ > heap_size || heap_vars[level][idx] != clean_var_
+        || heap_activities[level][idx] != clean_act_) return;
+    if (!stages[0][STAGE_READ].ready) return;  // retry next tick
+
+    // Corpse at the tail: removal is a pure trim, no percolation.
+    if (hit_slot_ == heap_size) {
+        uint32_t last_level, last_idx;
+        lastSlot(last_level, last_idx);
+        if (last_level >= (uint32_t)onchip_levels_) {
+            TailLine* tl = tailLineFor(heap_size);
+            if (!tl || !tl->slot_valid[(heap_size - lineBaseSlot(tl->line)) & 3]) return;
+            tl->node[(heap_size - lineBaseSlot(tl->line)) & 3] = OlcNode();
+            tl->dirty = true;
+        } else {
+            setVar(last_level, last_idx, var_Undef);
+            setActivity(last_level, last_idx, -1.0);
+        }
+        heap_size--;
+        tailDropAbove(heap_size);
+        sampleOccupancy();
+        stat_cleans->addData(1);
+        output.verbose(CALL_INFO, 5, 0, "CLEAN: trimmed corpse var %d at tail slot %lu\n", clean_var_, hit_slot_);
+        return;
+    }
+
+    // Grab the tail as the filler (tree-idle: no stage bypasses can apply).
+    Var fill_var;
+    double fill_act;
+    uint32_t last_level, last_idx;
+    lastSlot(last_level, last_idx);
+    if (last_level >= (uint32_t)onchip_levels_) {
+        if (!tailSlotReady(heap_size)) return;  // refill under way; retry
+        OlcNode n = tailGrab(heap_size);
+        fill_var = n.var;
+        fill_act = n.act;
+    } else {
+        fill_var = getVar(last_level, last_idx);
+        fill_act = getActivity(last_level, last_idx);
+        setVar(last_level, last_idx, var_Undef);
+        setActivity(last_level, last_idx, -1.0);
+    }
+    sst_assert(fill_var != var_Undef, CALL_INFO, -1, "Clean grabbed an empty tail\n");
+    heap_size--;
+    tailDropAbove(heap_size);
+    sampleOccupancy();
+
+    clean_target_armed_ = true;
+    uint32_t target_level = (uint32_t)level;
+    uint32_t path = (uint32_t)hit_slot_ << (31 - target_level);
+    stages[0][STAGE_READ].op_type = HEAP_OP_CLEAN;
+    stages[0][STAGE_READ].node_idx = 0;
+    stages[0][STAGE_READ].var = fill_var;
+    stages[0][STAGE_READ].act = fill_act;
+    stages[0][STAGE_READ].depth = (int)target_level;
+    stages[0][STAGE_READ].path = path << 1;
+    stages[0][STAGE_READ].dest = hit_slot_;
+    stages[0][STAGE_READ].from_clean = true;
+    stages[0][STAGE_READ].valid = true;
+    stages[0][STAGE_READ].ready = false;
+    stat_cleans->addData(1);
+    output.verbose(CALL_INFO, 5, 0,
+        "CLEAN: launched for corpse var %d (%.2f) at slot %lu (L%d), filler var %d (%.2f)\n",
+        clean_var_, clean_act_, hit_slot_, level, fill_var, fill_act);
+    maybe_active_ = true;
 }
 
 void PipelinedHeap::patchParkedRefill(uint64_t line, int slot_off, const uint8_t* src16) {

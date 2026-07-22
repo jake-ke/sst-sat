@@ -184,6 +184,10 @@ void PipelinedHeapTest::executeStep(const Step& step) {
             wait_cycles = step.var;
             output.verbose(CALL_INFO, 2, 0, "Waiting %d cycles (idle-time cleanup window)\n", step.var);
             break;
+        case Step::Type::Hint:
+            heap->handleRequest(new HeapReqEvent(HeapReqEvent::CLEAN_HINT));
+            output.verbose(CALL_INFO, 2, 0, "Issued CLEAN_HINT\n");
+            break;
         case Step::Type::Rebuild:
             // Mimic the solver's rebuild-restart: wipe, then reinsert every
             // tracked var (the harness has no assignment state, so all vars
@@ -441,6 +445,12 @@ void PipelinedHeapTest::loadScriptFromFile(const std::string& path) {
             step.var = 0;
         } else if (cmd_lower == "rebuild") {
             step.type = Step::Type::Rebuild;
+            step.var = 0;
+        } else if (cmd_lower == "hint") {
+            // Enables targeted-clean launches (the solver sends this when it
+            // enters propagation); golden state is unaffected -- cleans only
+            // remove copies the model already treats as purgeable-any-time.
+            step.type = Step::Type::Hint;
             step.var = 0;
         } else if (cmd_lower == "wait") {
             std::string count_token;

@@ -78,6 +78,11 @@ sst.enableStatisticsForComponentType("satsolver.PipelinedHeap", [
     "olc_node_reads", "olc_node_writes", "olc_boundary_crossings",
     "olc_insert_ctx_sample", "olc_sift_parked_sample",
     "olc_tail_refills", "olc_tail_stalls",
+    "heap_rescales",
+    "heap_cleans",
+    "heap_clean_crossings",
+    "heap_clean_search_misses",
+    "heap_mint_drops",
 ], {"type": "sst.AccumulatorStatistic", "rate": "0ns"})
 
 print("Running PipelinedHeap manual test (verbose={}, var_inc={})".format(
