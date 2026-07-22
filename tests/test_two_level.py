@@ -69,6 +69,18 @@ def parse_args():
     parser.add_argument('--l2-width', dest='l2_width',
                         type=str, default="64B",
                         help='L2 cache link width (request/response)')
+    parser.add_argument('--l1-banks', dest='l1_banks',
+                        type=str, default="4",
+                        help='L1 cache banks (1 access/bank/cycle; 0 = no bank limit)')
+    parser.add_argument('--l2-banks', dest='l2_banks',
+                        type=str, default="8",
+                        help='L2 cache banks (1 access/bank/cycle; 0 = no bank limit)')
+    parser.add_argument('--l1-mshr', dest='l1_mshr',
+                        type=str, default="32",
+                        help='L1 cache MSHR entries (max outstanding misses; -1 = huge)')
+    parser.add_argument('--l2-mshr', dest='l2_mshr',
+                        type=str, default="64",
+                        help='L2 cache MSHR entries (max outstanding misses; -1 = huge)')
     parser.add_argument('--mem-latency', dest='mem_latency',
                         type=str, default="100ns",
                         help='External Memory latency if using simpleMem')
@@ -193,6 +205,8 @@ print(f"L1 cache bandwidth: {args.l1_bw} requests/cycle")
 print(f"L2 cache size: {args.l2_size}")
 print(f"L2 cache latency: {args.l2_latency} cycles")
 print(f"L2 cache bandwidth: {args.l2_bw} requests/cycle")
+print(f"L1 banks: {args.l1_banks}, MSHR entries: {args.l1_mshr}")
+print(f"L2 banks: {args.l2_banks}, MSHR entries: {args.l2_mshr}")
 if (args.ram2_config):
     print(f"Using ramulator2 config: {args.ram2_config}")
 else:
@@ -311,11 +325,13 @@ global_cache.addParams({
     "associativity"      : "8",
     "access_latency_cycles" : args.l1_latency,
     "max_requests_per_cycle" : args.l1_bw,
+    "banks"              : args.l1_banks,
+    "mshr_num_entries"   : args.l1_mshr,
     "request_link_width" : "64B",
     "response_link_width" : "64B",
     "L1"                 : "1",
     "replacement_policy" : "lru",
-    "coherence_protocol" : "MSI",
+    "coherence_protocol" : "none",
     "prefetch_delay_cycles" : "0",
     "statistics" : "1",           # Enable statistics for cache
     "collect_stats" : "1"         # Make sure stats are collected
@@ -359,11 +375,14 @@ global_l2cache.addParams({
     "associativity"      : "16",
     "access_latency_cycles" : args.l2_latency,
     "max_requests_per_cycle" : args.l2_bw,
+    "banks"              : args.l2_banks,
+    "mshr_num_entries"   : args.l2_mshr,
     "request_link_width" : args.l2_width,
     "response_link_width" : args.l2_width,
     "L1"                 : "0",
+    "cache_type"         : "noninclusive",
     "replacement_policy" : "lru",
-    "coherence_protocol" : "MSI",
+    "coherence_protocol" : "none",
     "verbose"            : "0",
     "debug" : "0",
     "debug_level" : "10",
@@ -396,6 +415,10 @@ global_memctrl.addParams({
     "addr_range_start" : "0",
     "addr_range_end" : addr_range_end,
     "mem_size" : mem_size_str,
+    # Acknowledge writebacks so the non-coherent (noninclusive) L2 can serialize a
+    # same-line read behind an in-flight dirty writeback (fixes the L2->memory
+    # eviction race under coherence_protocol=none).
+    "writeback_acks" : "1",
 })
 
 # Create memory backend for global operations
@@ -452,12 +475,13 @@ else:
         "cache_line_size"    : "64",
         "associativity"      : "8",
         "access_latency_cycles" : args.l1_latency,
-        "mshr_num_entries"   : "32",
+        "max_requests_per_cycle" : args.l1_bw,
+        "mshr_num_entries"   : args.l1_mshr,
         "request_link_width" : "64B",
         "response_link_width" : "64B",
         "L1"                 : "1",
         "replacement_policy" : "lru",
-        "coherence_protocol" : "MSI",
+        "coherence_protocol" : "none",
         "statistics" : "1",
         "collect_stats" : "1"
     })
