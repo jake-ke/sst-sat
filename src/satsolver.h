@@ -80,6 +80,7 @@ public:
         {"enable_speculative", "Enable speculative propagation", "false"},
         {"timeout_cycles", "Maximum solver cycles before timing out (0 = no timeout)", "0"},
         {"max_confl", "Maximum number of conflicts collected per propagation and analyzed (in batches of LEARNERS) per conflict round; -1 = no limit", "8"},
+        {"gmc1", "Enable Guarded Multi-Commit +1: on rounds where the harvested conflicts disagree on backtrack level, also learn the lowest-LBD non-winner clause without enqueueing it (default: stock single-commit)", "false"},
         {"profile_2wl", "Enable 2WL clause-access reduction profiling (host-side; counts only original clauses)", "false"},
         {"profile_prop_timing", "Enable per-propagation timing breakdown (cycles_read_headptr/blocks/clauses/insert/polling and spec/normal metrics). Auto-enabled when enable_speculative=true.", "false"},
         {"trace_file", "Path to binary memory-access trace. Empty disables tracing.", ""},
@@ -112,6 +113,7 @@ public:
         {"bt_level", "Total backtrack level", "count", 1},
         {"multi_confl_rounds", "Number of conflict rounds that collected more than one conflict", "count", 1},
         {"bt_level_diff", "Number of multi-conflict rounds whose conflicts disagree on the backtrack level (min < max)", "count", 1},
+        {"gmc_extra_learnts", "Number of extra learnt clauses added by gmc1 (one per disagreeing round that has a valid non-winner)", "count", 1},
         {"clause_lock_occ", "Clause-lock table occupancy sampled at each acquire (concurrent locked clauses)", "count", 1},
         {"busy_occ", "Watchlist write-lock occupancy sampled at each insert (concurrent watchlist insertions)", "count", 1},
         {"wl_q_occ", "Total pending watchlist insertions in flight, sampled at each enqueue", "count", 1},
@@ -275,6 +277,25 @@ private:
     std::vector<std::pair<Cref, float>> c_to_bump;
     std::vector<Var> v_to_bump;
 
+    // Guarded multi-commit (gmc1). When enabled, every conflict analyzed in a
+    // round records its learnt clause so that — only on rounds whose conflicts
+    // disagree on the backtrack level — the lowest-LBD non-winner can be added
+    // to the clause DB as one extra learnt (attached + clause-bumped, but not
+    // enqueued). bt_pos is the index of a max-earlier-level literal, placed at
+    // watch position 1 when the extra clause is committed.
+    bool gmc1_enabled = false;                  // gmc1 param
+    struct AnalyzeCand {
+        int bt_level;
+        int lbd;
+        int bt_pos;
+        std::vector<Lit> learnt;
+    };
+    std::vector<AnalyzeCand> round_cands;       // one per conflict analyzed this round
+    int winner_cand_idx = -1;                   // index in round_cands of committed winner
+    std::vector<Lit> extra_learnt;              // prepared extra clause (empty = none this round)
+    int extra_lbd = 0;                          // LBD of the extra clause
+    int extra_bt = 0;                           // backtrack level of the extra clause
+
     // Clause minimization
     int ccmin_mode;                             // Conflict clause minimization mode
     std::vector<Lit> analyze_toclear;           // Literals to clear after analysis
@@ -389,6 +410,7 @@ private:
     Statistic<uint64_t>* stat_bt_distance;        // Accumulator: total backtrack distance (levels jumped)
     Statistic<uint64_t>* stat_multi_confl_rounds; // Count of rounds that collected >1 conflict
     Statistic<uint64_t>* stat_bt_level_diff;      // Count of multi-conflict rounds whose conflicts disagree on bt level
+    Statistic<uint64_t>* stat_gmc_extra_learnts;  // Count of extra learnt clauses added by gmc1
 
     // Propagation synchronization-sizing statistics
     Statistic<uint64_t>* stat_clause_lock_occ;      // Histogram: clause-lock table occupancy at acquire

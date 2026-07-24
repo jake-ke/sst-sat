@@ -206,6 +206,11 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     timeout_cycles = params.find<uint64_t>("timeout_cycles", 0);
     max_confl = params.find<int>("max_confl", 8);
     output.output("MAX_CONFL           : %d\n", max_confl);
+    // Guarded Multi-Commit +1: on rounds where the harvested conflicts disagree
+    // on the backtrack level, additionally learn the lowest-LBD non-winner
+    // clause. Off (default) = stock single-commit.
+    gmc1_enabled = params.find<bool>("gmc1", false);
+    output.output("GMC1                : %s\n", gmc1_enabled ? "true" : "false");
     profile_2wl = params.find<bool>("profile_2wl", false);
     profile_prop_timing = params.find<bool>("profile_prop_timing", false);
     // Speculative profiling depends on the same per-literal cycle data, so
@@ -258,6 +263,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_bt_distance = registerStatistic<uint64_t>("bt_distance");
     stat_multi_confl_rounds = registerStatistic<uint64_t>("multi_confl_rounds");
     stat_bt_level_diff = registerStatistic<uint64_t>("bt_level_diff");
+    stat_gmc_extra_learnts = registerStatistic<uint64_t>("gmc_extra_learnts");
 
     // Propagation synchronization-sizing statistics
     stat_clause_lock_occ = registerStatistic<uint64_t>("clause_lock_occ");
@@ -450,6 +456,7 @@ void SATSolver::finish() {
     output.output("Restarts     : %lu\n", getStatCount(stat_restarts));
     output.output("MultiConfl   : %lu\n", getStatCount(stat_multi_confl_rounds));
     output.output("BtLevelDiff  : %lu\n", getStatCount(stat_bt_level_diff));
+    output.output("GMC1 Extra   : %lu\n", getStatCount(stat_gmc_extra_learnts));
     // Speculative propagation statistics
     output.output("Spec Started : %lu\n", getStatCount(stat_spec_started));
     output.output("Spec Finished: %lu\n", getStatCount(stat_spec_finished));
@@ -1340,6 +1347,8 @@ void SATSolver::execAnalyze() {
     int total_confl = (int)conflicts.size();
     bt_level = std::numeric_limits<int>::max();
     round_max_bt = -1;
+    if (gmc1_enabled) { round_cands.clear(); winner_cand_idx = -1; }
+    extra_learnt.clear();  // no extra clause selected yet this round
 
     // Analyze all collected conflicts in batches of LEARNERS hardware lanes.
     // bt_level (min) and round_max_bt (max) persist across batches so the single
@@ -1399,6 +1408,33 @@ void SATSolver::execAnalyze() {
     if (total_confl > 1) {
         stat_multi_confl_rounds->addData(1);
         if (round_max_bt > bt_level) stat_bt_level_diff->addData(1);
+    }
+
+    // gmc1 guard: only on rounds where the harvested conflicts disagree on the
+    // backtrack level (max > min = winner's) do we learn an extra clause. Pick
+    // the lowest-LBD non-winner (tiebreak shortest), skipping units. Variable
+    // levels are still valid here (pre-backtrack), and each candidate already
+    // carries the second-watched position, so preparing the clause is free.
+    if (gmc1_enabled && round_max_bt > bt_level) {
+        int best = -1;
+        for (int i = 0; i < (int)round_cands.size(); i++) {
+            if (i == winner_cand_idx) continue;
+            if (round_cands[i].learnt.size() <= 1) continue;  // skip units
+            if (best < 0
+                || round_cands[i].lbd < round_cands[best].lbd
+                || (round_cands[i].lbd == round_cands[best].lbd
+                    && round_cands[i].learnt.size() < round_cands[best].learnt.size()))
+                best = i;
+        }
+        if (best >= 0) {
+            extra_learnt = round_cands[best].learnt;
+            extra_lbd = round_cands[best].lbd;
+            extra_bt = round_cands[best].bt_level;
+            // Place the second-watched literal at index 1 (index 0 is the 1-UIP
+            // at the current level). Both are the last to be unassigned on the
+            // winner's backjump, so the 2WL invariant holds without enqueueing.
+            std::swap(extra_learnt[1], extra_learnt[round_cands[best].bt_pos]);
+        }
     }
 
     for (const Var& v : v_to_bump) {
@@ -1579,6 +1615,25 @@ void SATSolver::execBacktrack() {
         attachClause(addr, new_clause);
         trailEnqueue(learnt_clause[0], addr);
         stat_learned->addData(1);
+    }
+
+    // gmc1 extra: on a disagreeing round, also add the lowest-LBD non-winner
+    // learnt clause. It is added to the DB, attached, and clause-bumped (fresh
+    // cla_inc activity) exactly like the winner — but NOT enqueued, since it is
+    // not asserting at the winner's backjump level (its two watched literals are
+    // both unassigned after the unwind above, so the 2WL invariant is intact).
+    if (gmc1_enabled && !extra_learnt.empty()) {
+        Clause extra_cl(extra_learnt, cla_inc);
+        Cref eaddr = clauses.addClause(extra_cl);
+        if (extra_cl.litSize() > 2) cla_hist_.add(extra_cl.act());
+        attachClause(eaddr, extra_cl);
+        if (tracer_) tracer_->emitLearn(extra_lbd, (int)extra_cl.litSize(), extra_bt, (int)eaddr);
+        output.verbose(CALL_INFO, 3, 0,
+            "gmc1 extra learnt clause 0x%x (lbd=%d): %s\n",
+            eaddr, extra_lbd, printClause(extra_cl.literals).c_str());
+        stat_learned->addData(1);
+        stat_gmc_extra_learnts->addData(1);
+        extra_learnt.clear();
     }
 
     // terminate speculative propagation if conflict after backtracking
@@ -2421,6 +2476,7 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     std::vector<char> tmp_seen;
     tmp_seen.resize(num_vars + 1, 0);
     int tmp_btlevel = 0;
+    int tmp_bt_pos = 1;   // position in tmp_learnt of a literal at tmp_btlevel
     int tmp_lbd = 0;
     std::vector<bool> lbd_levels(current_level() + 1, false);
     std::vector<std::pair<Cref, float>> tmp_c_to_bump;
@@ -2468,9 +2524,14 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
                     output.verbose(CALL_INFO, 5, 0,
                         "ANALYZE[%d]:     At current level, pathC=%d\n", worker_id, pathC);
                 } else {
-                    if (v_data.level > tmp_btlevel) tmp_btlevel = v_data.level;
                     // Literals from earlier decision levels go directly to the learnt clause
                     tmp_learnt.push_back(q);
+                    // Remember a literal sitting at the max earlier level: it is the
+                    // one to watch at index 1 (second-watched), mirroring findBtLevel.
+                    if (v_data.level > tmp_btlevel) {
+                        tmp_btlevel = v_data.level;
+                        tmp_bt_pos = (int)tmp_learnt.size() - 1;
+                    }
                     output.verbose(CALL_INFO, 5, 0,
                         "ANALYZE[%d]:     Added to learnt clause (earlier level %zu)\n",
                         worker_id, v_data.level);
@@ -2511,6 +2572,15 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
     // thus whether selecting among them can change the backtrack target).
     if (tmp_btlevel > round_max_bt) round_max_bt = tmp_btlevel;
 
+    // gmc1: remember every analyzed conflict's learnt clause so the extra
+    // (lowest-LBD non-winner) can be picked once the winner is known. Only the
+    // clause, its LBD, and the second-watched position are needed downstream.
+    int this_cand_idx = -1;
+    if (gmc1_enabled) {
+        round_cands.push_back({tmp_btlevel, tmp_lbd, tmp_bt_pos, tmp_learnt});
+        this_cand_idx = (int)round_cands.size() - 1;
+    }
+
     // Keep the single best candidate: lowest backtrack level, then smallest
     // clause. Ties keep whichever candidate was selected first.
     if (tmp_btlevel < bt_level || (tmp_btlevel == bt_level
@@ -2521,6 +2591,7 @@ void SATSolver::analyze(Cref conflict, int worker_id) {
         seen = std::move(tmp_seen);
         c_to_bump = std::move(tmp_c_to_bump);
         v_to_bump = std::move(tmp_v_to_bump);
+        if (gmc1_enabled) winner_cand_idx = this_cand_idx;
     }
     // order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::DEBUG_HEAP, 0));
 }

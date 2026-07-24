@@ -13,7 +13,7 @@ fi
 
 # Check if help is requested or show usage
 show_usage() {
-    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--l2-latency LATENCY] [--l2-bw BW] [--l2-width WIDTH] [--mem-latency LATENCY] [--prefetch] [--spec] [--profile-2wl] [--profile-prop-timing] [--enable-histograms] [--cache-profiler] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [--max-confl N] [-j jobs]"
+    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--l2-latency LATENCY] [--l2-bw BW] [--l2-width WIDTH] [--mem-latency LATENCY] [--prefetch] [--spec] [--profile-2wl] [--profile-prop-timing] [--enable-histograms] [--cache-profiler] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [--max-confl N] [--gmc1] [-j jobs]"
     echo "Options:"
     echo "  -b, --bench-dir DIR  Directory containing benchmark CNF files (required)"
     echo "  --ram2-cfg FILE       Ramulator2 configuration file"
@@ -37,6 +37,7 @@ show_usage() {
     echo "  --seed NUM            Run a single seed with the specified seed number (overrides --num-seeds)"
     echo "  --timeout-cycles N    Maximum solver cycles before timing out (0 or omit for unlimited)"
     echo "  --max-confl N         Max conflicts collected/analyzed per round, batched by LEARNERS (-1 = no limit, default 8)"
+    echo "  --gmc1                Enable Guarded Multi-Commit +1 (default: stock single-commit)"
     echo "  --glucose-restart     Use glucose-style LBD-based restarts instead of Luby"
     echo "  --freq FREQ           Clock frequency for all components (e.g. 1GHz, 500MHz)"
     echo "  -j, --jobs JOBS       Number of parallel jobs"
@@ -269,6 +270,10 @@ while [[ $# -gt 0 ]]; do
                 show_usage
                 exit 1
             fi
+            ;;
+        --gmc1)
+            GMC1="yes"
+            shift
             ;;
         --glucose-restart)
             GLUCOSE_RESTART="yes"
@@ -527,6 +532,7 @@ run_one_seed() {
     [[ -n "$SPEC" ]] && command+=" --spec"
     [[ -n "$TIMEOUT_CYCLES" ]] && command+=" --timeout-cycles $TIMEOUT_CYCLES"
     [[ -n "$MAX_CONFL" ]] && command+=" --max-confl $MAX_CONFL"
+    [[ -n "$GMC1" ]] && command+=" --gmc1"
     [[ -n "$FREQ" ]] && command+=" --freq $FREQ"
     [[ -n "$GLUCOSE_RESTART" ]] && command+=" --glucose-restart"
     [[ -n "$PROFILE_2WL" ]] && command+=" --profile-2wl"

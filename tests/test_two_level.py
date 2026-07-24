@@ -99,6 +99,8 @@ def parse_args():
                         help='Maximum solver cycles before timing out (0 = unlimited)')
     parser.add_argument('--max-confl', dest='max_confl', type=int, default=8,
                         help='Max conflicts collected/analyzed per conflict round, in batches of LEARNERS (-1 = no limit)')
+    parser.add_argument('--gmc1', dest='gmc1', action='store_true', default=False,
+                        help='Enable Guarded Multi-Commit +1 (default: stock single-commit)')
     parser.add_argument('--glucose-restart', dest='glucose_restart',
                         action='store_true', default=False,
                         help='Use glucose-style LBD-based restarts instead of Luby')
@@ -278,6 +280,7 @@ params = {
     "enable_speculative": str(args.enable_speculative),
     "timeout_cycles": str(args.timeout_cycles),
     "max_confl": str(args.max_confl),
+    "gmc1": str(args.gmc1),
     "glucose_restart": str(args.glucose_restart),
     "profile_2wl": str(args.profile_2wl),
     "profile_prop_timing": str(args.profile_prop_timing),
@@ -526,6 +529,7 @@ solver_stats = [
     "bt_distance",
     "multi_confl_rounds",
     "bt_level_diff",
+    "gmc_extra_learnts",
     "clause_conflicts",
     "wl_insert_conflicts",
     "wl_process_conflicts",
