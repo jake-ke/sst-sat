@@ -597,6 +597,12 @@ void PipelinedHeap::startOperation(HeapOpType op, Var arg, double activity) {
     }
 
     assert(arg != var_Undef);
+    // Settled-size latch: the pop's dispatch gate (active_inserts==0,
+    // insert_queue and req_to_op empty) guarantees every slot <= heap_size has
+    // its write at least issued. Inserts dispatched during this op's flight
+    // reserve only slots above it. The descent (and its OLC sift) must treat
+    // everything above this bound as nonexistent.
+    if (op == HEAP_OP_REPLACE) replace_hs_bound_ = heap_size;
     stages[0][STAGE_READ].var = arg;
     stages[0][STAGE_READ].act = activity;
     stages[0][STAGE_READ].node_idx = 0;  // Always start at root
@@ -949,9 +955,12 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
             double repl_act = curr_stage.act;
 
             if (level == onchip_levels_ - 1) {
-                // Boundary: children (if any) live off-chip.
+                // Boundary: children (if any) live off-chip. Test existence
+                // against the dispatch-time settled bound, NOT live heap_size:
+                // slots reserved by inserts dispatched during this descent are
+                // unwritten garbage and must read as nonexistent.
                 uint64_t s = ((uint64_t)1 << level) | (uint64_t)node_idx;
-                if (2 * s <= heap_size) {
+                if (2 * s <= replace_hs_bound_) {
                     // Hand the boundary compare to the OLC (it reads the
                     // K-children + grandchildren lines, writes this slot back
                     // into the boundary SRAM, and percolates below).
@@ -2208,6 +2217,9 @@ void PipelinedHeap::launchClean() {
     tailDropAbove(heap_size);
     sampleOccupancy();
 
+    // Cleans launch from the fully-idle branch, so heap_size is settled here;
+    // the morphed replace-descent below carries this bound like a pop's would.
+    replace_hs_bound_ = heap_size;
     clean_target_armed_ = true;
     uint32_t target_level = (uint32_t)level;
     uint32_t path = (uint32_t)hit_slot_ << (31 - target_level);
@@ -2379,6 +2391,11 @@ void PipelinedHeap::olcStartSift(uint64_t boundary_slot, Var v, double act) {
     sift_.slot = boundary_slot;
     sift_.var = v;
     sift_.act = act;
+    // Consume the settled watermark (youngest replace/clean dispatch). Pops
+    // that ran while this descent was in flight re-latched it themselves, and
+    // inserts dispatched behind this op cannot land off-chip before the sift
+    // retires, so the watermark is exactly the settled content right now.
+    sift_.hs_bound = replace_hs_bound_;
     sift_.boundary_write_pending = true;
     sift_.gen++;
     stat_olc_boundary_crossings->addData(1);
@@ -2389,11 +2406,20 @@ void PipelinedHeap::olcStartSift(uint64_t boundary_slot, Var v, double act) {
 void PipelinedHeap::olcSiftIssueReads() {
     uint64_t s = sift_.slot;
     uint64_t c0 = 2 * s;
-    sift_.hs_at_issue = heap_size;
     sift_.children_ready = false;
     sift_.child[0] = OlcNode();
     sift_.child[1] = OlcNode();
     for (int i = 0; i < 4; i++) sift_.grand[i] = OlcNode();
+
+    // No children within the settled bound: nothing to read, the complete
+    // step will settle at s. (Slots above the bound are unwritten insert
+    // reservations — reading them would fetch garbage.)
+    if (c0 > sift_.hs_bound) {
+        sift_.children_ready = true;
+        sift_.grand_needed = false;
+        sift_.grand_ready = true;
+        return;
+    }
 
     uint64_t c_line = lineOf(c0);
     OlcNode buf[4];
@@ -2412,7 +2438,7 @@ void PipelinedHeap::olcSiftIssueReads() {
     }
 
     uint64_t g0 = 4 * s;
-    sift_.grand_needed = g0 <= heap_size;
+    sift_.grand_needed = g0 <= sift_.hs_bound;
     sift_.grand_ready = !sift_.grand_needed;
     if (sift_.grand_needed) {
         // 4s..4s+3 is one aligned 64 B line: the next step's children line,
@@ -2433,6 +2459,13 @@ void PipelinedHeap::olcSiftIssueReads() {
 }
 
 void PipelinedHeap::siftWriteSlot(uint64_t slot, Var v, double act) {
+    // Ownership: the sift may only write settled territory. Anything above
+    // the bound belongs to a pending insert; writing there is the silent
+    // fresh-copy-clobber bug (x254250). Trips instantly if a live heap_size
+    // read is ever reintroduced into the descent logic.
+    sst_assert(slot <= sift_.hs_bound, CALL_INFO, -1,
+        "Sift write to slot %lu beyond settled bound %lu (var %d)\n",
+        slot, sift_.hs_bound, v);
     if (slot < firstOffchipSlot()) {
         // Boundary slot: dedicated write port into the level K-1 SRAM.
         int level = slotLevel(slot);
@@ -2454,11 +2487,13 @@ void PipelinedHeap::olcRetireSift() {
 
 void PipelinedHeap::olcCompleteSiftStep() {
     uint64_t s = sift_.slot;
-    // Bounds are evaluated against min(current heap_size, issue-time
-    // heap_size): pops may have shrunk the heap mid-flight (cleared slots
-    // also read as var_Undef and lose comparisons), and slots that appeared
-    // after issue are unwritten reservations of parked inserts.
-    uint64_t hs = std::min((uint64_t)heap_size, sift_.hs_at_issue);
+    // Bounds are evaluated against the settled-size bound latched at the
+    // pop's dispatch: every slot above it is an unwritten insert reservation
+    // (garbage bytes that must read as nonexistent). Settled slots inside
+    // this sift's subtree cannot vanish mid-flight — siftBlocks refuses any
+    // pop whose grab falls in the subtree — so the latch stays valid without
+    // ever re-reading live heap_size here.
+    uint64_t hs = sift_.hs_bound;
     uint64_t c0 = 2 * s;
 
     if (c0 > hs) {  // no children left: settle at s

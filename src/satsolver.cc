@@ -1430,9 +1430,8 @@ void SATSolver::execAnalyze() {
             extra_learnt = round_cands[best].learnt;
             extra_lbd = round_cands[best].lbd;
             extra_bt = round_cands[best].bt_level;
-            // Place the second-watched literal at index 1 (index 0 is the 1-UIP
-            // at the current level). Both are the last to be unassigned on the
-            // winner's backjump, so the 2WL invariant holds without enqueueing.
+            // Index 0 is the 1-UIP (current level); place the highest-level other
+            // literal at index 1 (the second watched). extra_bt is that level.
             std::swap(extra_learnt[1], extra_learnt[round_cands[best].bt_pos]);
         }
     }
@@ -1618,21 +1617,32 @@ void SATSolver::execBacktrack() {
     }
 
     // gmc1 extra: on a disagreeing round, also add the lowest-LBD non-winner
-    // learnt clause. It is added to the DB, attached, and clause-bumped (fresh
-    // cla_inc activity) exactly like the winner — but NOT enqueued, since it is
-    // not asserting at the winner's backjump level (its two watched literals are
-    // both unassigned after the unwind above, so the 2WL invariant is intact).
+    // learnt clause, attached and clause-bumped like the winner. Watch index 0
+    // (1-UIP, current level) is unassigned after the unwind; index 1 sits at
+    // extra_bt >= bt_level.
+    //   - extra_bt >  bt_level: index 1 is also unassigned. Not asserting at the
+    //     backjump level, so it is NOT enqueued (a dormant learnt clause).
+    //   - extra_bt == bt_level: index 1 is still false, so the clause is asserting
+    //     here — commit its 1-UIP too (a second unit prop), which makes the clause
+    //     satisfied and keeps both watched literals non-false.
+    // The winner's own commit above may have already assigned the 1-UIP's variable
+    // (same var from a sibling conflict); if that left it false, attaching would
+    // watch a false literal, so we drop the extra in that rare case.
     if (gmc1_enabled && !extra_learnt.empty()) {
-        Clause extra_cl(extra_learnt, cla_inc);
-        Cref eaddr = clauses.addClause(extra_cl);
-        if (extra_cl.litSize() > 2) cla_hist_.add(extra_cl.act());
-        attachClause(eaddr, extra_cl);
-        if (tracer_) tracer_->emitLearn(extra_lbd, (int)extra_cl.litSize(), extra_bt, (int)eaddr);
-        output.verbose(CALL_INFO, 3, 0,
-            "gmc1 extra learnt clause 0x%x (lbd=%d): %s\n",
-            eaddr, extra_lbd, printClause(extra_cl.literals).c_str());
-        stat_learned->addData(1);
-        stat_gmc_extra_learnts->addData(1);
+        Lit a = extra_learnt[0];
+        bool a_false = var_assigned[var(a)] && value(a) == false;
+        if (!a_false) {
+            Clause extra_cl(extra_learnt, cla_inc);
+            Cref eaddr = clauses.addClause(extra_cl);
+            if (extra_cl.litSize() > 2) cla_hist_.add(extra_cl.act());
+            attachClause(eaddr, extra_cl);
+            if (tracer_) tracer_->emitLearn(extra_lbd, (int)extra_cl.litSize(), extra_bt, (int)eaddr);
+            // Asserting at the backjump level and its 1-UIP still open: commit it.
+            if (extra_bt == bt_level && !var_assigned[var(a)])
+                trailEnqueue(a, eaddr);
+            stat_learned->addData(1);
+            stat_gmc_extra_learnts->addData(1);
+        }
         extra_learnt.clear();
     }
 

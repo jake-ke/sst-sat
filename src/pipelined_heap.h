@@ -147,8 +147,12 @@ struct OlcSiftCtx {
     bool children_ready = false;
     bool grand_ready = false;     // also true when no grandchildren line was needed
     bool grand_needed = false;
-    uint64_t hs_at_issue = 0;     // heap_size snapshot at read issue: slots that
-                                  // appeared after are unwritten reservations
+    uint64_t hs_bound = 0;        // settled-size bound latched at the pop's
+                                  // dispatch (tightened once at the boundary
+                                  // handoff): every slot <= hs_bound holds
+                                  // written content; every slot above is an
+                                  // unwritten insert reservation. The sift
+                                  // never reads or writes beyond it.
     uint32_t gen = 0;             // step generation for response routing
     OlcNode child[2];             // slots 2s, 2s+1 (validity re-checked vs heap_size)
     OlcNode grand[4];             // slots 4s..4s+3
@@ -333,6 +337,15 @@ private:
     std::deque<OlcInsertCtx> insert_ctxs_;    // arrival order (front = oldest)
     uint64_t next_ctx_id_;
     OlcSiftCtx sift_;
+    // Settled-size watermark: re-latched to heap_size at EVERY replace/clean
+    // dispatch (deletes pipeline ~1 per 2 cycles, so a descent reaching the
+    // boundary deliberately reads the YOUNGEST dispatch's value, not its own —
+    // younger grabs have vacated slots the older descent must not read, and
+    // nothing can land off-chip in between: later inserts are stuck behind it
+    // in the in-order pipe and park at the boundary while a sift is active).
+    // Slots above the watermark are vacated or unwritten insert reservations
+    // and must be treated as nonexistent. One frontend register in hardware.
+    uint64_t replace_hs_bound_ = 0;
     std::unordered_map<uint64_t, OlcPendingRead> olc_pending;  // mem req id -> OLC read
     int node_writes_inflight_;                // node-region writes awaiting WriteResp
     int tail_refills_inflight_;

@@ -220,6 +220,9 @@ if args.enable_speculative:
 print(f"Clock frequency: {args.freq}")
 if args.timeout_cycles > 0:
     print(f"Solver timeout set to: {args.timeout_cycles} cycles")
+print(f"Max conflicts per round: {args.max_confl}")
+if args.gmc1:
+    print(f"Guarded multi-commit +1 (gmc1) enabled")
 if args.glucose_restart:
     print(f"Glucose-style LBD-based restarts enabled")
 if args.profile_2wl:
