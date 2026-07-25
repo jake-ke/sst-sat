@@ -1,0 +1,25 @@
+# Incremental ablation ladder for the sst-sat rerun.  Pipe-delimited (config_defines
+# hold spaces).  Columns:  name | heap | config_defines | run_flags
+#
+#   name           builds/<name>/  (element library dir, select with --lib-dir)
+#   heap           classic | pipelined   -> maps to make HEAP_IMPL (classic adds
+#                  -DUSE_CLASSIC_HEAP; must be paired with --classic-heap at run)
+#   config_defines -DKNOB=VAL... passed as make CONFIG_DEFINES (see src/structs.h)
+#   run_flags      appended after `--` to run_slurm.sh / run_sc_l2.sh at run time
+#
+# Each rung is CUMULATIVE: it turns on one more feature vs. the rung above.
+# Build all:  tools/build_configs.sh        Build some: tools/build_configs.sh baseline paraprop
+#
+# Baseline turns everything off: parallel counts = 1, no pre-watchers, no free
+# list, classic heap, no prefetch.  'learn' (empty defines) == the full/final
+# master config (all knobs at their structs.h defaults, pipelined, prefetch).
+#
+# name        | heap      | config_defines                                                                                              | run_flags
+baseline      | classic   | -DPARA_LITS=1 -DPROPAGATORS=1 -DLEARNERS=1 -DHEAPLANES=1 -DMINIMIZERS=1 -DREDUCE_WORKERS=1 -DPRE_WATCHERS=0 -DUSE_FREE_LIST=0 | --classic-heap
+paraprop      | classic   | -DPARA_LITS=8 -DPROPAGATORS=7 -DLEARNERS=1 -DHEAPLANES=1 -DMINIMIZERS=1 -DREDUCE_WORKERS=1 -DPRE_WATCHERS=0 -DUSE_FREE_LIST=0 | --classic-heap
+heap          | pipelined | -DPARA_LITS=8 -DPROPAGATORS=7 -DLEARNERS=1 -DHEAPLANES=8 -DMINIMIZERS=1 -DREDUCE_WORKERS=1 -DPRE_WATCHERS=0 -DUSE_FREE_LIST=0 |
+prewatch-fl   | pipelined | -DPARA_LITS=8 -DPROPAGATORS=7 -DLEARNERS=1 -DHEAPLANES=8 -DMINIMIZERS=1 -DREDUCE_WORKERS=1 -DPRE_WATCHERS=7 -DUSE_FREE_LIST=1 |
+prefetch      | pipelined | -DPARA_LITS=8 -DPROPAGATORS=7 -DLEARNERS=1 -DHEAPLANES=8 -DMINIMIZERS=1 -DREDUCE_WORKERS=1 -DPRE_WATCHERS=7 -DUSE_FREE_LIST=1 | --prefetch
+min           | pipelined | -DPARA_LITS=8 -DPROPAGATORS=7 -DLEARNERS=1 -DHEAPLANES=8 -DMINIMIZERS=4 -DREDUCE_WORKERS=1 -DPRE_WATCHERS=7 -DUSE_FREE_LIST=1 | --prefetch
+reducer       | pipelined | -DPARA_LITS=8 -DPROPAGATORS=7 -DLEARNERS=1 -DHEAPLANES=8 -DMINIMIZERS=4 -DREDUCE_WORKERS=16 -DPRE_WATCHERS=7 -DUSE_FREE_LIST=1 | --prefetch
+learn         | pipelined |                                                                                                             | --prefetch

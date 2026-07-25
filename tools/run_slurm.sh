@@ -13,13 +13,16 @@
 # Conventions kept from run_sc_l2.sh: output layout runs/<folder>/seed<S>/
 # with <name>.log + <name>.stats.csv, parse_stats.py appended to the log,
 # verifier.py checked for SAT verdicts, PASSED/FAILED/TIMEOUT classification.
-# The element binary is whatever `make -C src install` registered from this
-# repo (e.g. ~/sst-sat/build) -- build it BEFORE submitting; no scratch clones.
+# The element binary defaults to whatever `make -C src install` registered from
+# this repo (e.g. ~/sst-sat/build). To run a specific per-config build instead,
+# pass --lib-dir builds/<cfg> (built via `make BUILD_DIR=../builds/<cfg> ...`);
+# it is loaded with `sst --add-lib-path` and needs no sst-register. Either way,
+# build BEFORE submitting; no scratch clones.
 #
 # Usage (from the repo root on the slurm login node):
 #   tools/run_slurm.sh -b ~/sat_benchmarks/satcomp_sim --folder singly-fl --seed 3 \
 #       [--max-parallel 64] [--task-mem 6G] [--task-time D-HH:MM:SS] [--partition batch] \
-#       [--sbatch-opts "--qos=low --requeue"] \
+#       [--sbatch-opts "--qos=low --requeue"] [--lib-dir builds/<cfg>] \
 #       -- --ram2-cfg tests/ramulator2-ddr4.cfg --l1-size 128KiB --l1-latency 1 \
 #          --l1-bw 4 --l2-latency 32 --l2-bw 8 --prefetch --timeout-cycles 36000000000
 #
@@ -80,10 +83,14 @@ if [[ "${1:-}" == "--worker" ]]; then
     fi
 
     mapfile -t sim_args < "$RUNDIR/simargs.txt"
+    # Optional per-config element library (see --lib-dir); empty = registry.
+    lib_arg=()
+    libdir=$(cat "$RUNDIR/libdir.txt" 2>/dev/null)
+    [[ -n "$libdir" ]] && lib_arg=(--add-lib-path="$libdir")
     start_time=$(date +"%H:%M:%S")
-    echo "host=$(hostname) task=$TASK_ID cnf=$filename seed=$seed"
+    echo "host=$(hostname) task=$TASK_ID cnf=$filename seed=$seed lib=${libdir:-registry}"
 
-    sst ./tests/test_two_level.py -- --cnf "$file" --stats-file "$stats_file" \
+    sst "${lib_arg[@]}" ./tests/test_two_level.py -- --cnf "$file" --stats-file "$stats_file" \
         --rand "$seed" "${sim_args[@]}" > "$log_file" 2>&1
     exit_status=$?
 
@@ -178,8 +185,8 @@ if [[ "${1:-}" == "--summarize" ]]; then
     oom_lines=""
     : > "$RUNDIR/filter_pass.txt"
 
-    add_row() {  # <display-verdict> <name> <start> <end>
-        DROWS[$1]+="$(printf '%-13s %10s  %-19s  %s' "$1" "$(elapsed "$3" "$4")" "$3-$4" "$2")"$'\n'
+    add_row() {  # <display-verdict> <name> <seed> <start> <end>
+        DROWS[$1]+="$(printf '%-13s %4s %10s  %-19s  %s' "$1" "$3" "$(elapsed "$4" "$5")" "$4-$5" "$2")"$'\n'
         DCOUNT[$1]=$(( ${DCOUNT[$1]:-0} + 1 ))
     }
 
@@ -201,19 +208,19 @@ if [[ "${1:-}" == "--summarize" ]]; then
                 tline=$(grep -nF "/$name|$seed" "$RUNDIR/tasks.txt" 2>/dev/null | head -1 | cut -d: -f1)
                 [[ -n "$tline" && -f "$RUNDIR/slurm/${jid}_$((tline - 1)).out" ]] && scan+=("$RUNDIR/slurm/${jid}_$((tline - 1)).out")
                 if is_oom "${scan[@]}"; then
-                    failed_oom=$((failed_oom + 1)); oom_lines+="  $name"$'\n'; dv=OOM
+                    failed_oom=$((failed_oom + 1)); oom_lines+="  seed$seed  $name"$'\n'; dv=OOM
                 else
                     failed_other=$((failed_other + 1)); dv=FAILED
                 fi
                 ;;
         esac
-        add_row "$dv" "$name" "$start" "$end"
+        add_row "$dv" "$name" "$seed" "$start" "$end"
     done
 
     # Missing = submitted tasks (tasks.txt) with no result file. Split by the
     # task's real terminal state (sacct, then a slurm-.out grep fallback).
-    m_wall=0; m_oom=0; m_run=0; m_other=0
-    wall_lines=""; run_lines=""; other_lines=""
+    m_wall=0; m_oom=0; m_running=0; m_queued=0; m_other=0
+    wall_lines=""; running_lines=""; queued_lines=""; other_lines=""
     if [[ -f "$RUNDIR/tasks.txt" ]]; then
         li=-1
         while IFS='|' read -r tfile tseed; do
@@ -228,15 +235,16 @@ if [[ "${1:-}" == "--summarize" ]]; then
                 elif is_oom "$out"; then st=OUT_OF_MEMORY; fi
             fi
             case "$st" in
-                TIMEOUT)             m_wall=$((m_wall + 1));  wall_lines+="  $tname"$'\n' ;;
-                OUT_OF_MEMORY|OOM)   m_oom=$((m_oom + 1));    oom_lines+="  $tname"$'\n' ;;
-                RUNNING|PENDING|REQUEUED|RESIZING|SUSPENDED|"") m_run=$((m_run + 1)); run_lines+="  $tname"$'\n' ;;
-                *)                   m_other=$((m_other + 1)); other_lines+="  $tname ($st)"$'\n' ;;
+                TIMEOUT)             m_wall=$((m_wall + 1));    wall_lines+="  seed$tseed  $tname"$'\n' ;;
+                OUT_OF_MEMORY|OOM)   m_oom=$((m_oom + 1));      oom_lines+="  seed$tseed  $tname"$'\n' ;;
+                RUNNING)             m_running=$((m_running + 1)); running_lines+="  seed$tseed  $tname"$'\n' ;;
+                PENDING|REQUEUED|RESIZING|SUSPENDED|"") m_queued=$((m_queued + 1)); queued_lines+="  seed$tseed  $tname"$'\n' ;;
+                *)                   m_other=$((m_other + 1));   other_lines+="  seed$tseed  $tname ($st)"$'\n' ;;
             esac
         done < "$RUNDIR/tasks.txt"
     fi
     oom=$((m_oom + failed_oom))
-    missing=$((m_wall + m_oom + m_run + m_other))
+    missing=$((m_wall + m_oom + m_running + m_queued + m_other))
 
     # Per-list console cap (full lists always go to summary.log). Override with
     # SUMMARIZE_CAP=0 to print everything to the terminal too.
@@ -263,7 +271,8 @@ if [[ "${1:-}" == "--summarize" ]]; then
         echo "  Wall timeout:  $m_wall   (SLURM --task-time)"
         echo "  OOM:           $oom   (killed for memory; $failed_oom left a partial log)"
         echo "  Failed:        $failed_other   (crash/error, not OOM)"
-        echo "  Queued/other:  $((m_run + m_other))   (still running, or state unknown)"
+        echo "  Running:       $m_running   (executing now)"
+        echo "  Queued/other:  $((m_queued + m_other))   (pending/requeued, or state unknown)"
         [[ $skipped -gt 0 ]] && echo "  Skipped:       $skipped"
         [[ -z "$jid" ]] && echo "  (note: no jobid saved for this run -> wall/OOM split relies on slurm .out grep only)"
     } | tee "$RUNDIR/summary.log"
@@ -271,7 +280,8 @@ if [[ "${1:-}" == "--summarize" ]]; then
     # ---- actionable lists: full to summary.log, capped on the console ----
     emit_list "Wall-timeout tests" "$wall_lines"
     emit_list "OOM tests" "$oom_lines"
-    emit_list "Queued/running/unknown" "$run_lines$other_lines"
+    emit_list "Running tests" "$running_lines"
+    emit_list "Queued/unknown tests" "$queued_lines$other_lines"
 
     # ---- full per-test detail: summary.log only, grouped by outcome so failures
     # are not buried among passes, and each group's count matches the header
@@ -284,7 +294,7 @@ if [[ "${1:-}" == "--summarize" ]]; then
             [[ -n "${DROWS[$dv]:-}" ]] || continue
             echo ""
             echo "--- $dv (${DCOUNT[$dv]}) ---"
-            printf '%-13s %10s  %-19s  %s\n' "VERDICT" "ELAPSED" "START-END" "TEST"
+            printf '%-13s %4s %10s  %-19s  %s\n' "VERDICT" "SEED" "ELAPSED" "START-END" "TEST"
             printf '%s' "${DROWS[$dv]}"
         done
     } >> "$RUNDIR/summary.log"
@@ -301,6 +311,7 @@ TASK_MEM=6G
 TASK_TIME=""          # empty = partition default (batch: 2 days)
 PARTITION=batch
 SBATCH_OPTS=""        # extra sbatch flags, e.g. "--qos=low --requeue"
+LIB_DIR=""            # element build dir → sst --add-lib-path; empty = registry
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -313,6 +324,7 @@ while [[ $# -gt 0 ]]; do
         --task-time)    TASK_TIME=$2;    shift 2 ;;
         --partition)    PARTITION=$2;    shift 2 ;;
         --sbatch-opts)  SBATCH_OPTS=$2;  shift 2 ;;
+        --lib-dir|--build) LIB_DIR=$2;   shift 2 ;;
         --) shift; break ;;
         *) echo "Unknown option: $1 (sim args go after --)"; exit 1 ;;
     esac
@@ -335,6 +347,16 @@ mkdir -p "$RUNDIR" "$RUNDIR/slurm"
 # Save sim args (one per line, read back verbatim by workers)
 : > "$RUNDIR/simargs.txt"
 for a in "$@"; do echo "$a" >> "$RUNDIR/simargs.txt"; done
+
+# Element build dir loaded via `sst --add-lib-path` (empty file = use registry).
+# Resolved to an absolute path so workers on other nodes find it.
+if [[ -n "$LIB_DIR" ]]; then
+    [[ -d "$LIB_DIR" ]] || { echo "--lib-dir not found: $LIB_DIR"; exit 1; }
+    [[ -f "$LIB_DIR/libsatsolver.so" ]] || { echo "no libsatsolver.so in $LIB_DIR"; exit 1; }
+    ( cd "$LIB_DIR" && pwd ) > "$RUNDIR/libdir.txt"
+else
+    : > "$RUNDIR/libdir.txt"
+fi
 
 # Flatten (file, seed) tasks, skipping ones that already have a log (resume)
 : > "$RUNDIR/tasks.txt"

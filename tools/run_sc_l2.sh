@@ -13,7 +13,7 @@ fi
 
 # Check if help is requested or show usage
 show_usage() {
-    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--l2-latency LATENCY] [--l2-bw BW] [--l2-width WIDTH] [--mem-latency LATENCY] [--prefetch] [--spec] [--profile-2wl] [--profile-prop-timing] [--enable-histograms] [--cache-profiler] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [--max-confl N] [--gmc1] [-j jobs]"
+    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--lib-dir BUILD_DIR] [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--l2-latency LATENCY] [--l2-bw BW] [--l2-width WIDTH] [--mem-latency LATENCY] [--prefetch] [--spec] [--profile-2wl] [--profile-prop-timing] [--enable-histograms] [--cache-profiler] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [--max-confl N] [--gmc1] [-j jobs]"
     echo "Options:"
     echo "  -b, --bench-dir DIR  Directory containing benchmark CNF files (required)"
     echo "  --ram2-cfg FILE       Ramulator2 configuration file"
@@ -52,6 +52,7 @@ fi
 
 # Optional values (no defaults - let Python script handle defaults)
 BENCHMARK_DIR=""
+LIB_DIR=""            # element build dir → sst --add-lib-path; empty = registry
 RAM2_CFG=""
 CLASSIC_HEAP=""
 L1_SIZE=""
@@ -217,6 +218,16 @@ while [[ $# -gt 0 ]]; do
             PREFETCH="yes"
             shift
             ;;
+        --lib-dir|--build)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                LIB_DIR="$2"
+                shift 2
+            else
+                echo "Error: --lib-dir requires a directory argument"
+                show_usage
+                exit 1
+            fi
+            ;;
         --spec)
             SPEC="yes"
             shift
@@ -351,6 +362,14 @@ fi
 if [[ ! -d "$BENCHMARK_DIR" ]]; then
     echo "Error: Benchmark directory not found: $BENCHMARK_DIR"
     exit 1
+fi
+
+# Validate/resolve optional element build dir (--lib-dir) to an absolute path.
+if [[ -n "$LIB_DIR" ]]; then
+    [[ -d "$LIB_DIR" ]] || { echo "Error: --lib-dir not found: $LIB_DIR"; exit 1; }
+    [[ -f "$LIB_DIR/libsatsolver.so" ]] || { echo "Error: no libsatsolver.so in $LIB_DIR"; exit 1; }
+    LIB_DIR=$( cd "$LIB_DIR" && pwd )
+    echo "Using element library: $LIB_DIR (via --add-lib-path)"
 fi
 
 # Function to log messages to both console and log file
@@ -508,7 +527,10 @@ run_one_seed() {
     append_to_file_safely "$progress_file" "START|$filename (seed $seed)|$start_time"
 
     # Build command. Use wall-clock timeout only if cycle timeout isn't set.
-    local sst_invocation="sst ./tests/test_two_level.py -- --cnf \"$file\" --stats-file \"$stats_file\" --rand $seed"
+    # Optional per-config element library (see --lib-dir); empty = registry.
+    local lib_arg=""
+    [[ -n "$LIB_DIR" ]] && lib_arg="--add-lib-path=$LIB_DIR "
+    local sst_invocation="sst ${lib_arg}./tests/test_two_level.py -- --cnf \"$file\" --stats-file \"$stats_file\" --rand $seed"
     local command=""
     if [[ -z "$TIMEOUT_CYCLES" ]]; then
         # Apply 2-hour wall-clock timeout only when no simulation cycle timeout is provided

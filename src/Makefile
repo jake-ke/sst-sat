@@ -1,5 +1,7 @@
 # Directories
-BUILD_DIR = ../build
+# Override BUILD_DIR to build a config variant into its own dir, e.g.
+#   make BUILD_DIR=../builds/baseline CONFIG_DEFINES="-DPARA_LITS=1 -DPROPAGATORS=1"
+BUILD_DIR ?= ../build
 
 # Compiler configuration
 CXX = $(shell sst-config --CXX)
@@ -16,6 +18,10 @@ ifeq ($(HEAP_IMPL),classic)
 else
   $(info Building with PipelinedHeap implementation)
 endif
+# Per-config compile-time knob overrides (see structs.h). Empty = full config.
+CONFIG_DEFINES ?=
+CXXFLAGS += $(CONFIG_DEFINES)
+
 LDFLAGS = $(shell sst-config --ELEMENT_LDFLAGS)
 
 # Add SST Elements include path

@@ -18,18 +18,37 @@ using coro_t = boost::coroutines2::coroutine<void>;
 // const int PRE_WATCHERS = 7;  // Number of pre-watchers to store in metadata
 // const int USE_FREE_LIST = 1;  // Use free list for watcher insertion
 
-const int PARA_LITS = 8;  // Number of parallel literals to propagate
-const int PROPAGATORS = 7;  // Number of watchers to propagate
-const int LEARNERS = 8;  // Number of learners for clause learning
-const int HEAPLANES = 8;  // Number of heap lanes for parallel execution
-const int MINIMIZERS = 4;  // Number of minimizers
-const int REDUCE_WORKERS = 16;  // Parallel workers for the reduceDB streaming pass
+// Parallelism / feature knobs — overridable at compile time with -DNAME=VALUE,
+// e.g.  make CONFIG_DEFINES="-DPARA_LITS=1 -DPROPAGATORS=1".  The defaults below
+// are the full "final" configuration (what master builds with no overrides).
+#ifndef PARA_LITS
+#define PARA_LITS 8       // Number of parallel literals to propagate
+#endif
+#ifndef PROPAGATORS
+#define PROPAGATORS 7     // Number of watchers to propagate
+#endif
+#ifndef LEARNERS
+#define LEARNERS 8        // Number of learners for clause learning
+#endif
+#ifndef HEAPLANES
+#define HEAPLANES 8       // Number of heap lanes for parallel execution
+#endif
+#ifndef MINIMIZERS
+#define MINIMIZERS 4      // Number of minimizers
+#endif
+#ifndef REDUCE_WORKERS
+#define REDUCE_WORKERS 16 // Parallel workers for the reduceDB streaming pass
+#endif
+#ifndef PRE_WATCHERS
+#define PRE_WATCHERS 7    // Number of pre-watchers to store in metadata
+#endif
+#ifndef USE_FREE_LIST
+#define USE_FREE_LIST 1   // Use free list for watcher insertion
+#endif
 
 const bool OVERLAP_HEAP_INSERT = true;  // overlaps heap insertions (backtracking) with propagation
 const bool OVERLAP_HEAP_BUMP = true;  // overlaps heap bumping with clause minimization and find bt level
 const bool WRITE_BUFFER = true;  // enables write request buffering for improved performance
-const int PRE_WATCHERS = 7;  // Number of pre-watchers to store in metadata
-const int USE_FREE_LIST = 1;  // Use free list for watcher insertion
 
 // helpers
 const int FREE_IDX_BITS = pow(2, ceil(log(PROPAGATORS)/log(2)));  // next power of 2
@@ -38,10 +57,16 @@ const int FREE_IDX_BITS = pow(2, ceil(log(PROPAGATORS)/log(2)));  // next power 
 // than every worker_id that a main-side phase (unitPropagate / execAnalyze /
 // execMinimize) can produce, otherwise handleGlobalMemEvent misroutes main
 // responses into the spec path.
-constexpr int SPEC_WORKER_BASE =
+constexpr int SPEC_WORKER_BASE_MAIN =
     (PARA_LITS * PROPAGATORS > LEARNERS
         ? (PARA_LITS * PROPAGATORS > MINIMIZERS ? PARA_LITS * PROPAGATORS : MINIMIZERS)
         : (LEARNERS > MINIMIZERS ? LEARNERS : MINIMIZERS));
+
+// SPEC_WORKER_BASE must also clear the reduceDB worker ids (REDUCE_WORKERS + 2).
+// At the full config the main-side term dominates, so this is a no-op there; at
+// low-knob ablation rungs it keeps the id space valid (and the assert below holds).
+constexpr int SPEC_WORKER_BASE =
+    SPEC_WORKER_BASE_MAIN > REDUCE_WORKERS + 2 ? SPEC_WORKER_BASE_MAIN : REDUCE_WORKERS + 2;
 
 // reduceDB uses REDUCE_WORKERS clause workers + 1 pointer-array streamer +
 // 1 free engine. Their worker_ids must stay below SPEC_WORKER_BASE so a

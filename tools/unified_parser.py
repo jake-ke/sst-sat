@@ -215,6 +215,12 @@ def parse_kissat_log(log_file_path, content):
             result['result'] = 'UNSAT'
         elif re.search(r'^\s*s\s+SATISFIABLE', content, re.MULTILINE):
             result['result'] = 'SAT'
+        elif re.search(r'^\s*s\s+UNKNOWN', content, re.MULTILINE):
+            # kissat hit its own time/conflict limit -- a real timeout, not a
+            # parse failure. Mirrors minisat's INDETERMINATE -> TIMEOUT mapping
+            # so these stay in the shared test set instead of being excluded.
+            result['result'] = 'TIMEOUT'
+            print(f"Warning: TIMEOUT (s UNKNOWN) in {log_file_path}")
 
         # Variables and clauses from parsed header or DIMACS header
         m = re.search(r"parsed 'p\s+cnf\s+(\d+)\s+(\d+)'", content)
