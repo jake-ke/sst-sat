@@ -38,6 +38,18 @@
 #     its results/ file exists (or its log shows "Simulation is complete");
 #     a requeued/preempted task detects its own partial log and reruns it.
 #
+# Wall-timeout checkpointing (DMTCP): when ~/dmtcp/install exists (override
+# with DMTCP_BIN=<bin dir>), each sim runs under dmtcp_launch and SLURM sends
+# USR1 to the worker CKPT_SIGNAL_SECS (default 900) seconds before the wall
+# limit. The worker then writes a process checkpoint (~resident-set-size) to
+# runs/<folder>/seedN/<name>.ckpt/ and exits without a result file, so
+# re-running the SAME tools/run_slurm.sh command resumes those tasks from the
+# image instead of restarting them (verified bit-identical stats vs an
+# uninterrupted run). --summarize lists them under "Checkpointed tests".
+# Install: git clone https://github.com/dmtcp/dmtcp && cd dmtcp &&
+#   ./configure --prefix=$HOME/dmtcp/install && make -j && make install
+# (no root needed; home must be shared with the compute nodes).
+#
 #   Progress:  squeue -u $USER               Cancel: scancel -n sat-<folder>
 #   Summary:   tools/run_slurm.sh --summarize runs/<folder>
 
@@ -53,6 +65,15 @@ if [[ "${1:-}" == "--worker" ]]; then
     if [[ -z "${LD_PRELOAD:-}" && -f "$HOME/mimalloc/build/libmimalloc.so" ]]; then
         export LD_PRELOAD="$HOME/mimalloc/build/libmimalloc.so"
     fi
+    # Wall-timeout checkpointing via DMTCP (process-level; SST's native
+    # checkpointing cannot serialize satsolver/ramulator2 state). Without a
+    # DMTCP install the worker degrades to the old run-to-the-kill behavior.
+    DMTCP_BIN=${DMTCP_BIN:-$HOME/dmtcp/install/bin}
+    [[ -x "$DMTCP_BIN/dmtcp_launch" ]] || DMTCP_BIN=""
+    # Keep OpenMPI's singleton init from spawning an orted daemon: the daemon
+    # would land in the checkpoint image and its restore hangs on the deleted
+    # /tmp/ompi.* session dir. Harmless when DMTCP is off.
+    export OMPI_MCA_ess_singleton_isolated=1
 
     task=$(sed -n "$((TASK_ID + 1))p" "$RUNDIR/tasks.txt")
     [[ -z "$task" ]] && { echo "no task at index $TASK_ID"; exit 1; }
@@ -65,21 +86,29 @@ if [[ "${1:-}" == "--worker" ]]; then
     log_file="$seed_dir/${filename}.log"
     stats_file="$seed_dir/${filename}.stats.csv"
     result_file="$RUNDIR/results/${filename}.seed${seed}"
+    ckpt_dir="$seed_dir/${filename}.ckpt"
 
     # Resume/requeue safety: a run only counts as done once its result file
     # exists (written after classification) or its log reached completion.
-    # A partial log left by a preempted/killed/requeued attempt is deleted
-    # and the instance rerun.
+    # A partial log WITH a checkpoint image resumes from the image; a partial
+    # log without one (old attempt, failed checkpoint) is deleted and rerun.
     if [[ -f "$result_file" ]]; then
         exit 0
     fi
+    resume=""
     if [[ -f "$log_file" ]]; then
         if grep -q "Simulation is complete" "$log_file"; then
             echo "$filename|SKIPPED|-|-" > "$result_file"
             exit 0
         fi
-        echo "stale partial log (restart_count=${SLURM_RESTART_COUNT:-0}); rerunning"
-        rm -f "$log_file" "$stats_file"
+        resume=$(ls -t "$ckpt_dir"/ckpt_*.dmtcp 2>/dev/null | head -1)
+        if [[ -n "$DMTCP_BIN" && -n "$resume" ]]; then
+            echo "resuming from checkpoint $resume (restart_count=${SLURM_RESTART_COUNT:-0})"
+        else
+            echo "stale partial log (restart_count=${SLURM_RESTART_COUNT:-0}); rerunning"
+            rm -f "$log_file" "$stats_file"; rm -rf "$ckpt_dir"
+            resume=""
+        fi
     fi
 
     mapfile -t sim_args < "$RUNDIR/simargs.txt"
@@ -88,11 +117,69 @@ if [[ "${1:-}" == "--worker" ]]; then
     libdir=$(cat "$RUNDIR/libdir.txt" 2>/dev/null)
     [[ -n "$libdir" ]] && lib_arg=(--add-lib-path="$libdir")
     start_time=$(date +"%H:%M:%S")
-    echo "host=$(hostname) task=$TASK_ID cnf=$filename seed=$seed lib=${libdir:-registry}"
+    echo "host=$(hostname) task=$TASK_ID cnf=$filename seed=$seed lib=${libdir:-registry} dmtcp=${DMTCP_BIN:-off}"
 
-    sst "${lib_arg[@]}" ./tests/test_two_level.py -- --cnf "$file" --stats-file "$stats_file" \
-        --rand "$seed" "${sim_args[@]}" > "$log_file" 2>&1
-    exit_status=$?
+    sim_pid=""
+    launch_fresh() {
+        if [[ -n "$DMTCP_BIN" ]]; then
+            mkdir -p "$ckpt_dir"
+            "$DMTCP_BIN/dmtcp_launch" --new-coordinator --coord-port 0 \
+                --port-file "$ckpt_dir/coord.port" --ckptdir "$ckpt_dir" \
+                sst "${lib_arg[@]}" ./tests/test_two_level.py -- --cnf "$file" \
+                --stats-file "$stats_file" --rand "$seed" "${sim_args[@]}" > "$log_file" 2>&1 &
+        else
+            sst "${lib_arg[@]}" ./tests/test_two_level.py -- --cnf "$file" \
+                --stats-file "$stats_file" --rand "$seed" "${sim_args[@]}" > "$log_file" 2>&1 &
+        fi
+        sim_pid=$!
+    }
+    if [[ -n "$resume" ]]; then
+        # Stdout re-attaches to THIS redirect (append), so log part 2 lands
+        # after part 1; sst's other fds (stats csv) reopen their saved paths.
+        "$DMTCP_BIN/dmtcp_restart" --new-coordinator --coord-port 0 \
+            --port-file "$ckpt_dir/coord.port" --ckptdir "$ckpt_dir" \
+            "$resume" >> "$log_file" 2>&1 &
+        sim_pid=$!
+    else
+        launch_fresh
+    fi
+
+    # SLURM delivers USR1 (sbatch --signal=B:USR1@...) to this shell shortly
+    # before the wall limit: checkpoint the sim and exit WITHOUT writing a
+    # result file, so resubmitting the same sweep resumes it from the image.
+    got_usr1=0
+    trap 'got_usr1=1' USR1
+    run_and_wait() {
+        while :; do
+            wait "$sim_pid"; exit_status=$?
+            if [[ $got_usr1 -eq 1 ]]; then
+                got_usr1=0
+                port=$(cat "$ckpt_dir/coord.port" 2>/dev/null)
+                echo "wall limit near: checkpointing (coord port ${port:-?})"
+                if [[ -n "$DMTCP_BIN" && -n "$port" ]] && \
+                   "$DMTCP_BIN/dmtcp_command" --coord-port "$port" --bcheckpoint; then
+                    ls -t "$ckpt_dir"/ckpt_*.dmtcp 2>/dev/null | tail -n +2 | xargs -r rm -f
+                    "$DMTCP_BIN/dmtcp_command" --coord-port "$port" --kill 2>/dev/null
+                    "$DMTCP_BIN/dmtcp_command" --coord-port "$port" --quit 2>/dev/null
+                    echo "checkpointed $(basename "$(ls "$ckpt_dir"/ckpt_*.dmtcp)"); resubmit sweep to resume"
+                    exit 0
+                fi
+                echo "checkpoint failed; letting the sim run to the hard kill"
+            fi
+            kill -0 "$sim_pid" 2>/dev/null || break   # wait was interrupted; sim still alive?
+        done
+    }
+    run_and_wait
+
+    # A restore that dies without reaching a verdict (image/node mismatch or a
+    # crash after restore) falls back to one full rerun from scratch.
+    if [[ -n "$resume" && $exit_status -ne 0 ]] && ! grep -q "Simulation is complete" "$log_file"; then
+        echo "resume failed (exit=$exit_status); rerunning from scratch"
+        rm -f "$log_file" "$stats_file"; rm -rf "$ckpt_dir"
+        launch_fresh
+        run_and_wait
+    fi
+    rm -rf "$ckpt_dir"   # finished (any verdict): the image is no longer needed
 
     if [[ -f "$stats_file" ]]; then
         echo -e "\nParsing statistics file: $stats_file" >> "$log_file"
@@ -219,8 +306,8 @@ if [[ "${1:-}" == "--summarize" ]]; then
 
     # Missing = submitted tasks (tasks.txt) with no result file. Split by the
     # task's real terminal state (sacct, then a slurm-.out grep fallback).
-    m_wall=0; m_oom=0; m_running=0; m_queued=0; m_other=0
-    wall_lines=""; running_lines=""; queued_lines=""; other_lines=""
+    m_wall=0; m_oom=0; m_running=0; m_queued=0; m_other=0; m_ckpt=0
+    wall_lines=""; running_lines=""; queued_lines=""; other_lines=""; ckpt_lines=""
     if [[ -f "$RUNDIR/tasks.txt" ]]; then
         li=-1
         while IFS='|' read -r tfile tseed; do
@@ -229,6 +316,12 @@ if [[ "${1:-}" == "--summarize" ]]; then
             tname=$(basename "$tfile")
             [[ -n "${DONE[${tname}.seed${tseed}]:-}" ]] && continue
             st=${SACCT_STATE[$li]:-}
+            # A DMTCP image means the task checkpointed before its wall limit
+            # and will resume when the same submit command is re-run.
+            if [[ "$st" != "RUNNING" ]] && ls "$RUNDIR/seed$tseed/$tname.ckpt"/ckpt_*.dmtcp >/dev/null 2>&1; then
+                m_ckpt=$((m_ckpt + 1)); ckpt_lines+="  seed$tseed  $tname"$'\n'
+                continue
+            fi
             out="$RUNDIR/slurm/${jid}_${li}.out"
             if [[ -z "$st" && -f "$out" ]]; then       # fallback when sacct has no row
                 if grep -qiE "DUE TO TIME LIMIT" "$out"; then st=TIMEOUT
@@ -244,7 +337,7 @@ if [[ "${1:-}" == "--summarize" ]]; then
         done < "$RUNDIR/tasks.txt"
     fi
     oom=$((m_oom + failed_oom))
-    missing=$((m_wall + m_oom + m_running + m_queued + m_other))
+    missing=$((m_wall + m_oom + m_running + m_queued + m_other + m_ckpt))
 
     # Per-list console cap (full lists always go to summary.log). Override with
     # SUMMARIZE_CAP=0 to print everything to the terminal too.
@@ -269,6 +362,7 @@ if [[ "${1:-}" == "--summarize" ]]; then
         echo "  Passed:        $passed   (-> filter_pass.txt)"
         echo "  Cycle timeout: $timedout   (sim --timeout-cycles)"
         echo "  Wall timeout:  $m_wall   (SLURM --task-time)"
+        [[ $m_ckpt -gt 0 ]] && echo "  Checkpointed:  $m_ckpt   (resubmit the same command to resume)"
         echo "  OOM:           $oom   (killed for memory; $failed_oom left a partial log)"
         echo "  Failed:        $failed_other   (crash/error, not OOM)"
         echo "  Running:       $m_running   (executing now)"
@@ -278,6 +372,7 @@ if [[ "${1:-}" == "--summarize" ]]; then
     } | tee "$RUNDIR/summary.log"
 
     # ---- actionable lists: full to summary.log, capped on the console ----
+    emit_list "Checkpointed tests" "$ckpt_lines"
     emit_list "Wall-timeout tests" "$wall_lines"
     emit_list "OOM tests" "$oom_lines"
     emit_list "Running tests" "$running_lines"
@@ -385,6 +480,10 @@ echo "Tasks to run:  $N  (skipped $n_skipped with existing logs)"
 extra_opts=()
 [[ -n "$TASK_TIME" ]] && extra_opts+=(--time="$TASK_TIME")
 [[ -n "$SBATCH_OPTS" ]] && extra_opts+=($SBATCH_OPTS)  # intentional word-split
+# Ask SLURM to signal the worker before the wall limit so it can write a DMTCP
+# checkpoint (see worker mode). CKPT_SIGNAL_SECS is the lead time; it must
+# comfortably cover one checkpoint write (~task-mem bytes to the shared FS).
+extra_opts+=(--signal="B:USR1@${CKPT_SIGNAL_SECS:-900}")
 
 jobid=$(sbatch --parsable \
     --job-name="sat-$FOLDER_NAME" \
