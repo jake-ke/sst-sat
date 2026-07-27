@@ -260,6 +260,10 @@ public:
     // triggers must hold off (one 1-bit wire in hardware).
     bool rebuildQueued() const { return rebuild_queued_; }
 
+    // Diagnostic: dump full OLC/pipeline state (timeout post-mortem; no
+    // behavior change).
+    void dumpDebugState();
+
     // Setters for SAT solver integration
     void setDecisionFlags(const std::vector<bool>& dec) { decision = dec; }
     void setHeapSize(size_t size) { heap_size = size; num_vars = size; }
@@ -359,6 +363,14 @@ private:
     // Refill responses may return out of order; installed only when adjacent
     // to the window bottom (contiguity invariant).
     std::unordered_map<uint64_t, std::vector<uint8_t>> refill_done_;
+    // Line numbers of in-flight tail refills (<= TAIL_REFILLS_MAX entries; in
+    // HW: the tag field of the refill engine's outstanding-request table).
+    // Needed so target selection never re-requests a line already being
+    // fetched: deriving the target as front-1-inflight assumed in-flight
+    // reads cover the contiguous run below the front, which breaks after a
+    // window recomposition or an out-of-order completion and livelocked the
+    // engine on a line it already had.
+    std::unordered_set<uint64_t> refill_lines_inflight_;
 
     // ---------------- targeted clean ----------------
     std::deque<std::pair<Var, double>> mint_buffer_;  // (var, pre-bump act)

@@ -58,7 +58,7 @@ def parse_args():
                         type=str, default="4",
                         help='L1 cache bandwidth (max requests per cycle)')
     parser.add_argument('--l2-size', dest='l2_size',
-                        type=str, default="24MiB",
+                        type=str, default="16MB",
                         help='L2 cache size')
     parser.add_argument('--l2-latency', dest='l2_latency',
                         type=str, default="32",

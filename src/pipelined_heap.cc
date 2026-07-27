@@ -124,6 +124,59 @@ void PipelinedHeap::finish() {
     memory->finish();
 }
 
+void PipelinedHeap::dumpDebugState() {
+    output.output("--------------[ PipelinedHeap Debug State ]--------------\n");
+    output.output("heap_size=%lu firstOffchipSlot=%lu onchip_levels=%d inheap_count=%lu\n",
+        (uint64_t)heap_size, firstOffchipSlot(), onchip_levels_, (uint64_t)inheap_count_);
+    output.output("rescale=%d debug_heap_pending=%d maybe_active=%d rebuild_queued=%d\n",
+        (int)rescale, (int)debug_heap_pending, (int)maybe_active_, (int)rebuild_queued_);
+    output.output("pipelineIdle=%d active_inserts=%d req_to_op=%zu bumps_inflight=%zu\n",
+        (int)isPipelineIdle(), active_inserts, req_to_op.size(), bumps_inflight_.size());
+    output.output("insert_queue=%zu request_queue=%zu",
+        insert_queue.size(), request_queue.size());
+    if (!request_queue.empty())
+        output.output(" head={op=%d arg=%d}", (int)request_queue.front().op,
+            request_queue.front().arg);
+    output.output("\n");
+    output.output("tail_win: %zu lines [", tail_win_.size());
+    for (const TailLine& tl : tail_win_)
+        output.output(" %lu(v=%d%d%d%d,d=%d)", tl.line, (int)tl.slot_valid[0],
+            (int)tl.slot_valid[1], (int)tl.slot_valid[2], (int)tl.slot_valid[3],
+            (int)tl.dirty);
+    output.output(" ]  tail_line(heap_size)=%lu lineInWindow=%d\n",
+        heap_size >= firstOffchipSlot() ? lineOf(heap_size) : (uint64_t)-1,
+        heap_size >= firstOffchipSlot() ? (int)lineInWindow(lineOf(heap_size)) : -1);
+    output.output("tail_refills_inflight=%d refill_done keys:[", tail_refills_inflight_);
+    for (auto& kv : refill_done_) output.output(" %lu", kv.first);
+    output.output(" ] inflight_lines:[");
+    for (uint64_t l : refill_lines_inflight_) output.output(" %lu", l);
+    output.output(" ] refill_gen=%u\n", refill_gen_);
+    output.output("sift: active=%d slot=%lu var=%d children_ready=%d grand_ready=%d "
+        "grand_needed=%d boundary_write_pending=%d hs_bound=%lu gen=%u\n",
+        (int)sift_.active, sift_.slot, sift_.var, (int)sift_.children_ready,
+        (int)sift_.grand_ready, (int)sift_.grand_needed,
+        (int)sift_.boundary_write_pending, sift_.hs_bound, sift_.gen);
+    output.output("olc_pending=%zu node_writes_inflight=%d store_queue=%zu budget(sift)=%d "
+        "budget(prefetch)=%d\n", olc_pending.size(), node_writes_inflight_,
+        store_queue.size(), (int)olcMemBudgetOk(OLC_RESERVE_SIFT),
+        (int)olcMemBudgetOk(OLC_RESERVE_PREFETCH));
+    for (auto& kv : olc_pending)
+        output.output("  pending id=%lu type=%d ctx_id=%lu level=%d gen=%u\n",
+            kv.first, (int)kv.second.type, kv.second.ctx_id, kv.second.level,
+            kv.second.gen);
+    output.output("insert_ctxs=%zu:", insert_ctxs_.size());
+    for (auto& c : insert_ctxs_)
+        output.output(" {id=%lu dest=%lu prog=%d retired=%d path=%zu}",
+            c.id, c.dest, c.progress, (int)c.retired, c.path.size());
+    output.output("\n");
+    output.output("clean_target_armed=%d hit_slot=%lu\n", (int)clean_target_armed_, hit_slot_);
+    if (heap_size > 0 && heap_size >= firstOffchipSlot()) {
+        output.output("popGate probes: tailSlotReady(hs)=%d siftBlocks(hs)=%d popGateOk=%d\n",
+            (int)tailSlotReady(heap_size), (int)siftBlocks(heap_size), (int)popGateOk());
+    }
+    output.output("---------------------------------------------------------\n");
+}
+
 void PipelinedHeap::sampleOccupancy() {
     stat_size_sample->addData(heap_size);
     stat_stale_sample->addData(staleCount());
@@ -1930,6 +1983,15 @@ OlcNode PipelinedHeap::tailGrab(uint64_t slot) {
 
 void PipelinedHeap::tailRefillTick() {
     if (rescale || debug_heap_pending) return;
+    // Quiesce for olcIdle()-gated requests waiting at the queue head
+    // (REBUILD / DEBUG_HEAP), mirroring the rescale/debug guards above: they
+    // wipe or snapshot the whole window, so refilling it is wasted traffic --
+    // and a refill engine that never rests keeps olc_pending occupied and
+    // starves the dispatch forever (livelock: solver parked behind the
+    // rebuild while refills spin at one read per act-cache round trip).
+    if (!request_queue.empty()
+        && (request_queue.front().op == HeapReqEvent::REBUILD
+            || request_queue.front().op == HeapReqEvent::DEBUG_HEAP)) return;
     if (heap_size < firstOffchipSlot()) return;
     uint64_t tail_line = lineOf(heap_size);
 
@@ -1944,6 +2006,7 @@ void PipelinedHeap::tailRefillTick() {
             olc_pending[req->getID()] =
                 OlcPendingRead(OlcMemType::TAIL_REFILL, tail_line, 0, refill_gen_);
             tail_refills_inflight_++;
+            refill_lines_inflight_.insert(tail_line);
             stat_olc_node_reads->addData(1);
             if (tracer_) tracer_->emitMem(false, addr, 64);
             memory->send(req);
@@ -1951,23 +2014,44 @@ void PipelinedHeap::tailRefillTick() {
         return;
     }
 
-    // Purge undeliverable out-of-order refills once nothing is in flight
-    // (window moved past them via eviction or re-anchor).
-    if (tail_refills_inflight_ == 0 && !refill_done_.empty()
-        && !refill_done_.count(tail_win_.front().line - 1))
-        refill_done_.clear();
+    // Purge only truly undeliverable refills: entries at or above the window
+    // front can never install (installs extend the window downward only).
+    // Entries below the front are kept -- they become installable as the
+    // front walks down to them. (The old clear-all here discarded completed
+    // data for a line the target arithmetic then never re-requested, leaving
+    // a permanent hole that blocked installs forever.)
+    if (!refill_done_.empty()) {
+        uint64_t front_line = tail_win_.front().line;
+        for (auto it = refill_done_.begin(); it != refill_done_.end();)
+            it = (it->first >= front_line) ? refill_done_.erase(it) : ++it;
+        // Deliver any parked line that is now exactly front-1 (its response
+        // may have arrived while the front was elsewhere).
+        installRefills();
+        if (tail_win_.empty()) return;  // re-anchor next tick if drained
+    }
     if (!lineInWindow(tail_line)) return;
     uint64_t runway = tail_line - tail_win_.front().line + 1;
     if ((int)runway + tail_refills_inflight_ >= TAIL_REFILL_MARGIN) return;
     if (tail_refills_inflight_ >= TAIL_REFILLS_MAX) return;
     if (!olcMemBudgetOk(OLC_RESERVE_PREFETCH)) return;  // refills are lowest-priority prefetches
     if (tail_win_.front().line == 0) return;  // already at the first off-chip line
-    uint64_t target = tail_win_.front().line - 1 - tail_refills_inflight_;
-    if (target + 1 == 0) return;
+    // Target the highest line below the front that is neither being fetched
+    // nor already fetched. The old front-1-inflight arithmetic re-derived
+    // the target blind and could chase a line it already had (see
+    // refill_lines_inflight_ in the header).
+    uint64_t target = tail_win_.front().line - 1;
+    int probe = 0;
+    while (target + 1 != 0 && probe < TAIL_REFILL_MARGIN
+           && (refill_lines_inflight_.count(target) || refill_done_.count(target))) {
+        target--;
+        probe++;
+    }
+    if (target + 1 == 0 || probe >= TAIL_REFILL_MARGIN) return;
     uint64_t addr = lineAddr(target);
     auto* req = new SST::Interfaces::StandardMem::Read(addr, 64);
     olc_pending[req->getID()] = OlcPendingRead(OlcMemType::TAIL_REFILL, target, 0, refill_gen_);
     tail_refills_inflight_++;
+    refill_lines_inflight_.insert(target);
     stat_olc_node_reads->addData(1);
     if (tracer_) tracer_->emitMem(false, addr, 64);
     memory->send(req);
@@ -2609,6 +2693,7 @@ void PipelinedHeap::olcHandleMem(SST::Interfaces::StandardMem::ReadResp* resp,
         }
         case OlcMemType::TAIL_REFILL: {
             tail_refills_inflight_--;
+            refill_lines_inflight_.erase(p.ctx_id);
             refill_done_[p.ctx_id] = data;  // ctx_id carries the line index
             installRefills();
             break;

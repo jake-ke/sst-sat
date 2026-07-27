@@ -972,6 +972,14 @@ bool SATSolver::clockTick(SST::Cycle_t cycle) {
     if (timeout_cycles > 0 && cycle >= timeout_cycles && state != DONE) {
         output.output("====================[ Timeout Reached ]====================\n");
         output.output("Cycle %lu >= timeout limit %lu. Terminating early.\n", (uint64_t)cycle, timeout_cycles);
+        // Post-mortem: what was the solver waiting on? (livelock diagnosis)
+        output.output("solver: state=%d saved_state=%d prev_state=%d last_state_change=%lu "
+            "main_active=%d spec_active=%d in_decision=%d heap_resp_cnt=%d\n",
+            (int)state, (int)saved_state, (int)prev_state, last_state_change,
+            (int)main_active, (int)spec_active, (int)in_decision, heap_resp_cnt);
+#ifndef USE_CLASSIC_HEAP
+        order_heap->dumpDebugState();
+#endif
         output.output("===========================================================\n");
         state = DONE;
         total_cycles = cycle;
