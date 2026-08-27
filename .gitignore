@@ -18,4 +18,6 @@ __pycache__/
 *.out
 logs*
 results/
+runs/
+plans/
 

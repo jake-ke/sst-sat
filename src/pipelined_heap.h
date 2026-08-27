@@ -6,12 +6,14 @@
 #include <sst/core/interfaces/stdMem.h>
 #include <sst/core/link.h>
 #include <sst/core/event.h>
+#include <memory>
 #include <vector>
 #include <deque>
 #include <unordered_map>
 #include <unordered_set>
 #include "structs.h"
 #include "trace_writer.h"
+#include "heap_dist_profiler.h"
 
 // Levels 0..onchip_levels_-1 live in per-level SRAM with the 3-stage pipeline;
 // levels >= onchip_levels_ live in the DRAM node region behind the off-chip
@@ -187,7 +189,12 @@ public:
         {"verbose", "Verbosity level", "0"},
         {"var_act_base_addr", "Base address of the per-variable activity array", "0x1C0000000"},
         {"heap_region_end", "End of the heap-owned memory region ([acts | nodes] partition)", "0x200000000"},
-        {"onchip_levels", "Heap levels held in on-chip SRAM (K); 0 = all levels on-chip (no OLC)", "14"}
+        {"onchip_levels", "Heap levels held in on-chip SRAM (K); 0 = all levels on-chip (no OLC)", "14"},
+        {"stack_olc", "Stack-OLC mode: the off-chip region is an append/grab stack (boundary inserts append at their reserved slot, boundary replaces settle at the leaf; no OLC path reads or sifts)", "false"},
+        {"act_mant", "Emulate reduced-mantissa activity ordering: quantize written activities to 1+M significant bits (0 = off, min 4; renormalization is an exact exponent shift either way)", "0"},
+        {"tail_lines", "Tail-buffer sliding window size in 64 B lines (4 node slots each)", "16"},
+        {"dist_interval", "Heap activity distribution profiling interval in conflicts (host-side measurement only, no timing impact; 0 = off)", "0"},
+        {"dist_file", "Output path for the binary .heapdist frame stream (opened lazily at the first frame; empty = no file)", ""}
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -215,7 +222,7 @@ public:
         {"olc_sift_parked_sample", "Active + pipeline-parked sifts, sampled per park event (Max = peak)", "count", 1},
         {"olc_tail_refills", "Tail buffer slide-down line refills", "count", 1},
         {"olc_tail_stalls", "Cycles a pop/trim waited on the tail buffer or sift subtree gate", "count", 1},
-        {"heap_rescales", "Activity rescale sweeps performed", "count", 1},
+        {"heap_rescales", "Rescales executed (folded into rebuild: activity-array renormalization pass)", "count", 1},
         {"heap_cleans", "Targeted cleans launched (stale copies removed pre-pop)", "count", 1},
         {"heap_clean_crossings", "Targeted cleans whose descent crossed to the OLC", "count", 1},
         {"heap_clean_search_misses", "Mint-buffer entries dropped after a full search sweep found no copy", "count", 1},
@@ -264,10 +271,23 @@ public:
     // behavior change).
     void dumpDebugState();
 
+    // Activity distribution snapshot, triggered by the solver every
+    // heap_dist_interval conflicts (host-side measurement; no-op when the
+    // profiler is disabled).
+    void distSnapshot(uint64_t conflicts, uint64_t decisions, uint64_t cycle);
+
     // Setters for SAT solver integration
     void setDecisionFlags(const std::vector<bool>& dec) { decision = dec; }
     void setHeapSize(size_t size) { heap_size = size; num_vars = size; }
     void setVarIncPtr(double* ptr) { var_inc_ptr = ptr; }
+    // act_mant: the solver's var_inc code counter. Read-only here (ceiling
+    // clamp in completeBump); the solver alone owns and adjusts the code.
+    void setVarIncCodePtr(uint64_t* ptr) { inc_code_ptr = ptr; }
+    // Arm an activity renormalization (x2^-r_exp over the DRAM array) to run
+    // inside the next REBUILD. fireHeapRebuild calls this right before
+    // sending the request, after re-basing var_inc (and its code) itself —
+    // the heap only re-bases storage.
+    void armRescale(int r_exp);
     void setTracer(TraceWriter* t, uint8_t /*ds_id*/) { tracer_ = t; }
     // Debug/guard-stat visibility into assignment state (not used for heap logic)
     void setAssignedFlagsRef(const std::vector<bool>* assigned) { assigned_ref_ = assigned; }
@@ -285,12 +305,15 @@ private:
     uint64_t heap_region_end_;
     int onchip_levels_;     // K: levels in SRAM ("onchip_levels" param; 0 maps
                             // to MAX_TOTAL_HEAP_LEVELS, i.e. all on-chip)
+    bool stack_olc_;        // "stack_olc" param: off-chip region is a stack
+    int act_mant_;          // "act_mant" param: stored mantissa bits (0 = off)
     size_t num_vars;
 
     // Heap state
     size_t heap_size;                       // Current number of entries (live + stale copies)
     std::vector<bool> decision;             // Whether each variable is eligible for decisions
     double* var_inc_ptr;                    // Pointer to variable increment value
+    uint64_t* inc_code_ptr;                 // act_mant: solver's var_inc code counter
     const std::vector<bool>* assigned_ref_; // Solver's var_assigned (debug/guard stats only)
 
     // On-chip membership bit per variable: inheap_[v]=1 means the copy from
@@ -308,7 +331,8 @@ private:
 
     // ---------------- OLC state ----------------
     static const int OLC_INSERT_CTXS = 8;     // insert context table size
-    static const int TAIL_WINDOW_LINES = 16;  // sliding window: 16 lines = 64 slots
+    static const int TAIL_WINDOW_LINES = 16;  // "tail_lines" default: 16 lines = 64 slots
+    int tail_lines_;                          // sliding window lines ("tail_lines" param)
     static const int TAIL_REFILL_MARGIN = 8;  // refill when runway (lines) < margin
     static const int TAIL_REFILLS_MAX = 2;    // refill line reads in flight
     // Outstanding node reads+writes cap: keeps the OLC from flooding the act
@@ -417,6 +441,9 @@ private:
     bool olcCanAcceptInsert() const;
     bool olcCanAcceptSift() const;
     void olcStartInsert(Var v, double act, uint64_t dest);
+    // stack_olc: land a boundary-crossing insert at its reserved tail slot in
+    // one step; the write is the reservation's retirement.
+    void stackAppend(Var v, double act, uint64_t dest);
     void olcStartSift(uint64_t boundary_slot, Var v, double act);
     void olcProcessInserts();
     void olcIssueInsertRead(OlcInsertCtx& ctx, int level);
@@ -443,7 +470,6 @@ private:
     OlcNode tailGrab(uint64_t slot);                     // read+clear the tail slot
     void tailRefillTick();
     void installRefills();
-    void tailScaleActs();                                // rescale: scale resident lines
     void tailWipe();                                     // rebuild: drop everything
     bool popGateOk();                                    // off-chip tail: ready + subtree gate
 
@@ -473,6 +499,9 @@ private:
     // Trace writer (shared, not owned).
     TraceWriter* tracer_ = nullptr;
 
+    // Activity distribution profiler ("dist_interval" param; null when off).
+    std::unique_ptr<HeapDistProfiler> dist_;
+
     // Request queues
     std::deque<PendingRequest> request_queue;
     std::deque<InsReq> insert_queue;
@@ -486,28 +515,26 @@ private:
     // and lands a copy that is stale while its bit is set).
     std::unordered_set<Var> bumps_inflight_;
 
-    // Rescale: on trigger the pending bump is stashed unwritten, dispatch
-    // stops, in-flight reads drain and the pipeline empties, then on-chip
-    // state + the off-chip sweep scale, and finally the stashed bump(s)
-    // complete with the scaled inc. The on-chip sweep is charged wall time
-    // (per-level SRAMs scale in parallel at 1 entry/cycle, so its duration is
-    // the largest occupied level) overlapped with the off-chip burst; rescale
-    // completes when BOTH are done.
-    bool rescale;
-    bool rescale_sweep_started_;
-    bool rescale_offchip_done_;
-    size_t rescale_onchip_cycles_;
-    size_t rescale_pending_reads;
+    // Rebuild-folded rescale (renormalization): armRescale latches the
+    // exponent shift the solver decided at fireHeapRebuild; the armed
+    // REBUILD, right after
+    // its wipe, runs startRescalePass — a burst RMW over ONLY the DRAM
+    // activity array (the wipe just emptied every other copy). While the
+    // pass is in flight rescale_active_ blocks all dispatch, so the queued
+    // reinsert wave fetches post-rescale values. While armed-but-not-yet-run
+    // (rescale_exp_ != 0), completeBump bridges the basis gap (see there).
+    int rescale_exp_;        // armed shift: x2^-rescale_exp_ at the next REBUILD (0 = none)
+    bool rescale_active_;    // array pass in flight; blocks dispatch
+    double rescale_factor_;  // ldexp(1, -r_exp) of the running pass
+    void startRescalePass();
     // Sweep bursts (rescale/debug) stream through a fixed window instead of
     // issuing every chunk at once: an unbounded burst (up to millions of line
     // reads with a deep node region) floods the act cache's MSHR.
     static const int BURST_WINDOW = 16;
     std::deque<std::pair<uint64_t, size_t>> burst_queue_;  // (addr, size) chunks
     int burst_inflight_;
+    size_t burst_pending_reads_;    // chunks not yet RMW-completed this sweep
     void issueBurstReads();
-    struct StashedBump { Var var; double act; };
-    std::vector<StashedBump> rescale_stash_;
-    void maybeFinishRescale();
 
     // Idle root-peek purge: REPLACE launched by the heap itself; suppress the
     // root response toward the solver.
@@ -571,8 +598,14 @@ private:
     void getAct(Var v, bool bump);
     void completeBump(Var v, double act);
     void completeInsertFetch(Var v, double act);
-    void startRescaleSweep();
-    void finishRescale();
+    // Stored-activity assert bound. There is no write-time rescale trigger
+    // any more — rescales fold into rebuilds — so activities run up to the
+    // rescale ceiling: the solver's decay assert keeps var_inc's exponent
+    // below 1015, and a < 32*var_inc (report bound; the act_mant clamp
+    // enforces it exactly) keeps every written value below 2^1020.
+    static constexpr double ACT_BOUND = 0x1p1020;
+    // Round-to-nearest-even keeping 1+m significant bits (0 stays 0).
+    static double quantAct(double a, int m);
     void readBurstAll(uint64_t start_addr, size_t total_size);
     void verifyDebugHeap();
 

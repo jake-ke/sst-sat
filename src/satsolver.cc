@@ -18,6 +18,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     SST::Component(id), 
     state(IDLE),
     var_inc(1.0),
+    var_inc_code(0),
     cla_inc(1.0),
     learntsize_factor((double)1/(double)3),
     learntsize_inc(1.1),
@@ -117,6 +118,16 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
 
     // Initialize activity-related variables
     var_decay = params.find<double>("var_decay", 0.95);
+    // var_inc(1.0) == actMantVal(0, m): code and double start consistent.
+    act_mant = params.find<int>("act_mant", 0);
+    sst_assert(act_mant == 0 || (act_mant >= 4 && act_mant <= 52),
+        CALL_INFO, -1, "act_mant %d out of range (0 = off, else 4..52)\n", act_mant);
+#ifdef USE_CLASSIC_HEAP
+    // The classic heap's rescale scales var_inc without the code counter; a
+    // stray act_mant would make the next decay undo the rescale (storm).
+    sst_assert(act_mant == 0, CALL_INFO, -1,
+        "act_mant requires the pipelined heap (classic build)\n");
+#endif
     clause_decay = params.find<double>("clause_decay", 0.999);  // Add clause decay parameter
     random_var_freq = params.find<double>("random_var_freq", 0.0);
     
@@ -204,6 +215,8 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
 
     enable_speculative = params.find<bool>("enable_speculative", false);
     timeout_cycles = params.find<uint64_t>("timeout_cycles", 0);
+    heap_dist_interval = params.find<uint64_t>("heap_dist_interval", 0);
+    heap_dist_ctr_ = 0;
     max_confl = params.find<int>("max_confl", 8);
     output.output("MAX_CONFL           : %d\n", max_confl);
     // Guarded Multi-Commit +1: on rounds where the harvested conflicts disagree
@@ -248,6 +261,7 @@ SATSolver::SATSolver(SST::ComponentId_t id, SST::Params& params) :
     stat_minimized_literals = registerStatistic<uint64_t>("minimized_literals");
     stat_restarts = registerStatistic<uint64_t>("restarts");
     stat_midsearch_rebuilds = registerStatistic<uint64_t>("midsearch_rebuilds");
+    stat_rescale_forced_rebuilds = registerStatistic<uint64_t>("rescale_forced_rebuilds");
     stat_watcher_occ = registerStatistic<uint64_t>("watcher_occ");
     stat_watcher_blocks = registerStatistic<uint64_t>("watcher_blocks");
     stat_para_watchers = registerStatistic<uint64_t>("para_watchers");
@@ -382,6 +396,11 @@ void SATSolver::init(unsigned int phase) {
         order_heap->setDecisionFlags(decision);
         order_heap->setHeapSize(num_vars);
         order_heap->setVarIncPtr(&var_inc);
+#ifndef USE_CLASSIC_HEAP
+        // act_mant: completeBump's ceiling clamp reads the code (read-only —
+        // the solver alone owns and adjusts it, at decay and rescale-arm).
+        order_heap->setVarIncCodePtr(&var_inc_code);
+#endif
         order_heap->initHeap(random_seed);
     }
     output.verbose(CALL_INFO, 3, 0, "SATSolver initialized in phase %u\n", phase);
@@ -968,6 +987,7 @@ void SATSolver::handleReduceScan(SST::Event* ev) {
 }
 
 bool SATSolver::clockTick(SST::Cycle_t cycle) {
+    currentCycle = cycle;  // snapshot metadata (heap dist frames)
     // Check for timeout before doing any work. If exceeded, terminate simulation.
     if (timeout_cycles > 0 && cycle >= timeout_cycles && state != DONE) {
         output.output("====================[ Timeout Reached ]====================\n");
@@ -1671,8 +1691,18 @@ void SATSolver::execBacktrack() {
     }
 
     varDecayActivity();
+#ifndef USE_CLASSIC_HEAP
+    // Heap activity distribution profiling: one snapshot every N conflict
+    // rounds, at the same once-per-conflict point as the decay (host-side
+    // measurement only; see plans/pheap-act-dist.md).
+    if (heap_dist_interval > 0 && ++heap_dist_ctr_ >= heap_dist_interval) {
+        heap_dist_ctr_ = 0;
+        order_heap->distSnapshot(getStatCount(stat_conflicts),
+                                 getStatCount(stat_decisions), currentCycle);
+    }
+#endif
     claDecayActivity();
-    
+
     // Periodically adjust learntsize limits
     if (--learnt_adjust_cnt == 0) {
         learnt_adjust_confl *= learnt_adjust_inc;
@@ -3110,7 +3140,7 @@ Lit SATSolver::peekBranchVariable() {
     return mkLit(next, polarity[next]);
 }
 
-// Two-term trigger, each with a distinct job:
+// Trigger terms, each with a distinct job (the stale pair must fire jointly):
 //  - staleCount > liveCount (instance-relative): fire only when garbage
 //    outweighs the live set, so every percolation is carrying majority-dead
 //    weight and the wave (one insert per live var) costs less than the
@@ -3121,13 +3151,28 @@ Lit SATSolver::peekBranchVariable() {
 //    test: an isOffChip() gate here created a pile-pinned-at-the-boundary
 //    attractor (equilibrium ~15k stales, sporadic crossings) because no
 //    trigger could fire below 2^K.
+//  - rescale runway backstop (pipelined heap, E = incExp() >= 900): var_inc's
+//    exponent has burned most of the rescale runway, so force a rebuild
+//    (within ~a conflict — this is checked every backtrack/restart) purely
+//    to host the armed rescale in fireHeapRebuild. Hardware mapping:
+//    the sim thresholds 708 (arm) / 900 (backstop) / 517 (landing) live in
+//    float64's exponent range; the e12 hardware register runs the same
+//    scheme as ~2048 (arm) / 3579 (backstop) / 517 (landing) over its 4096
+//    swing. Counted in rescale_forced_rebuilds when it is the deciding term.
 // rebuildQueued() blocks re-fires while a queued wipe is undispatched
 // (solver-side staleCount() reads the pre-wipe value until then). Inert for
 // the classic heap: in-place updates never create stales.
 bool SATSolver::heapRebuildDue() const {
-    return !order_heap->rebuildQueued()
-        && order_heap->staleCount() > order_heap->liveCount()
+    if (order_heap->rebuildQueued()) return false;
+    bool stale_due = order_heap->staleCount() > order_heap->liveCount()
         && order_heap->staleCount() > order_heap->rebuildStaleFloor();
+#ifndef USE_CLASSIC_HEAP
+    if (incExp() >= 900) {
+        if (!stale_due) stat_rescale_forced_rebuilds->addData(1);
+        return true;
+    }
+#endif
+    return stale_due;
 }
 
 // Completes a rebuild armed before a backtrack: ends the suppression window
@@ -3138,6 +3183,28 @@ bool SATSolver::heapRebuildDue() const {
 // drains under the intervening propagation.
 void SATSolver::fireHeapRebuild() {
     suppress_heap_inserts_ = false;
+#ifndef USE_CLASSIC_HEAP
+    // Rescale piggyback (renormalization): past half-runway, fold an
+    // exponent shift into this rebuild. The heap arms an activity-array
+    // pass to run inside
+    // the coming REBUILD; var_inc (and its code under act_mant) re-bases NOW
+    // — the solver owns the code, so decays between arm and pass completion
+    // stay consistent, and completeBump bridges the window for bump RMWs
+    // still queued ahead of the REBUILD. r_exp lands the exponent back at
+    // 517 (constants and hardware mapping: see heapRebuildDue).
+    if (incExp() >= 708) {
+        int r_exp = (int)(incExp() - 517);
+        order_heap->armRescale(r_exp);
+        if (act_mant) {
+            var_inc_code -= (uint64_t)r_exp << act_mant;
+            var_inc = actMantVal(var_inc_code, act_mant);
+        } else {
+            var_inc = std::ldexp(var_inc, -r_exp);
+        }
+        output.verbose(CALL_INFO, 3, 0,
+            "REBUILD: rescale armed (x2^-%d), var_inc now %g\n", r_exp, var_inc);
+    }
+#endif
     order_heap->handleRequest(new HeapReqEvent(HeapReqEvent::REBUILD));
     for (Var v = 1; v <= (Var)num_vars; v++)
         if (!var_assigned[v]) insertVarOrder(v);
@@ -3157,7 +3224,24 @@ void SATSolver::insertVarOrder(Var v) {
 }
 
 void SATSolver::varDecayActivity() {
-    var_inc *= 1.0 / var_decay;
+    if (act_mant) {
+        // Code-counter decay (see actMantVal in structs.h): +2^(m-4) ULPs per
+        // conflict, i.e. +1/16 exponent step, pins the half-life at 16
+        // conflicts for every m. The double is refreshed from the code so all
+        // existing plumbing (heap RMWs, rescale thresholds) works unmodified.
+        var_inc_code += 1ull << (act_mant - 4);
+        var_inc = actMantVal(var_inc_code, act_mant);
+    } else {
+        var_inc *= 1.0 / var_decay;
+    }
+#ifndef USE_CLASSIC_HEAP
+    // Sanity (unreachable): the runway backstop in heapRebuildDue fires a
+    // rescaling rebuild at E >= 900, far below float64's ceiling — tripping
+    // this means rescales failed to keep up with decay.
+    sst_assert(incExp() < 1015, CALL_INFO, -1,
+        "var_inc exponent %lld: rebuild-folded rescale failed to keep up\n",
+        (long long)incExp());
+#endif
     output.verbose(CALL_INFO, 4, 0,
         "ACTIVITY: Decayed var activity increment to %f\n", var_inc);
 }

@@ -15,6 +15,12 @@ parser.add_argument('--script', type=str, default=default_script,
 parser.add_argument('--onchip-levels', type=int, default=3,
                     help='On-chip heap levels K (0 = all on-chip). The harness '
                          'default of 3 exercises the OLC on tiny heaps.')
+parser.add_argument('--olc-stack', dest='olc_stack', action='store_true', default=False,
+                    help='Stack-OLC mode: the off-chip region is an append/grab '
+                         'stack (no OLC path reads or sifts). NOTE: stress '
+                         'scripts\' pop-order expectations assume full heap '
+                         'order and will report false (remove) mismatches in '
+                         'this mode — judge correctness by the debug audits.')
 args = parser.parse_args()
 
 var_act_base_addr = 0x70000000
@@ -38,6 +44,10 @@ heap.addParams({
     # memory controller's range.
     "heap_region_end" : hex(var_act_base_addr + 0x100000),
     "onchip_levels" : str(args.onchip_levels),
+    "stack_olc" : str(args.olc_stack),
+    # Keep the distribution profiler's shadow state active so every
+    # DEBUG_HEAP audit also cross-checks it against the burst-read truth.
+    "dist_interval" : "1",
 })
 
 # Connect test component to heap

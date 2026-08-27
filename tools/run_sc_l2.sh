@@ -13,7 +13,7 @@ fi
 
 # Check if help is requested or show usage
 show_usage() {
-    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--lib-dir BUILD_DIR] [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--l2-latency LATENCY] [--l2-bw BW] [--l2-width WIDTH] [--mem-latency LATENCY] [--prefetch] [--spec] [--profile-2wl] [--profile-prop-timing] [--enable-histograms] [--cache-profiler] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [--max-confl N] [--gmc1] [-j jobs]"
+    echo "Usage: $SCRIPT_NAME --bench-dir DIR [--lib-dir BUILD_DIR] [--ram2-cfg FILE] [--classic-heap] [--l1-size SIZE] [--l1-latency LATENCY] [--l2-latency LATENCY] [--l2-bw BW] [--l2-width WIDTH] [--mem-latency LATENCY] [--prefetch] [--spec] [--profile-2wl] [--profile-prop-timing] [--enable-histograms] [--cache-profiler] [--folder FOLDER] [--num-seeds NUM | --seed NUM] [--timeout-cycles CYCLES] [--wall-timeout SECONDS] [--heap-dist N] [--olc-stack] [--act-mant N] [--tail-lines N] [--max-confl N] [--gmc1] [-j jobs]"
     echo "Options:"
     echo "  -b, --bench-dir DIR  Directory containing benchmark CNF files (required)"
     echo "  --ram2-cfg FILE       Ramulator2 configuration file"
@@ -76,6 +76,12 @@ PROFILE_2WL=""
 PROFILE_PROP_TIMING=""
 ENABLE_HISTOGRAMS=""
 CACHE_PROFILER=""
+HEAP_DIST=""
+OLC_STACK=""
+ACT_MANT=""
+TAIL_LINES=""
+WALL_TIMEOUT=7200
+WALL_TIMEOUT_SET=""
 
 # Default number of parallel jobs (use available CPU cores)
 MAX_JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
@@ -258,6 +264,51 @@ while [[ $# -gt 0 ]]; do
                 shift 2
             else
                 echo "Error: --seed requires a number argument"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --heap-dist)
+            if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
+                HEAP_DIST=$2
+                shift 2
+            else
+                echo "Error: --heap-dist requires a numeric conflict-interval argument"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --olc-stack)
+            OLC_STACK="yes"
+            shift
+            ;;
+        --act-mant)
+            if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
+                ACT_MANT=$2
+                shift 2
+            else
+                echo "Error: --act-mant requires a numeric mantissa-bits argument"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --tail-lines)
+            if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
+                TAIL_LINES=$2
+                shift 2
+            else
+                echo "Error: --tail-lines requires a numeric line-count argument"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --wall-timeout)
+            if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
+                WALL_TIMEOUT=$2
+                WALL_TIMEOUT_SET=1
+                shift 2
+            else
+                echo "Error: --wall-timeout requires a numeric seconds argument"
                 show_usage
                 exit 1
             fi
@@ -532,9 +583,10 @@ run_one_seed() {
     [[ -n "$LIB_DIR" ]] && lib_arg="--add-lib-path=$LIB_DIR "
     local sst_invocation="sst ${lib_arg}./tests/test_two_level.py -- --cnf \"$file\" --stats-file \"$stats_file\" --rand $seed"
     local command=""
-    if [[ -z "$TIMEOUT_CYCLES" ]]; then
-        # Apply 2-hour wall-clock timeout only when no simulation cycle timeout is provided
-        command="timeout 7200 $sst_invocation"
+    # Wall-clock timeout applies when no cycle timeout is provided (legacy
+    # default 7200 s), or alongside one when --wall-timeout is explicit.
+    if [[ -z "$TIMEOUT_CYCLES" || -n "$WALL_TIMEOUT_SET" ]]; then
+        command="timeout $WALL_TIMEOUT $sst_invocation"
     else
         command="$sst_invocation"
     fi
@@ -561,6 +613,10 @@ run_one_seed() {
     [[ -n "$PROFILE_PROP_TIMING" ]] && command+=" --profile-prop-timing"
     [[ -n "$ENABLE_HISTOGRAMS" ]] && command+=" --enable-histograms"
     [[ -n "$CACHE_PROFILER" ]] && command+=" --cache-profiler"
+    [[ -n "$HEAP_DIST" ]] && command+=" --heap-dist $HEAP_DIST"
+    [[ -n "$OLC_STACK" ]] && command+=" --olc-stack"
+    [[ -n "$ACT_MANT" ]] && command+=" --act-mant $ACT_MANT"
+    [[ -n "$TAIL_LINES" ]] && command+=" --tail-lines $TAIL_LINES"
 
     # Run the test with proper command
     eval $command > "$log_file" 2>&1

@@ -64,6 +64,7 @@ public:
         {"random_seed", "Random seed for decision making", "8888"},
         {"sort_clauses", "Sort clauses by activity", "true"},
         {"var_decay", "Variable activity decay factor", "0.95"},
+        {"act_mant", "Emulate reduced-mantissa activity ordering: var_inc advances as an exponent/mantissa code with this many mantissa bits, half-life pinned at 16 conflicts (0 = off, min 4; pipelined heap only, pair with the heap's act_mant)", "0"},
         {"clause_decay", "Clause activity decay factor", "0.999"},
         {"random_var_freq", "Frequency of random decisions", "0.02"},
         {"decision_file", "Path to a file containing decision sequence", ""},
@@ -85,6 +86,7 @@ public:
         {"profile_prop_timing", "Enable per-propagation timing breakdown (cycles_read_headptr/blocks/clauses/insert/polling and spec/normal metrics). Auto-enabled when enable_speculative=true.", "false"},
         {"trace_file", "Path to binary memory-access trace. Empty disables tracing.", ""},
         {"trace_buffer_bytes", "Ring buffer size for trace writer (bytes).", "4194304"},
+        {"heap_dist_interval", "Heap activity distribution snapshot interval in conflicts (0 = off; pipelined heap only, host-side measurement with no timing impact)", "0"},
     )
 
     SST_ELI_DOCUMENT_STATISTICS(
@@ -99,6 +101,7 @@ public:
         {"minimized_literals", "Number of literals removed by clause minimization", "count", 1},
         {"restarts", "Number of restarts", "count", 1},
         {"midsearch_rebuilds", "Heap rebuilds triggered between restarts by the stale threshold", "count", 1},
+        {"rescale_forced_rebuilds", "Heap rebuilds where the rescale runway backstop (E >= 900) was the deciding trigger (staleness alone would not have fired)", "count", 1},
         {"watcher_occ", "Number of watchers residing in watch lists", "count", 1},
         {"watcher_blocks", "Number of blocks visited during watcher insertions", "count", 1},
         {"para_watchers", "Number of watchers inspected per propagation", "count", 1},
@@ -309,6 +312,16 @@ private:
     std::vector<bool> polarity;         // Saved phase (polarity) for each variable
     std::vector<bool> decision;         // Whether variable is eligible for decisions
     double var_inc;                     // Amount to bump variable activity by
+    int act_mant;                       // act_mant param: mantissa bits (0 = off)
+    uint64_t var_inc_code;              // act_mant: var_inc as [exponent | mantissa] code
+    // var_inc's current binary exponent E — the code's signed exponent field
+    // under act_mant, ilogb of the double otherwise. Drives the rebuild-folded
+    // rescale thresholds (arm at 708, backstop at 900, ceiling assert at
+    // 1015); identical constants for both representations.
+    int64_t incExp() const {
+        return act_mant ? ((int64_t)var_inc_code >> act_mant)
+                        : (int64_t)std::ilogb(var_inc);
+    }
     double var_decay;                   // Variable activity decay factor
     double random_var_freq;             // Frequency of random decisions
     uint64_t random_seed;               // Seed for random number generation
@@ -327,6 +340,8 @@ private:
     bool in_decision;                // Whether the heap has been unstalled
     int heap_resp_cnt;                  // Number of unstalled heap responses to receive
     bool suppress_heap_inserts_;        // Rebuild-restart: skip trail-unwind inserts
+    uint64_t heap_dist_interval;        // heap_dist_interval param (0 = off)
+    uint64_t heap_dist_ctr_;            // conflicts since the last dist snapshot
 
     // external memory controller for struct Variable
     Variables variables;                // Replaces std::vector<Variable> variables
@@ -395,6 +410,7 @@ private:
     Statistic<uint64_t>* stat_minimized_literals;
     Statistic<uint64_t>* stat_restarts;
     Statistic<uint64_t>* stat_midsearch_rebuilds;
+    Statistic<uint64_t>* stat_rescale_forced_rebuilds;
     Statistic<uint64_t>* stat_watcher_occ;
     Statistic<uint64_t>* stat_watcher_blocks;
     Statistic<uint64_t>* stat_para_watchers;

@@ -92,6 +92,16 @@ def parse_args():
                         help='Enable speculative propagation')
     parser.add_argument('--onchip-levels', dest='onchip_levels', type=int, default=14,
                         help='Heap levels in on-chip SRAM (0 = all on-chip, no OLC)')
+    parser.add_argument('--olc-stack', dest='olc_stack',
+                        action='store_true', default=False,
+                        help='Stack-OLC mode: the off-chip heap region is an append/grab '
+                             'stack (no OLC path reads or sifts; pipelined heap only)')
+    parser.add_argument('--act-mant', dest='act_mant', type=int, default=0, metavar='M',
+                        help='Emulate reduced-mantissa activity ordering with M stored '
+                             'mantissa bits (0 = off, min 4; pipelined heap only)')
+    parser.add_argument('--tail-lines', dest='tail_lines', type=int, default=16, metavar='N',
+                        help='Tail-buffer sliding window size in 64B lines '
+                             '(pipelined heap only)')
     parser.add_argument('--classic-heap', dest='classic_heap',
                         action='store_true', default=False,
                         help='Use classic heap implementation instead of pipelined heap')
@@ -123,8 +133,25 @@ def parse_args():
     parser.add_argument('--trace-buffer-bytes', dest='trace_buffer_bytes',
                         type=int, default=4194304,
                         help='Ring buffer size for trace writer (bytes)')
+    parser.add_argument('--heap-dist', dest='heap_dist', type=int, nargs='?',
+                        const=10000, default=0, metavar='N',
+                        help='Profile heap activity distributions every N conflicts '
+                             '(host-side measurement, writes <stats-file>.heapdist; '
+                             'pipelined heap only)')
 
     args = parser.parse_args()
+
+    if args.heap_dist and args.classic_heap:
+        parser.error("--heap-dist requires the pipelined heap (remove --classic-heap)")
+    if args.heap_dist < 0:
+        parser.error("--heap-dist interval must be >= 0")
+    if args.classic_heap and (args.olc_stack or args.act_mant or args.tail_lines != 16):
+        parser.error("--olc-stack/--act-mant/--tail-lines require the pipelined heap "
+                     "(remove --classic-heap)")
+    if args.act_mant and not 4 <= args.act_mant <= 52:
+        parser.error("--act-mant must be 0 (off) or in 4..52")
+    if args.tail_lines < 1:
+        parser.error("--tail-lines must be >= 1")
     
     # Validate file existence
     if not os.path.exists(args.cnf_path):
@@ -235,6 +262,15 @@ if args.cache_profiler:
     print(f"Cache profiler subcomponent enabled (L1+L2)")
 if args.trace_file:
     print(f"Binary trace enabled: {args.trace_file} (buffer={args.trace_buffer_bytes} B)")
+if args.heap_dist:
+    print(f"Heap activity distribution profiling every {args.heap_dist} conflicts"
+          f" -> {args.stats_file}.heapdist")
+if args.olc_stack:
+    print("Stack-OLC mode enabled (off-chip heap region is an append/grab stack)")
+if args.act_mant:
+    print(f"Activity representation emulation: {args.act_mant} mantissa bits")
+if args.tail_lines != 16:
+    print(f"Tail-buffer window: {args.tail_lines} lines")
 
 # Create the SAT solver component
 solver = sst.Component("solver", "satsolver.SATSolver")
@@ -278,6 +314,7 @@ params = {
     "random_var_freq": str(args.random_var_freq),
     "random_seed": str(args.random_seed),
     "var_decay": str(args.var_decay),
+    "act_mant": str(args.act_mant),
     "clause_decay": str(args.clause_decay),
     "prefetch_enabled": str(args.enable_prefetch),
     "enable_speculative": str(args.enable_speculative),
@@ -294,6 +331,8 @@ if args.decision_path:
     params["decision_file"] = args.decision_path
 if args.decision_output_path:
     params["decision_output_file"] = args.decision_output_path
+if args.heap_dist:
+    params["heap_dist_interval"] = str(args.heap_dist)
 solver.addParams(params)
 
 
@@ -317,6 +356,17 @@ heap.addParams({
     "heap_region_end" : hex(int(addr_range_end, 16) + 1),
     "onchip_levels" : str(args.onchip_levels),
 })
+if not args.classic_heap:
+    heap.addParams({
+        "stack_olc" : str(args.olc_stack),
+        "act_mant" : str(args.act_mant),
+        "tail_lines" : str(args.tail_lines),
+    })
+if args.heap_dist:
+    heap.addParams({
+        "dist_interval" : str(args.heap_dist),
+        "dist_file" : args.stats_file + ".heapdist",
+    })
 print()
 
 # Configure memory interface for global operations (heap and variables)
@@ -525,6 +575,7 @@ solver_stats = [
     "minimized_literals",
     "restarts",
     "midsearch_rebuilds",
+    "rescale_forced_rebuilds",
     "learnt_length",
     "learnt_units",
     "learnt_lbd",

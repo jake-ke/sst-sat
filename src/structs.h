@@ -4,6 +4,8 @@
 #include <boost/coroutine2/all.hpp>
 #include <vector>
 #include <cstddef>
+#include <cstdint>
+#include <cmath>
 
 using coro_t = boost::coroutines2::coroutine<void>;
 
@@ -74,6 +76,25 @@ constexpr int SPEC_WORKER_BASE =
 // misrouted by handleGlobalMemEvent.
 static_assert(REDUCE_WORKERS + 2 <= SPEC_WORKER_BASE,
               "reduce worker ids must stay below SPEC_WORKER_BASE");
+
+// --act-mant activity-representation emulation (solver + pipelined heap):
+// var_inc evolves as the hardware register would, a uint64 code of
+// [exponent | m fraction bits] with value 2^(code >> m) * (1 + frac/2^m).
+// The exponent is read as signed (arithmetic shift; defensive — the
+// rebuild-folded renormalization lands it at 517, so it stays positive, and
+// two's-complement wraparound of the uint64 keeps the fraction bits exact
+// either way). Renormalization-in-rebuild is real here, for both
+// representations: the solver re-bases var_inc (and this code) at
+// fireHeapRebuild, and the heap re-bases the DRAM activity array inside the
+// armed REBUILD — exact exponent shifts on both sides. Deliberately NOT
+// emulated (ordering semantics only): the e12 window floor (float64 under
+// the 517-landing rescale already underflows at a tighter window than e12's
+// 4096 steps, so the sim is conservative) and any storage-width timing.
+inline double actMantVal(uint64_t code, int m) {
+    return std::ldexp(1.0 + (double)(code & (((uint64_t)1 << m) - 1))
+                                / (double)((uint64_t)1 << m),
+                      (int)((int64_t)code >> m));
+}
 
 // Define types for variables and literals
 typedef int Var;

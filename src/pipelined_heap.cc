@@ -12,6 +12,7 @@ PipelinedHeap::PipelinedHeap(
     num_vars(0),
     heap_size(0),
     var_inc_ptr(nullptr),
+    inc_code_ptr(nullptr),
     assigned_ref_(nullptr),
     inheap_count_(0),
     nodes_base_(0),
@@ -21,12 +22,11 @@ PipelinedHeap::PipelinedHeap(
     tail_refills_inflight_(0),
     refill_gen_(0),
     active_inserts(0),
-    rescale(false),
-    rescale_sweep_started_(false),
-    rescale_offchip_done_(false),
-    rescale_onchip_cycles_(0),
-    rescale_pending_reads(0),
+    rescale_exp_(0),
+    rescale_active_(false),
+    rescale_factor_(1.0),
     burst_inflight_(0),
+    burst_pending_reads_(0),
     purge_suppress_(false),
     rebuild_queued_(false),
     clean_enabled_(false),
@@ -48,6 +48,17 @@ PipelinedHeap::PipelinedHeap(
     sst_assert(onchip_levels_ >= 1 && onchip_levels_ <= MAX_TOTAL_HEAP_LEVELS,
         CALL_INFO, -1, "onchip_levels %d out of range [0..%d]\n",
         onchip_levels_, MAX_TOTAL_HEAP_LEVELS);
+    stack_olc_ = params.find<bool>("stack_olc", false);
+    act_mant_ = params.find<int>("act_mant", 0);
+    sst_assert(act_mant_ == 0 || (act_mant_ >= 4 && act_mant_ <= 52),
+        CALL_INFO, -1, "act_mant %d out of range (0 = off, else 4..52)\n", act_mant_);
+    tail_lines_ = params.find<int>("tail_lines", TAIL_WINDOW_LINES);
+    sst_assert(tail_lines_ >= 1, CALL_INFO, -1,
+        "tail_lines %d out of range (>= 1)\n", tail_lines_);
+
+    if (params.find<int>("dist_interval", 0) > 0)
+        dist_ = std::make_unique<HeapDistProfiler>(
+            params.find<std::string>("dist_file", ""), onchip_levels_);
 
     registerClock(params.find<std::string>("clock", "1GHz"),
                  new SST::Clock::Handler2<PipelinedHeap, &PipelinedHeap::tick>(this));
@@ -128,8 +139,8 @@ void PipelinedHeap::dumpDebugState() {
     output.output("--------------[ PipelinedHeap Debug State ]--------------\n");
     output.output("heap_size=%lu firstOffchipSlot=%lu onchip_levels=%d inheap_count=%lu\n",
         (uint64_t)heap_size, firstOffchipSlot(), onchip_levels_, (uint64_t)inheap_count_);
-    output.output("rescale=%d debug_heap_pending=%d maybe_active=%d rebuild_queued=%d\n",
-        (int)rescale, (int)debug_heap_pending, (int)maybe_active_, (int)rebuild_queued_);
+    output.output("rescale_exp=%d rescale_active=%d debug_heap_pending=%d maybe_active=%d rebuild_queued=%d\n",
+        rescale_exp_, (int)rescale_active_, (int)debug_heap_pending, (int)maybe_active_, (int)rebuild_queued_);
     output.output("pipelineIdle=%d active_inserts=%d req_to_op=%zu bumps_inflight=%zu\n",
         (int)isPipelineIdle(), active_inserts, req_to_op.size(), bumps_inflight_.size());
     output.output("insert_queue=%zu request_queue=%zu",
@@ -263,7 +274,7 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
     // before this tick's dispatch gates and stage compares observe them.
     olcTick();
 
-    if (!insert_queue.empty() && canStartOperation(HEAP_OP_INSERT) && !rescale) {
+    if (!insert_queue.empty() && canStartOperation(HEAP_OP_INSERT) && !rescale_active_) {
         InsReq& op = insert_queue.front();
         active_inserts++;
         startOperation(HEAP_OP_INSERT, op.arg, op.activity);
@@ -310,7 +321,9 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                 // RMWs serialize via bumps_inflight_. Also hold off while a
                 // DEBUG_HEAP snapshot is in flight: a bump would mutate the
                 // bitmap/memory mid-snapshot and produce false errors.
-                if (!rescale && !debug_heap_pending
+                // Likewise while a rescale pass runs: an RMW racing the pass
+                // could be scaled twice (or not at all).
+                if (!rescale_active_ && !debug_heap_pending
                     && req_to_op.size() < (size_t)ACT_READS_MAX
                     && bumps_inflight_.find(pending.arg) == bumps_inflight_.end()) {
                     Var v = pending.arg;
@@ -332,7 +345,9 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                 break;
             }
             case HeapReqEvent::INSERT: {
-                if (!rescale && !debug_heap_pending
+                // rescale_active_: fetches wait for the pass so the reinsert
+                // wave reads post-rescale activities.
+                if (!rescale_active_ && !debug_heap_pending
                     && req_to_op.size() < (size_t)ACT_READS_MAX) {
                     Var v = pending.arg;
                     // Stall behind an outstanding bump of the same var so the
@@ -341,9 +356,11 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                     if (inheap_[v]) {
                         // Fresh copy already resident: drop with zero traffic.
                         stat_insert_skips->addData(1);
+                        if (dist_) dist_->onInsertSkip();
                     } else {
                         inheap_[v] = true;
                         inheap_count_++;
+                        if (dist_) dist_->onInsertDispatch(v);
                         getAct(v, false);
                     }
                     request_queue.pop_front();
@@ -357,7 +374,7 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                 // adds the off-chip tail conditions: tail line resident in
                 // the buffer, and the active sift's subtree cannot reach the
                 // slot the grab will take.
-                if (!rescale && active_inserts == 0 && req_to_op.empty()
+                if (!rescale_active_ && active_inserts == 0 && req_to_op.empty()
                     && insert_queue.empty() && canStartOperation(HEAP_OP_REPLACE)
                     && popGateOk()
                     && !(clean_target_armed_ && heap_size == hit_slot_)) {
@@ -373,7 +390,7 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                 // those INSERTs queue behind this request, and the next
                 // REMOVE_MAX queues behind them, so no partial-heap decision
                 // is possible.
-                if (!rescale && !debug_heap_pending && active_inserts == 0
+                if (!rescale_active_ && !debug_heap_pending && active_inserts == 0
                     && req_to_op.empty() && insert_queue.empty() && isPipelineIdle()
                     && olcIdle()) {
                     for (int level = 0; level < onchip_levels_; level++) {
@@ -401,6 +418,11 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                     clean_target_armed_ = false;
                     stat_rebuilds->addData(1);
                     sampleOccupancy();
+                    // An armed rescale executes inside the rebuild: the
+                    // wipe above emptied every heap-side activity copy (tree
+                    // SRAMs, tail lines, mint buffer, queued state), so the
+                    // pass only has to re-base the DRAM array.
+                    if (rescale_exp_ != 0) startRescalePass();
                     request_queue.pop_front();
                 }
                 break;
@@ -408,7 +430,7 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
             case HeapReqEvent::DEBUG_HEAP: {
                 // Wait for all previous requests and pipeline to finish
                 if (active_inserts == 0 && req_to_op.empty() && insert_queue.empty()
-                    && isPipelineIdle() && !rescale && olcIdle()) {
+                    && isPipelineIdle() && !rescale_active_ && olcIdle()) {
                     // Start debug heap check
                     debug_heap_pending = true;
                     debug_heap_errors = 0;
@@ -421,7 +443,7 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                         debug_heap_pending = false;
                     } else {
                         output.verbose(CALL_INFO, 6, 0, "DEBUG_HEAP: Reading memory for heap verification\n");
-                        rescale_pending_reads = 0;
+                        burst_pending_reads_ = 0;
                         readBurstAll(var_ptr_base_addr, (num_vars + 1) * sizeof(double));
                         if (heap_size >= firstOffchipSlot()) {
                             // Snapshot the occupied node region too. Dirty
@@ -448,7 +470,7 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                 break;
             }
         }
-    } else if (!rescale && !debug_heap_pending && insert_queue.empty()
+    } else if (!rescale_active_ && !debug_heap_pending && insert_queue.empty()
                && req_to_op.empty() && active_inserts == 0 && isPipelineIdle()) {
         // Idle-time cleanup: requests always take priority (this branch only
         // runs with an empty request queue and a fully drained heap).
@@ -463,28 +485,6 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
                 startOperation(HEAP_OP_REPLACE, 0, 0);
             }
         }
-    }
-
-    // Rescale drain point: every pre-trigger read has returned AND the
-    // pipeline has fully drained. In-flight percolations carry activities in
-    // stage registers that the sweep cannot scale; letting one settle after
-    // the sweep would write a pre-scale (1e100x) value into a scaled heap.
-    // Deadlock-free: rescale blocks all new dispatch (including queued
-    // insert_queue starts), so the pipeline empties in bounded time.
-    // olcIdle() extends the drain to sift/insert contexts and tail refills:
-    // a refill response landing after the sweep would install pre-scale acts.
-    if (rescale && !rescale_sweep_started_ && req_to_op.empty()
-        && active_inserts == 0 && isPipelineIdle() && olcIdle()) {
-        startRescaleSweep();
-    }
-
-    // Charge wall time for the on-chip level-SRAM sweep (values were scaled
-    // atomically at sweep start; nothing can observe them while rescale
-    // blocks dispatch, so only the duration is modeled). Overlaps the
-    // off-chip burst; rescale completes when both are done.
-    if (rescale && rescale_sweep_started_ && rescale_onchip_cycles_ > 0) {
-        rescale_onchip_cycles_--;
-        if (rescale_onchip_cycles_ == 0) maybeFinishRescale();
     }
 
     if (cleanWorkPending()) cleanTick();
@@ -503,7 +503,7 @@ bool PipelinedHeap::tick(SST::Cycle_t cycle) {
 
 bool PipelinedHeap::allIdle() const {
     return request_queue.empty() && insert_queue.empty() && req_to_op.empty()
-        && bumps_inflight_.empty() && !rescale && !debug_heap_pending
+        && bumps_inflight_.empty() && !rescale_active_ && !debug_heap_pending
         && active_inserts == 0 && isPipelineIdle() && olcIdle()
         && !idleWorkAvailable() && !cleanWorkPending();
 }
@@ -638,8 +638,11 @@ void PipelinedHeap::startOperation(HeapOpType op, Var arg, double activity) {
                 arg = getVar(last_level, last_node_idx);
                 activity = getActivity(last_level, last_node_idx);
             }
-            // removes the last node from the heap
+            // removes the last node from the heap; the -1.0 sentinel matches
+            // every other vacating site so an empty slot is recognizable by
+            // its activity alone (nothing downstream reads a vacated act).
             setVar(last_level, last_node_idx, var_Undef);
+            setActivity(last_level, last_node_idx, -1.0);
             output.verbose(CALL_INFO, 6, 0, "set last level %d, idx %d, addr %d, to var_Undef\n", last_level, last_node_idx, (1 << last_level) | last_node_idx);
             output.verbose(CALL_INFO, 6, 0, "Start REPLACE: heap_size=%lu, last var %d (%.2f)\n",
                 heap_size, arg, activity);
@@ -797,7 +800,7 @@ void PipelinedHeap::handleStageInsert(int level, int stage) {
                     curr_stage.ready = false;
                     break;
                 }
-                if (!olcCanAcceptInsert()) {
+                if (!stack_olc_ && !olcCanAcceptInsert()) {
                     output.verbose(CALL_INFO, 5, 0,
                         "INSERT[L%d-COMP]: HOLD var %d (OLC reject: sift %d ctxs %zu)\n",
                         level, curr_stage.var, sift_.active, insert_ctxs_.size());
@@ -819,6 +822,7 @@ void PipelinedHeap::handleStageInsert(int level, int stage) {
 
             // Compare and determine which value stays at this level
             // assume we can always insert at the destination level and idx
+            if (dist_) dist_->onCompare(level <= 3 ? 0 : 1, new_act, curr_act);
             if (new_act > curr_act || curr_stage.depth == level) {
                 // Current value has higher activity, it stays here
                 // The new value will continue down the pipeline
@@ -841,7 +845,9 @@ void PipelinedHeap::handleStageInsert(int level, int stage) {
                 if (offchip_next) {
                     // Cross the boundary: the descending value continues in an
                     // OLC insert context; the on-chip stage frees immediately.
-                    olcStartInsert(new_var, new_act, curr_stage.dest);
+                    // Stack mode appends it at its reserved slot instead.
+                    if (stack_olc_) stackAppend(new_var, new_act, curr_stage.dest);
+                    else olcStartInsert(new_var, new_act, curr_stage.dest);
                 } else {
                     stages[level+1][STAGE_COMPARE].var = new_var;
                     stages[level+1][STAGE_COMPARE].act = new_act;
@@ -906,6 +912,7 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
                 if (purge_suppress_) {
                     purge_suppress_ = false;
                     stat_purge_pops->addData(1);
+                    if (dist_) dist_->onPurgePop();
                     sampleOccupancy();
                     output.verbose(CALL_INFO, 6, 0, "PURGE[L0-READ]: discarding stale root %d\n", root);
                 } else {
@@ -914,10 +921,23 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
                     // the fresh copy the var is no longer (freshly) resident;
                     // if the bit was already clear, a stale copy got cleaned.
                     if (inheap_[root]) {
+                        if (dist_) {
+                            // heap_size==0 corner: the popped root is the
+                            // grabbed replacement itself (see the root read).
+                            // The runner-up margin is NOT read here: the
+                            // previous pop's level-1 write may still be in
+                            // flight one stage below. It is completed by
+                            // popRunnerUp() at this replace's own L0 compare,
+                            // where the child values are settled.
+                            double root_act = heap_size == 0 ? curr_stage.act
+                                                             : getActivity(0, 0);
+                            dist_->onLivePop(root_act);
+                        }
                         inheap_[root] = false;
                         inheap_count_--;
                     } else {
                         stat_stale_pops->addData(1);
+                        if (dist_) dist_->onStalePop();
                     }
                     sampleOccupancy();
                 }
@@ -1013,7 +1033,10 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
                 // slots reserved by inserts dispatched during this descent are
                 // unwritten garbage and must read as nonexistent.
                 uint64_t s = ((uint64_t)1 << level) | (uint64_t)node_idx;
-                if (2 * s <= replace_hs_bound_) {
+                // Stack mode: the off-chip region is a stack, comparisons stop
+                // at the boundary — the replacement settles here even when
+                // off-chip children exist (olcStartSift is unreachable).
+                if (!stack_olc_ && 2 * s <= replace_hs_bound_) {
                     // Hand the boundary compare to the OLC (it reads the
                     // K-children + grandchildren lines, writes this slot back
                     // into the boundary SRAM, and percolates below).
@@ -1068,6 +1091,13 @@ void PipelinedHeap::handleStageReplace(int level, int stage) {
             Var max_child = use_right ? right_child : left_child;
             double max_act = use_right ? right_act : left_act;
             int max_child_idx = use_right ? (lchild_idx + 1) : lchild_idx;
+
+            if (dist_) {
+                int cls = level <= 3 ? 0 : 1;
+                if (has_right) dist_->onCompare(cls, left_act, right_act);
+                dist_->onCompare(cls, max_act, repl_act);
+                if (level == 0) dist_->popRunnerUp(max_act, max_child != var_Undef);
+            }
 
             // Check if we need to swap
             if (max_act > repl_act && max_child != var_Undef) {
@@ -1170,95 +1200,81 @@ void PipelinedHeap::sendResp(int result) {
 }
 
 void PipelinedHeap::completeInsertFetch(Var v, double act) {
+    // Covers both the memory-response and store-queue-forward paths: every
+    // insert's activity arrives here (initHeap's untimed fill hooks itself).
+    if (dist_) dist_->onLiveValue(v, act);
     insert_queue.emplace_back(v, act);
 }
 
+double PipelinedHeap::quantAct(double a, int m) {
+    if (a == 0.0) return a;
+    int e;
+    double f = std::frexp(a, &e);  // a = f * 2^e, f in [0.5, 1)
+    return std::ldexp(std::nearbyint(std::ldexp(f, m + 1)), e - (m + 1));
+}
+
 void PipelinedHeap::completeBump(Var v, double act) {
-    if (act + *var_inc_ptr > 1e100) {
-        // Trigger rescale. Stash the bump unwritten: it completes after the
-        // sweep so the sweep cannot re-scale its result (the old code wrote
-        // first and the sweep double-scaled the triggering var).
-        output.verbose(CALL_INFO, 2, 0, "Rescaling variable activities (trigger var %d)\n", v);
-        rescale = true;
-        rescale_sweep_started_ = false;
-        rescale_stash_.push_back({v, act});
-        maybe_active_ = true;
-        return;  // v stays in bumps_inflight_ until the post-sweep completion
+    // No write-time rescale trigger: rescaling folds into armed
+    // REBUILDs (armRescale / startRescalePass), so bumps always complete and
+    // activities legitimately grow past 1e100 between rescales (ACT_BOUND).
+    double inc = *var_inc_ptr;
+    uint64_t code_bias = 0;
+    if (rescale_exp_ != 0) {
+        // Rescale armed, array pass not yet run: the solver re-based var_inc
+        // (and its code) at arm time, while this RMW's activity is still in
+        // the old basis. Complete the bump in the OLD basis — the arm shift
+        // is an exact power of two, so this reconstructs the pre-arm
+        // increment and ceiling bit-for-bit — and let the armed pass scale
+        // the written value exactly once, like every other pre-wipe write.
+        inc = std::ldexp(inc, rescale_exp_);
+        code_bias = (uint64_t)rescale_exp_ << act_mant_;
     }
-    setAct(v, act + *var_inc_ptr);
+    double new_act = act + inc;
+    if (act_mant_) {
+        // Quantize onto the 1+m-bit grid, then saturate at the proven a<32w
+        // ceiling (val(code + 5*2^m) = 32*var_inc exactly, itself on-grid).
+        new_act = std::min(quantAct(new_act, act_mant_),
+                           actMantVal(*inc_code_ptr + code_bias + (5ull << act_mant_),
+                                      act_mant_));
+    }
+    setAct(v, new_act);
     bumps_inflight_.erase(v);
     if (minted_pending_.erase(v)) mintPush(v, act);
 }
 
-void PipelinedHeap::startRescaleSweep() {
-    // All pre-trigger reads have drained; writes from bumps that completed
-    // during the drain are already in flight ahead of the sweep reads, so the
-    // sweep scales them too.
-    *var_inc_ptr *= 1e-100;
-    for (int level = 0; level < onchip_levels_; level++) {
-        for (int i = 0; i < (1 << level); i++) {
-            if (heap_activities[level][i] > 0)
-                heap_activities[level][i] *= 1e-100;
-        }
-    }
-    // Tail-buffer resident lines scale in place (dirty lines are the only
-    // copy; clean lines stay consistent because their memory copy gets the
-    // same scaling from the sweep below).
-    tailScaleActs();
-    // Parked refill snapshots hold pre-scale acts the DRAM sweep cannot
-    // reach; installing one post-sweep would resurrect unscaled values.
-    refill_done_.clear();
-    // Mint entries mirror corpse acts, which the sweep scales.
-    for (auto& m : mint_buffer_) m.second *= 1e-100;
+// rescale-rebuild fold-in: the solver arms an activity renormalization for
+// its next REBUILD (fireHeapRebuild calls this right before sending the
+// request, after re-basing var_inc / var_inc_code itself). Until the armed
+// pass runs, completeBump bridges the basis gap (see there).
+void PipelinedHeap::armRescale(int r_exp) {
+    sst_assert(r_exp > 0, CALL_INFO, -1, "armRescale with shift %d\n", r_exp);
+    sst_assert(rescale_exp_ == 0 && !rescale_active_, CALL_INFO, -1,
+               "armRescale while a rescale is already pending\n");
+    rescale_exp_ = r_exp;
+    output.verbose(CALL_INFO, 2, 0, "Rescale armed: x2^-%d at the next rebuild\n", r_exp);
+}
+
+// Run the armed rescale (renormalization) as a burst RMW over ONLY the DRAM
+// activity array, multiplying every entry by 2^-rescale_exp_ (exact shift;
+// underflow flushes to zero). Called from the REBUILD dispatch right after
+// the wipe: tree SRAMs, tail lines, the mint buffer and every queued insert
+// were just emptied, and the REBUILD gate drained all bump RMWs — so the old
+// standalone sweep's coverage of those copies is deleted, not moved. Shares
+// the debug-snapshot burst machinery (readBurstAll window + chunk RMWs in
+// handleMem); rescale_active_ blocks all dispatch until the pass drains, so
+// the queued reinsert wave fetches post-rescale values. The heap never
+// touches the solver's var_inc/var_inc_code here — the solver re-based them
+// at arm time.
+void PipelinedHeap::startRescalePass() {
+    rescale_factor_ = std::ldexp(1.0, -rescale_exp_);
+    output.verbose(CALL_INFO, 2, 0, "Rescale pass started (x2^-%d, var_inc now %g)\n",
+                   rescale_exp_, *var_inc_ptr);
+    rescale_exp_ = 0;
+    rescale_active_ = true;
+    burst_pending_reads_ = 0;
     stat_rescales->addData(1);
-    // Queued-but-unstarted inserts carry pre-scale activities.
-    for (auto& e : insert_queue) e.activity *= 1e-100;
-
-    // On-chip sweep wall time: per-level SRAMs scale their occupied entries
-    // in parallel at 1 entry/cycle, so the duration is the largest occupied
-    // level (the partial last level or the full level above it).
-    rescale_onchip_cycles_ = 0;
-    for (int level = 0; level < onchip_levels_; level++) {
-        size_t level_base = ((size_t)1 << level) - 1;   // slots before this level
-        if (heap_size <= level_base) break;
-        size_t occupied = std::min((size_t)1 << level, heap_size - level_base);
-        rescale_onchip_cycles_ = std::max(rescale_onchip_cycles_, occupied);
-    }
-
-    rescale_sweep_started_ = true;
-    rescale_offchip_done_ = false;
-    rescale_pending_reads = 0;
+    if (dist_) dist_->onRescale(rescale_factor_);
     readBurstAll(var_ptr_base_addr, (num_vars + 1) * sizeof(double));
-    if (heap_size >= firstOffchipSlot()) {
-        // RMW the occupied node region too (act fields only, handled by the
-        // node-region branch in handleMem).
-        readBurstAll(nodes_base_, (heap_size - firstOffchipSlot() + 1) * 16);
-    }
-    output.verbose(CALL_INFO, 2, 0, "Rescale sweep started, var_inc now %g (on-chip %zu cycles)\n",
-                   *var_inc_ptr, rescale_onchip_cycles_);
-}
-
-void PipelinedHeap::maybeFinishRescale() {
-    if (rescale_sweep_started_ && rescale_offchip_done_ && rescale_onchip_cycles_ == 0)
-        finishRescale();
-}
-
-void PipelinedHeap::finishRescale() {
-    // All sweep writes are in flight; complete the stashed trigger bump(s)
-    // with pre-scale reads scaled manually (their memory entries were swept,
-    // and these writes are issued after the sweep writes, so they land last).
-    for (auto& s : rescale_stash_) {
-        double act = s.act * 1e-100 + *var_inc_ptr;
-        setAct(s.var, act);
-        bumps_inflight_.erase(s.var);
-        // The corpse in the heap was swept to act*1e-100; record that value.
-        if (minted_pending_.erase(s.var)) mintPush(s.var, s.act * 1e-100);
-    }
-    rescale_stash_.clear();
-    rescale = false;
-    rescale_sweep_started_ = false;
-    rescale_offchip_done_ = false;
-    output.verbose(CALL_INFO, 2, 0, "Rescale complete\n");
 }
 
 void PipelinedHeap::handleMem(SST::Interfaces::StandardMem::Request* req) {
@@ -1290,53 +1306,43 @@ void PipelinedHeap::handleMem(SST::Interfaces::StandardMem::Request* req) {
             if (pending.type == PendingMemOpType::BUMP_RMW) completeBump(pending.var, act);
             else completeInsertFetch(pending.var, act);
         } else if (pending.type == PendingMemOpType::RESCALE) {
+            // Rescale pass chunk: scale and write back. The pass bursts ONLY
+            // the activity array — the REBUILD wipe emptied every node copy,
+            // so the node region is never read (or written) here.
+            sst_assert(nodes_base_ == 0 || read_resp->pAddr < nodes_base_,
+                       CALL_INFO, -1, "Rescale chunk in the node region (0x%lx)",
+                       read_resp->pAddr);
             const size_t chunk_size = pending.size;
+            const size_t entry_size = sizeof(double);
+            sst_assert(chunk_size % entry_size == 0, CALL_INFO, -1,
+                       "Rescale chunk size %zu is not aligned to activity size %zu",
+                       chunk_size, entry_size);
             std::vector<uint8_t> write_data(read_resp->data.begin(),
                                             read_resp->data.begin() + chunk_size);
-            if (nodes_base_ != 0 && read_resp->pAddr >= nodes_base_) {
-                // Node-region chunk ({var, pad, act} x N): scale only the act
-                // fields at offset 8 of each 16 B node.
-                sst_assert(chunk_size % 16 == 0 && read_resp->pAddr % 16 == 0,
-                           CALL_INFO, -1, "Rescale node chunk misaligned (%zu @ 0x%lx)",
-                           chunk_size, read_resp->pAddr);
-                for (size_t off = 8; off + 8 <= chunk_size; off += 16) {
-                    double a;
-                    memcpy(&a, write_data.data() + off, 8);
-                    if (a > 0) a *= 1e-100;
-                    memcpy(write_data.data() + off, &a, 8);
-                }
-            } else {
-                const size_t entry_size = sizeof(double);
-                sst_assert(chunk_size % entry_size == 0, CALL_INFO, -1,
-                           "Rescale chunk size %zu is not aligned to activity size %zu",
-                           chunk_size, entry_size);
-                double* entries = reinterpret_cast<double*>(write_data.data());
-                for (size_t i = 0; i < chunk_size / entry_size; i++) {
-                    entries[i] *= 1e-100;
-                }
+            double* entries = reinterpret_cast<double*>(write_data.data());
+            for (size_t i = 0; i < chunk_size / entry_size; i++) {
+                // Exact exponent shift; underflow flushes to zero.
+                entries[i] *= rescale_factor_;
             }
 
             uint64_t write_addr = read_resp->pAddr;
             if (WRITE_BUFFER) {
-                // Sweep writes enter the store queue too: a later read must
-                // forward the scaled value, never an older pre-sweep entry.
+                // Pass writes enter the store queue too: a later read must
+                // forward the scaled value, never an older pre-pass entry.
                 store_queue.push_back(StoreQueueEntry(write_addr, chunk_size, write_data));
             }
             if (tracer_) tracer_->emitMem(true, write_addr, (uint32_t)chunk_size);
-            // Node-region sweep write-backs must enter the same in-flight
-            // count their WriteResps decrement, or sweep responses eat the
-            // counts of real tail/percolation writes and the OLC budget
-            // transiently over-admits.
-            if (nodes_base_ != 0 && write_addr >= nodes_base_) node_writes_inflight_++;
             memory->send(new SST::Interfaces::StandardMem::Write(write_addr, chunk_size, write_data));
 
             burst_inflight_--;
             issueBurstReads();
-            if (rescale_pending_reads > 0) {
-                rescale_pending_reads--;
-                if (rescale_pending_reads == 0) {
-                    rescale_offchip_done_ = true;
-                    maybeFinishRescale();
+            if (burst_pending_reads_ > 0) {
+                burst_pending_reads_--;
+                if (burst_pending_reads_ == 0) {
+                    // Pass complete: dispatch unblocks and the queued
+                    // reinsert wave fetches post-rescale activities.
+                    rescale_active_ = false;
+                    output.verbose(CALL_INFO, 2, 0, "Rescale pass complete\n");
                 }
             }
         } else if (pending.type == PendingMemOpType::DEBUG) {
@@ -1371,9 +1377,9 @@ void PipelinedHeap::handleMem(SST::Interfaces::StandardMem::Request* req) {
             // Check if we're done with all reads for debug
             burst_inflight_--;
             issueBurstReads();
-            if (rescale_pending_reads > 0) {
-                rescale_pending_reads--;
-                if (rescale_pending_reads == 0) {
+            if (burst_pending_reads_ > 0) {
+                burst_pending_reads_--;
+                if (burst_pending_reads_ == 0) {
                     verifyDebugHeap();  // All data collected, now perform the verification
                 }
             }
@@ -1415,9 +1421,14 @@ bool PipelinedHeap::isPipelineIdle() const {
 }
 
 void PipelinedHeap::initHeap(uint64_t random_seed) {
+    // act_mant needs the solver's code counter for completeBump's ceiling
+    // clamp (read-only; the standalone harness never shares one).
+    sst_assert(act_mant_ == 0 || inc_code_ptr != nullptr, CALL_INFO, -1,
+        "act_mant requires the solver's var_inc code share (setVarIncCodePtr)\n");
     bumps_inflight_.clear();
     inheap_.assign(num_vars + 1, false);
     inheap_count_ = 0;
+    if (dist_) dist_->onInit(num_vars, var_inc_ptr);
 
     // Partition the heap-owned region [var_act_base, heap_region_end):
     // [acts | nodes]. Total capacity = on-chip slots + node-region slots,
@@ -1463,6 +1474,7 @@ void PipelinedHeap::initHeap(uint64_t random_seed) {
             heap_vars[level][i] = decision_vars[added];
             heap_activities[level][i] = 0.0;
             inheap_[decision_vars[added]] = true;
+            if (dist_) dist_->onLiveValue(decision_vars[added], 0.0);
             added++;
             if (added >= heap_size) break;
         }
@@ -1481,6 +1493,10 @@ void PipelinedHeap::initHeap(uint64_t random_seed) {
             packNode(n, nb);
             memcpy(nbuf.data() + i * 16, nb.data(), 16);
             inheap_[n.var] = true;
+            if (dist_) {
+                dist_->onLiveValue(n.var, 0.0);
+                dist_->onNodeWrite(slot - firstOffchipSlot(), n.var, 0.0);
+            }
             added++;
         }
         memory->sendUntimedData(new SST::Interfaces::StandardMem::Write(
@@ -1490,8 +1506,8 @@ void PipelinedHeap::initHeap(uint64_t random_seed) {
         // Prefill the sliding window over the top W lines (clean: memory has
         // identical data from the untimed write above).
         uint64_t tail_line = lineOf(heap_size);
-        uint64_t lo_line = tail_line >= (uint64_t)(TAIL_WINDOW_LINES - 1)
-                         ? tail_line - (TAIL_WINDOW_LINES - 1) : 0;
+        uint64_t lo_line = tail_line >= (uint64_t)(tail_lines_ - 1)
+                         ? tail_line - (tail_lines_ - 1) : 0;
         for (uint64_t line = lo_line; line <= tail_line; line++) {
             TailLine tl(line);
             for (int i = 0; i < 4; i++) {
@@ -1537,7 +1553,10 @@ Var PipelinedHeap::getVar(int level, int idx) {
 
 void PipelinedHeap::setActivity(int level, int idx, double value) {
     assert(idx >= 0 && idx < heap_activities[level].size());
-    sst_assert(value <= 1e100, CALL_INFO, -1, "activity out of bound\n");
+    // Bound: with rescales folded into rebuilds there is no write-time
+    // trigger, so activities run up to the rescale ceiling (see ACT_BOUND);
+    // every other path copies written values.
+    sst_assert(value <= ACT_BOUND, CALL_INFO, -1, "activity out of bound\n");
     heap_activities[level][idx] = value;
 }
 
@@ -1548,7 +1567,7 @@ void PipelinedHeap::setVar(int level, int idx, Var value) {
 
 void PipelinedHeap::setAct(Var v, double act) {
     // update the authoritative off-chip activity
-    sst_assert(act <= 1e100, CALL_INFO, -1, "activity out of bound\n");
+    sst_assert(act <= ACT_BOUND, CALL_INFO, -1, "activity out of bound\n");
     size_t size = sizeof(double);
     uint64_t addr = actAddr(v);
     std::vector<uint8_t> data(size);
@@ -1569,7 +1588,7 @@ void PipelinedHeap::getAct(Var v, bool bump) {
     uint64_t addr = actAddr(v);
     if (WRITE_BUFFER) {
         // forward from store queue if possible (entry may be a full line
-        // from the rescale sweep, so honor the offset within it)
+        // from the rescale pass, so honor the offset within it)
         int idx = findStoreQueueEntry(addr, size);
         if (idx >= 0) {
             double act;
@@ -1601,7 +1620,7 @@ int PipelinedHeap::findStoreQueueEntry(uint64_t addr, size_t size) {
 }
 
 void PipelinedHeap::readBurstAll(uint64_t start_addr, size_t total_size) {
-    // Additive: callers reset rescale_pending_reads, then may burst several
+    // Additive: callers reset burst_pending_reads_, then may burst several
     // regions (acts + nodes) under one completion count. Chunks stream
     // through a fixed window (issueBurstReads) rather than all at once: with
     // the node region a sweep can span millions of lines, and an unbounded
@@ -1615,7 +1634,7 @@ void PipelinedHeap::readBurstAll(uint64_t start_addr, size_t total_size) {
         size_t chunk_size = std::min(bytes_in_line, remaining);
 
         burst_queue_.emplace_back(current_addr, chunk_size);
-        rescale_pending_reads++;
+        burst_pending_reads_++;
         offset += chunk_size;
     }
     issueBurstReads();
@@ -1705,7 +1724,11 @@ void PipelinedHeap::verifyDebugHeap() {
         auto it = max_stored.find(n.var);
         if (it == max_stored.end() || n.act > it->second) max_stored[n.var] = n.act;
 
-        // Heap property across (and below) the boundary
+        // Heap property across (and below) the boundary. Stack mode: the
+        // off-chip region is a stack, parent/child relations are undefined
+        // there (occupancy, bitmap, freshness, soundness and the profiler
+        // cross-checks above/below still apply).
+        if (stack_olc_) continue;
         uint64_t pslot = slot >> 1;
         double parent_act;
         if (pslot < firstOffchipSlot()) {
@@ -1782,6 +1805,41 @@ void PipelinedHeap::verifyDebugHeap() {
                 && copies.find(v) == copies.end()) {
                 output.verbose(CALL_INFO, 0, 0,
                     "DEBUG_HEAP ERROR: unassigned decision var %d has no copy in heap\n", v);
+                debug_heap_errors++;
+            }
+        }
+    }
+
+    // Profiler cross-checks (only when --heap-dist is on): the shadow node
+    // mirror must equal the burst-read node truth bit-for-bit, and every
+    // fresh resident var must have its live activity recorded and equal to
+    // the authoritative memory activity (freshness lemma extension — both
+    // sides saw the identical writes/sweeps, so exact equality is required).
+    if (dist_) {
+        for (uint64_t slot = firstOffchipSlot(); slot <= heap_size; slot++) {
+            OlcNode truth;
+            if (!debugNodeAt(slot, truth)) continue;  // already reported above
+            Var sv = var_Undef;
+            double sact = -1.0;
+            if (!dist_->shadowAt(slot - firstOffchipSlot(), sv, sact)
+                || sv != truth.var || sact != truth.act) {
+                output.verbose(CALL_INFO, 0, 0,
+                    "DEBUG_HEAP ERROR: shadow node at slot %lu is var %d (%.17g), "
+                    "truth var %d (%.17g)\n", slot, sv, sact, truth.var, truth.act);
+                debug_heap_errors++;
+            }
+        }
+        for (Var v = 1; v <= (Var)num_vars; v++) {
+            if (!inheap_[v]) continue;
+            double mem_act = debug_heap_acts.count(v) ? debug_heap_acts[v] : -1.0;
+            if (!dist_->liveValOk(v)) {
+                output.verbose(CALL_INFO, 0, 0,
+                    "DEBUG_HEAP ERROR: inheap[%d]=1 but no live activity recorded\n", v);
+                debug_heap_errors++;
+            } else if (dist_->liveAct(v) != mem_act) {
+                output.verbose(CALL_INFO, 0, 0,
+                    "DEBUG_HEAP ERROR: var %d live act %.17g != mem act %.17g\n",
+                    v, dist_->liveAct(v), mem_act);
                 debug_heap_errors++;
             }
         }
@@ -1924,7 +1982,7 @@ void PipelinedHeap::tailComposeTo(uint64_t slot) {
 }
 
 void PipelinedHeap::tailEvictBottomIfOver() {
-    while ((int)tail_win_.size() > TAIL_WINDOW_LINES) {
+    while ((int)tail_win_.size() > tail_lines_) {
         TailLine& bot = tail_win_.front();
         if (bot.dirty) {
             // Bottom lines are >= W lines below the tail: fully composed.
@@ -1982,7 +2040,7 @@ OlcNode PipelinedHeap::tailGrab(uint64_t slot) {
 }
 
 void PipelinedHeap::tailRefillTick() {
-    if (rescale || debug_heap_pending) return;
+    if (rescale_active_ || debug_heap_pending) return;
     // Quiesce for olcIdle()-gated requests waiting at the queue head
     // (REBUILD / DEBUG_HEAP), mirroring the rescale/debug guards above: they
     // wipe or snapshot the whole window, so refilling it is wasted traffic --
@@ -2090,13 +2148,6 @@ void PipelinedHeap::installRefills() {
     }
 }
 
-void PipelinedHeap::tailScaleActs() {
-    for (TailLine& tl : tail_win_)
-        for (int i = 0; i < 4; i++)
-            if (tl.slot_valid[i] && tl.node[i].act > 0)
-                tl.node[i].act *= 1e-100;
-}
-
 void PipelinedHeap::tailWipe() {
     tail_win_.clear();
     refill_done_.clear();
@@ -2184,7 +2235,7 @@ bool PipelinedHeap::treeIdle() const {
     // (empty stages => no active inserts) only holds once OLC insert
     // contexts are excluded, same as every other call site.
     if (active_inserts != 0 || !insert_queue.empty()) return false;
-    if (rescale || debug_heap_pending) return false;
+    if (rescale_active_ || debug_heap_pending) return false;
     if (!isPipelineIdle() || !olcIdle()) return false;
     for (const auto& kv : req_to_op)
         if (kv.second.type == PendingMemOpType::INSERT_FETCH) return false;
@@ -2331,7 +2382,10 @@ void PipelinedHeap::patchParkedRefill(uint64_t line, int slot_off, const uint8_t
 }
 
 void PipelinedHeap::nodeWrite(uint64_t slot, Var v, double act) {
-    sst_assert(act <= 1e100, CALL_INFO, -1, "node activity out of bound\n");
+    sst_assert(act <= ACT_BOUND, CALL_INFO, -1, "node activity out of bound\n");
+    // Every logical node-content write funnels through here (tail-buffer
+    // absorbed or not), so the shadow mirror is exact.
+    if (dist_) dist_->onNodeWrite(slot - firstOffchipSlot(), v, act);
     TailLine* tl = tailLineFor(slot);
     if (tl) {
         int off = (slot - lineBaseSlot(tl->line)) & 3;
@@ -2357,6 +2411,7 @@ void PipelinedHeap::nodeWrite(uint64_t slot, Var v, double act) {
 void PipelinedHeap::olcStartInsert(Var v, double act, uint64_t dest) {
     sst_assert(dest >= firstOffchipSlot(), CALL_INFO, -1,
         "OLC insert handoff for on-chip dest %lu\n", dest);
+    if (dist_) dist_->onBoundaryInsert(act);
     // The window must cover the new dest before its write can land there.
     tailComposeTo(dest);
 
@@ -2393,6 +2448,26 @@ void PipelinedHeap::olcStartInsert(Var v, double act, uint64_t dest) {
     stat_olc_boundary_crossings->addData(1);
     stat_olc_insert_ctx_sample->addData(insert_ctxs_.size());
     maybe_active_ = true;
+}
+
+// Stack mode: the boundary-crossing insert lands at its reserved slot in one
+// step, no path reads. Never blocks: tailComposeTo either covers the dest or
+// (empty window, unaligned dest) leaves it to nodeWrite's below-window
+// write-through, exactly like the OLC dest write. The write IS the
+// reservation's retirement — mirroring the ctx retire in olcProcessInserts —
+// and pops/trims stay off unwritten slots through the same active_inserts==0
+// dispatch gates as today.
+void PipelinedHeap::stackAppend(Var v, double act, uint64_t dest) {
+    sst_assert(dest >= firstOffchipSlot(), CALL_INFO, -1,
+        "Stack append for on-chip dest %lu\n", dest);
+    if (dist_) dist_->onBoundaryInsert(act);
+    tailComposeTo(dest);
+    nodeWrite(dest, v, act);
+    stat_olc_boundary_crossings->addData(1);
+    active_inserts--;
+    sst_assert(active_inserts >= 0, CALL_INFO, -1, "active_inserts became negative\n");
+    output.verbose(CALL_INFO, 6, 0, "STACK-APPEND: var %d (%.2f) landed at slot %lu\n",
+                   v, act, dest);
 }
 
 void PipelinedHeap::olcIssueInsertRead(OlcInsertCtx& ctx, int level) {
@@ -2456,6 +2531,7 @@ void PipelinedHeap::olcProcessInserts() {
 
         sst_assert(pr.data.var != var_Undef, CALL_INFO, -1,
             "OLC insert read unwritten path slot %lu (level %d)\n", pr.slot, l);
+        if (dist_) dist_->onCompare(2, c.act, pr.data.act);
         if (c.act > pr.data.act) {
             // Carried value wins: it settles here, the resident descends.
             nodeWrite(pr.slot, c.var, c.act);
@@ -2471,6 +2547,7 @@ void PipelinedHeap::olcProcessInserts() {
 // ---------------- sift ----------------
 
 void PipelinedHeap::olcStartSift(uint64_t boundary_slot, Var v, double act) {
+    if (dist_) dist_->onBoundarySift(act);
     sift_.active = true;
     sift_.slot = boundary_slot;
     sift_.var = v;
@@ -2592,6 +2669,11 @@ void PipelinedHeap::olcCompleteSiftStep() {
     OlcNode maxc = use_r ? r : l;
     uint64_t cslot = use_r ? c0 + 1 : c0;
 
+    if (dist_) {
+        if (has_r) dist_->onCompare(2, l.act, r.act);
+        dist_->onCompare(2, maxc.act, sift_.act);
+    }
+
     if (!(maxc.act > sift_.act && maxc.var != var_Undef)) {
         // Carried value dominates both children: settle at s.
         siftWriteSlot(s, sift_.var, sift_.act);
@@ -2614,6 +2696,11 @@ void PipelinedHeap::olcCompleteSiftStep() {
     bool guse_r = ghas_r && gr.act > gl.act;
     OlcNode gmax = guse_r ? gr : gl;
     uint64_t gslot = guse_r ? gc0 + 1 : gc0;
+
+    if (dist_) {
+        if (ghas_r) dist_->onCompare(2, gl.act, gr.act);
+        dist_->onCompare(2, gmax.act, sift_.act);
+    }
 
     if (!(gmax.act > sift_.act && gmax.var != var_Undef)) {
         // Carried dominates the grandchildren pair: settle at cslot.
@@ -2703,4 +2790,37 @@ void PipelinedHeap::olcHandleMem(SST::Interfaces::StandardMem::ReadResp* resp,
             break;
         }
     }
+}
+
+// ---------------- activity distribution snapshot ----------------
+
+void PipelinedHeap::distSnapshot(uint64_t conflicts, uint64_t decisions, uint64_t cycle) {
+    if (!dist_) return;
+    dist_->beginSnapshot(conflicts, decisions, cycle, heap_size, liveCount(),
+                         staleCount());
+    // Live series: the current activity of every freshly resident var.
+    for (Var v = 1; v <= (Var)num_vars; v++)
+        if (inheap_[v]) dist_->snapLive(v);
+    // Stored series: what hardware would compare — on-chip level SRAMs, then
+    // the off-chip shadow mirror, both truncated at heap_size. In-flight
+    // pipeline/OLC transients make totals approximate (reconciled offline
+    // against the heap_size/live/stale header fields).
+    for (int level = 0; level < onchip_levels_; level++) {
+        size_t level_base = ((size_t)1 << level) - 1;
+        if (heap_size <= level_base) break;
+        size_t occupied = std::min((size_t)1 << level, heap_size - level_base);
+        for (size_t i = 0; i < occupied; i++) {
+            Var v = heap_vars[level][i];
+            if (v == var_Undef) continue;
+            dist_->snapStored(level, v, heap_activities[level][i], inheap_[v]);
+        }
+    }
+    for (uint64_t slot = firstOffchipSlot(); slot <= heap_size; slot++) {
+        Var v = var_Undef;
+        double act = -1.0;
+        if (!dist_->shadowAt(slot - firstOffchipSlot(), v, act) || v == var_Undef)
+            continue;
+        dist_->snapStored(slotLevel(slot), v, act, inheap_[v]);
+    }
+    dist_->endSnapshot();
 }
